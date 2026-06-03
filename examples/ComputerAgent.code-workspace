@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../ComputerAgent"
+		},
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../qa-worker-demo"
+		},
+		{
+			"path": "../../iac"
+		}
+	]
+}
