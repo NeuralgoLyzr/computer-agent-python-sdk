@@ -151,6 +151,18 @@ def _auto_sinks() -> list[TelemetrySink]:
             logger.debug(
                 "AgentRegistrySink not attached (computer-agent-py[agentos] not installed)"
             )
+        # MongoMessageSink — per-message archive that pairs with
+        # AgentRegistrySink to give the AgentOS Chat tab full transcript
+        # coverage. Same extra, same env var, so wiring it here is the
+        # cheapest fix for "I can't see the agent reply in Mongo".
+        try:
+            from .sinks.message_archive import MongoMessageSink  # noqa: WPS433
+
+            sinks.append(MongoMessageSink(mongo_url=mongo_url))
+        except ImportError:
+            logger.debug(
+                "MongoMessageSink not attached (computer-agent-py[agentos] not installed)"
+            )
 
     return sinks
 

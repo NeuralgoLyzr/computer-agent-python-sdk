@@ -1,21 +1,32 @@
-"""``computeragent`` — drop-in replacement for ``claude_agent_sdk``.
+"""``computeragent`` — drop-in replacement for ``claude_agent_sdk``
+PLUS a harness-based agent stack (added in 0.2.0).
 
-Every public symbol from ``claude_agent_sdk`` is re-exported here with identity
-preserved (``computeragent.ResultMessage is claude_agent_sdk.ResultMessage``).
-``query`` and ``ClaudeSDKClient`` are wrapped so that every message flowing
-through the upstream stream also flows through a telemetry pipeline with
-configurable PII-redaction / guardrail middleware and pluggable sinks
+Every public symbol from ``claude_agent_sdk`` is re-exported here with
+identity preserved (``computeragent.ResultMessage is
+claude_agent_sdk.ResultMessage``). ``query`` and ``ClaudeSDKClient`` are
+wrapped so each message flows through a telemetry pipeline with
+configurable PII redaction / guardrails and pluggable sinks
 (OpenTelemetry, AgentOS registry).
 
-Drop-in usage::
+Two modes:
 
-    # before
-    from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import ResultMessage
+1. **Drop-in proxy** (0.1.x, unchanged) — single-import swap::
 
-    # after — every other line stays identical
-    from computeragent import ClaudeAgentOptions, query
-    from computeragent.types import ResultMessage
+       # before
+       from claude_agent_sdk import ClaudeAgentOptions, query
+       # after
+       from computeragent import ClaudeAgentOptions, query
+
+2. **Harness** (new in 0.2.0) — mirror of the TypeScript ComputerAgent
+   stack with four orthogonal swappable axes (engine / substrate /
+   session-store / identity-loader)::
+
+       from computeragent import ComputerAgent, run_task
+
+       async with ComputerAgent(source=Path.cwd()) as agent:
+           result = await agent.chat("List the files in this directory")
+
+The two modes co-exist. 0.1.x callers see no behaviour change.
 """
 
 from __future__ import annotations
@@ -31,7 +42,7 @@ _upstream_all = [n for n in getattr(_cas, "__all__", []) if n != "__version__"]
 for _name in _upstream_all:
     globals()[_name] = getattr(_cas, _name)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 upstream_version = getattr(_cas, "__version__", "unknown")
 
 # Override the two entry points with the proxied versions. Same signatures,
@@ -39,6 +50,25 @@ upstream_version = getattr(_cas, "__version__", "unknown")
 # telemetry pipeline.
 from ._proxy.client import ClaudeSDKClient  # noqa: E402
 from ._proxy.query import query  # noqa: E402
+
+# Harness surface (new in 0.2.0). Importing pulls the registries which
+# register the built-in engines / substrate / session store / identity
+# loader as a side effect — that's intentional so string-label
+# resolution works without an explicit ``register_*`` call.
+from .harness import (  # noqa: E402
+    ChatHandle,
+    ChatInput,
+    ChatResult,
+    ComputerAgent,
+    HarnessError,
+    HarnessProtocolError,
+    UnknownEngineError,
+    UnknownIdentityLoaderError,
+    UnknownSessionStoreError,
+    UnknownSubstrateError,
+    UsageRollup,
+    run_task,
+)
 
 # Policy surface (v0.2 — tool-use authorization). Engines themselves
 # (OpaPolicyEngine, CedarPolicyEngine) stay in ``computeragent.policy`` so
@@ -52,6 +82,22 @@ from .policy import (  # noqa: E402
     PolicyResource,
     PolicyResult,
     PolicyToolAuthorizer,
+)
+from .protocol_types import (  # noqa: E402
+    AgentManifest,
+    EngineCapabilities,
+    EngineContext,
+    EngineDriver,
+    EngineEvent,
+    IdentityLoader,
+    IdentitySource,
+    PermissionDecision,
+    PermissionRequest,
+    PolicyDecider,
+    SessionStore,
+    SessionStoreEntry,
+    Substrate,
+    SubstrateHandle,
 )
 
 # Telemetry surface (additions beyond the drop-in mirror).
@@ -87,4 +133,31 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "configure",
     "get_pipeline",
     "shutdown",
+    # harness layer (0.2.0)
+    "AgentManifest",
+    "ChatHandle",
+    "ChatInput",
+    "ChatResult",
+    "ComputerAgent",
+    "EngineCapabilities",
+    "EngineContext",
+    "EngineDriver",
+    "EngineEvent",
+    "HarnessError",
+    "HarnessProtocolError",
+    "IdentityLoader",
+    "IdentitySource",
+    "PermissionDecision",
+    "PermissionRequest",
+    "PolicyDecider",
+    "SessionStore",
+    "SessionStoreEntry",
+    "Substrate",
+    "SubstrateHandle",
+    "UnknownEngineError",
+    "UnknownIdentityLoaderError",
+    "UnknownSessionStoreError",
+    "UnknownSubstrateError",
+    "UsageRollup",
+    "run_task",
 ]
