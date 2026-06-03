@@ -1,0 +1,253 @@
+# Changelog
+
+All notable changes to `computer-agent-py` are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.3]
+
+`capture_content` now actually captures content. Prior versions accepted
+the configuration value and stored it in the module global, but the
+``OtelSink`` never read it — no GenAI prompt / completion / tool-content
+attributes ever landed on spans.
+
+### Fixed
+
+- ``OtelSink`` now reads ``capture_content`` + ``capture_content_mode``
+  (plus the ``COMPUTERAGENT_CAPTURE_CONTENT`` / ``COMPUTERAGENT_CAPTURE_CONTENT_MODE``
+  env vars) and emits content per the GenAI semconv on each span:
+  - **invoke_agent**: system prompt + initial user prompt (``gen_ai.prompt.0.*``
+    + ``gen_ai.prompt.1.*``) and final answer (``gen_ai.completion.final.*``).
+  - **chat**: assistant message text (``gen_ai.completion.0.*``).
+  - **execute_tool**: tool arguments (``gen_ai.tool.call.arguments.*``) and
+    tool result (``gen_ai.tool.call.result.*``).
+- All content is truncated to ``COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH`` chars
+  (default 8192) so a runaway prompt doesn't blow past OTLP per-attribute
+  limits. Middleware (``PiiRedactor`` / ``GuardrailFilter``) still runs
+  first — what lands on spans is the redacted projection, never raw.
+- ``capture_content_mode``:
+  - ``"attributes"`` — content on span attributes (NRQL-queryable).
+  - ``"events"`` — ``span.add_event`` per message (preserves history).
+  - ``"both"`` — both shapes, for backends migrating from one to the
+    other.
+
+### Backwards compatibility
+
+Fully additive. Callers that don't enable ``capture_content`` see the
+same span shape they had in 0.1.2 (metadata-only). Callers that already
+set the env var were getting nothing on spans before this release —
+they'll now start seeing content where they expected it.
+
+## [0.1.2]
+
+Agents can now carry a human-readable **description** alongside the name.
+The description flows from `options.agent_description` (opt-in via
+setattr, mirrors the existing `options.agent_name` Strategy 1 path)
+through every event in the telemetry pipeline and lands on:
+
+* `agent_registry.description` (top-level field) and
+  `agent_registry.source.manifest.description` (inline manifest) — so
+  AgentOS SPAs that surface the field pick it up automatically.
+* The `invoke_agent` OTel span as `gen_ai.agent.description` (a custom
+  attribute paired with the existing `gen_ai.agent.name`).
+* `agent.yaml` inside the inline IdentitySource — harness clones get the
+  description in their workdir, matching the way hosted (git-sourced)
+  agents already carry it.
+
+### Added
+
+- `TelemetryEvent.agent_description: str | None` field. Propagated by
+  the proxy on every event, not just `session_started`.
+- `query.py:_derive_agent_description(options)` helper, mirroring
+  `_derive_agent_name`. Returns `None` when no description is set —
+  unlike the name, there is no implicit fallback to `system_prompt`
+  because a description is a human label.
+- `OtelSink` emits the new `gen_ai.agent.description` span attribute
+  on `invoke_agent` when the description is non-empty.
+- `AgentRegistrySink._upsert_registry` writes the `description` field
+  on the registry doc and passes it down into `_inline_source_for(...)`
+  → `_build_agent_yaml(...)`.
+
+### Backwards compatibility
+
+Fully additive. Callers that don't set `options.agent_description`
+behave exactly as they did in 0.1.1: the `description` field is absent
+from the registry doc / manifest / span. The `_inline_source_for` and
+`_build_agent_yaml` helpers add an optional `description=""` parameter
+with the empty string as default — no caller has to change a thing.
+
+## [0.1.1]
+
+OTel sink now reaches real OTLP backends. Four interlocking bugs in the
+0.1.0 sink combined to make `OTEL_EXPORTER_OTLP_ENDPOINT` look configured
+while quietly exporting nothing useful — verified against New Relic, fixed
+end-to-end.
+
+### Fixed
+
+- `OtelSink()` constructed inside `configure(sinks=[OtelSink(), ...])`
+  now falls through to `OTEL_EXPORTER_OTLP_ENDPOINT` /
+  `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_SERVICE_NAME` when the module config
+  hasn't been populated yet. The previous order (kwarg → `_CONFIG` only)
+  always missed env vars because `_CONFIG` is empty until `configure()`
+  finishes, but `configure()` builds its sinks list — running
+  `OtelSink.__init__` — first. Net effect was a silent fallback to the
+  console exporter.
+- `endpoint=` arguments that point at a base URL (e.g. New Relic's
+  `https://otlp.nr-data.net`) now have the per-signal path appended
+  automatically. The OTel HTTP exporters treat a non-None constructor
+  endpoint as the full URL with no path inference, so passing a base URL
+  produced 404s. The new `_signal_url(...)` helper appends `/v1/traces` or
+  `/v1/metrics` only when the URL doesn't already specify a signal — fully
+  backward-compatible for callers who already passed signal-specific URLs.
+- Child spans (`chat`, `execute_tool`) now nest under the active
+  `invoke_agent` span. The handlers previously called `start_span(...)`
+  without a context, so each child became its own root span and the trace
+  tree fragmented across multiple `trace_id`s. The new `_parent_ctx(...)`
+  helper rebuilds the OTel context from the per-session invoke_agent span
+  reference held in `_invoke_spans`.
+- Metric histograms now default to **delta** aggregation temporality (was
+  cumulative). New Relic / Datadog direct / Honeycomb OTLP intakes all
+  require delta — cumulative payloads ingest but render as zero, hiding
+  cost / token / latency data. Opt back into cumulative via
+  `OtelSink(temporality="cumulative")`,
+  `configure(temporality="cumulative")`, or
+  `COMPUTERAGENT_OTEL_TEMPORALITY=cumulative` — useful when exporting to a
+  collector that aggregates downstream.
+
+### Added
+
+- `OtelSink(temporality="delta" | "cumulative")` constructor parameter +
+  matching `configure(temporality=...)` parameter +
+  `COMPUTERAGENT_OTEL_TEMPORALITY` env var.
+
+## [0.1.0]
+
+Initial public release. Drop-in for `claude-agent-sdk` with a proxied telemetry
+pipeline, policy-based tool authorization, and full AgentOS integration.
+
+### Added — drop-in surface
+
+- Identity-preserving re-export of every public symbol from
+  `claude-agent-sdk` (`isinstance(msg, ResultMessage)` works regardless of
+  which name space the user imported from). The Claude CLI subprocess,
+  AWS Bedrock auth, MCP servers, permission modes — all behave exactly as
+  the upstream SDK does.
+- `_proxy.query` and `_proxy.ClaudeSDKClient` thin wrappers that tap every
+  yielded message into a telemetry pipeline before yielding it unchanged.
+  The proxy is a pure tap; sink writes run as background tasks so a slow
+  exporter never stalls the agent hot path.
+- Stable per-run session id (the proxy's own placeholder) used for all
+  sink bookkeeping; upstream's session id surfaced as
+  `payload.upstream_session_id` on the `session_ended` event for
+  join-by-id.
+
+### Added — telemetry pipeline
+
+- `Pipeline` middleware-then-fan-out with non-blocking sink emission,
+  broad exception handling, and a `flush()` that awaits pending tasks at
+  session teardown. Telemetry never breaks an agent run.
+- `PiiRedactor` middleware — built-in patterns (email, phone, US SSN,
+  credit-card-shaped numbers, AWS access keys) + user-supplied extras,
+  JSON-path allow/denylists, `mask` / `hash` / `drop` strategies.
+  Fail-closed on substitution error.
+- `GuardrailFilter` middleware — attribute-length truncation, tool-name
+  allowlist (glob-aware: `mcp__*`), per-session cost ceiling with a
+  synthesised `budget_exceeded` session-end event, user-supplied content
+  filter.
+- Event kinds: `session_started`, `user_message`, `assistant_message`,
+  `system_message`, `tool_use`, `tool_result`, `usage_snapshot`,
+  `policy_decision`, `session_ended`.
+
+### Added — sinks
+
+- `OtelSink` (`pip install 'computer-agent-py[otel]'`) — OpenTelemetry
+  spans (`invoke_agent` → `chat` → `execute_tool`) and metrics
+  (`gen_ai.client.token.usage`, `gen_ai.client.operation.duration`,
+  `computeragent.usage.cost_usd`) following the GenAI Semantic
+  Conventions. Attribute keys match the TS `@computeragent/observability`
+  package byte-for-byte so polyglot deployments produce one coherent
+  trace tree. Configurable via `configure(...)` or env
+  (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`).
+  Vendor-neutral — New Relic, Datadog, ClickHouse, Honeycomb, Tempo,
+  Jaeger all work with a single env-var swap.
+- `AgentRegistrySink` (`pip install 'computer-agent-py[agentos]'`) —
+  writes to the AgentOS Mongo collections the existing TS SPA already
+  reads:
+  - `agent_registry` (idempotent upsert per agent name, includes a full
+    inline `IdentitySource` with `files: {agent.yaml, CLAUDE.md}` derived
+    from `ClaudeAgentOptions` — the AgentOS harness can spin up a live
+    chat sandbox from this without git access)
+  - `agent_logs` (per-run rollup with truncated query/reply, tokens,
+    cost, ok/error)
+  - `sessions` (per-session chat-bubble transcript — drives the Chat tab)
+  - `slack_threads` (parity row that drives the SPA's per-agent
+    `sessionCount` + `lastActivity` aggregates)
+  - Writes also a `bot` field on `agent_logs` for TS-side log-count
+    aggregation.
+  Doc shapes match the TS `@open-gitagent/agent-registry-mongo` package
+  exactly. DocumentDB-compatible operators only (`$set`, `$setOnInsert`,
+  `$push`, `update_one(upsert=True)`, `insert_one`). Opt-out for sessions
+  via `AgentRegistrySink(write_sessions=False)`.
+- `MongoMessageSink` (`pip install 'computer-agent-py[agentos]'`) —
+  per-message archive into a new `agent_messages` collection. One
+  document per non-rollup event (`user_message`, `assistant_message`,
+  `tool_use`, `tool_result`, `usage_snapshot`, `policy_decision`,
+  `system_message`). PII redaction runs before the archive — the
+  collection only ever sees redacted payloads. Configurable per-field
+  truncation keeps doc size predictable.
+
+### Added — policy-based tool authorization
+
+- `PolicyEngine` Protocol + `PolicyToolAuthorizer` adapter that
+  implements the exact `claude_agent_sdk.types.CanUseTool` signature.
+  Drops onto `ClaudeAgentOptions.can_use_tool`; user supplies
+  `principal_resolver`, optional `resource_resolver` /
+  `context_resolver` (sync or async). Returns
+  `PermissionResultAllow` / `PermissionResultDeny` with the engine's
+  reason.
+- `OpaPolicyEngine` — remote-HTTP backend (Open Policy Agent's
+  `POST /v1/data/<path>`). Accepts both bare-boolean and object-form
+  responses with optional reason / obligations. Uses `httpx` (already a
+  core dep) — no extra to install. Fail-closed by default.
+- `CedarPolicyEngine` (`pip install 'computer-agent-py[cedar]'`) —
+  in-process Cedar evaluation via the `cedarpy` Rust bindings. Policies
+  are compiled at construction; parse errors surface at startup, not at
+  first request.
+- `policy_decision` telemetry event — `OtelSink` annotates the active
+  `execute_tool` span with `policy.decision`, `policy.reason`,
+  `policy.engine`, `policy.latency_ms`.
+
+### Added — examples
+
+- `pdf_drop_in.py` — the verbatim AcmeAssist PDF snippet, only the
+  imports changed.
+- `with_otel.py` / `with_new_relic.py` / `with_datadog.py` —
+  vendor-neutral OTel destination examples.
+- `with_agentos.py` / `with_message_archive.py` — Mongo sink examples.
+- `with_pii_redaction.py` — middleware in front of every sink.
+- `with_opa_policy.py` / `with_cedar_policy.py` — policy-gated tool use.
+- `multi_sink.py` — all sinks + all guardrails together.
+- `e2e/run_live_demo.py` — full live demo against the AgentOS
+  docker-compose stack (mongo + clickhouse + otel-collector + harness +
+  agentos-server + SPA).
+- Sample Rego (`examples/policies/computeragent.rego`) and Cedar
+  (`examples/policies/computeragent.cedar`) policy files.
+
+### Pinned upstream
+
+- `claude-agent-sdk >= 0.2, < 0.3`
+
+### Verified
+
+- 120+ unit tests pass; ruff/format/mypy clean; wheel + sdist build
+  clean. Live e2e verified end-to-end against the AgentOS stack pointing
+  at AWS DocumentDB + New Relic — agent registers, runs, logs roll up,
+  sessions transcript renders, OTel spans flow, `chat-sandbox` spins up
+  a live harness sandbox from the inline source files.
+
+[Unreleased]: https://github.com/open-gitagent/computer-agent-py/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/open-gitagent/computer-agent-py/releases/tag/v0.1.0

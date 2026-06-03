@@ -1,0 +1,42 @@
+# Overlay for the ComputerAgent docker-compose stack — when your `.env` points
+# at a remote Mongo/DocumentDB (e.g. AWS DocumentDB on an EC2 endpoint), the
+# Python demo script reads MONGO_URL from the same env and connects to the
+# same database. No local Mongo container is needed.
+#
+# This overlay only exposes the OTel collector ports so the Python script
+# (on the host) can emit traces to it. If you'd rather emit directly to a
+# remote OTel endpoint (e.g. New Relic), the overlay is a no-op.
+#
+# Compose:
+#   cd <ComputerAgent monorepo>
+#   docker compose -f docker-compose.yml \
+#                  -f ../computeragent-py/examples/e2e/docker-compose.override.yml \
+#                  up --build
+
+services:
+  # Use the MONGO_URL from .env (typically a remote DocumentDB) instead of
+  # the hard-coded `mongodb://mongo:27017` baked into the parent compose
+  # file. Same for CLICKHOUSE_URL when traces live on New Relic instead.
+  agentos:
+    environment:
+      MONGO_URL: "${MONGO_URL}"
+      MONGO_DATABASE: "${MONGO_DATABASE:-computeragent-test}"
+      # Optional: route the SPA's Observability tab to New Relic NerdGraph.
+      # Falls back to the parent compose's clickhouse default when unset.
+      TRACE_BACKEND: "${TRACE_BACKEND:-clickhouse}"
+      NEW_RELIC_USER_API_KEY: "${NEW_RELIC_USER_API_KEY:-}"
+      NEW_RELIC_ACCOUNT_ID: "${NEW_RELIC_ACCOUNT_ID:-}"
+      NEW_RELIC_REGION: "${NEW_RELIC_REGION:-US}"
+
+  otel-collector:
+    ports:
+      - "4318:4318"
+      - "4317:4317"
+
+  # If you want a local Mongo container instead of a remote DocumentDB,
+  # uncomment the block below AND set MONGO_URL=mongodb://localhost:27017
+  # in your .env (or in the Python script's env).
+  #
+  # mongo:
+  #   ports:
+  #     - "27017:27017"
