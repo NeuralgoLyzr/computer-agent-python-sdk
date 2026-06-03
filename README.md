@@ -6,6 +6,8 @@
 
 **Drop-in replacement for [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/)** — change the import line, get a proxied telemetry pipeline with PII redaction, configurable OTel export, policy-based tool authorization, and full AgentOS integration for free.
 
+**New in 0.2.0** — a Python port of the TypeScript [`ComputerAgent`](../ComputerAgent/) harness alongside the drop-in proxy. Same vocabulary (engine / substrate / session-store / identity-loader), `ComputerAgent` + `run_task()` entry points, two built-in engines (`claude-agent-sdk`, `gitagent`). The 0.1.x drop-in surface is untouched — both modes co-exist.
+
 ```diff
 - from claude_agent_sdk import ClaudeAgentOptions, query
 - from claude_agent_sdk.types import ResultMessage
@@ -35,10 +37,55 @@ pip install computer-agent-py                     # core drop-in + OPA policy en
 pip install 'computer-agent-py[otel]'             # + OpenTelemetry sink
 pip install 'computer-agent-py[agentos]'          # + AgentOS Mongo sinks
 pip install 'computer-agent-py[cedar]'            # + Cedar policy engine (in-process)
+pip install 'computer-agent-py[gitagent]'         # + gitagent engine (OpenAI-compatible)
 pip install 'computer-agent-py[all]'              # everything
 ```
 
 **Prerequisite** — same as upstream: the `claude` CLI binary on `PATH` and Anthropic / Bedrock credentials in the environment.
+
+## Two modes
+
+`computer-agent-py` ships two co-existing surfaces. Use whichever fits the call site — they share the same telemetry pipeline and policy authorizer.
+
+### Mode 1 — drop-in proxy (0.1.x, unchanged)
+
+The default for callers who want minimum-friction observability over `claude-agent-sdk`. Swap the import line and every `query(...)` / `ClaudeSDKClient(...)` call flows through PII redaction → guardrails → OTel + AgentOS sinks.
+
+```python
+from computeragent import ClaudeAgentOptions, query
+
+async for msg in query(prompt="...", options=ClaudeAgentOptions(...)):
+    ...
+```
+
+### Mode 2 — harness (new in 0.2.0)
+
+A Python port of the TypeScript [`ComputerAgent`](../ComputerAgent/) stack. Four orthogonal swappable axes — engine / substrate / session-store / identity-loader — plus a `ComputerAgent` class and a `run_task()` convenience.
+
+```python
+from pathlib import Path
+from computeragent import ComputerAgent
+
+async with ComputerAgent(
+    source=Path.cwd(),
+    engine="claude-agent-sdk",   # or "gitagent" for OpenAI-compatible endpoints
+    runtime="local",
+    options={"system_prompt": "You are terse.", "allowed_tools": ["Read", "Glob"]},
+) as agent:
+    result = await agent.chat("List the files in this directory.")
+    print(result.messages, result.usage)
+```
+
+Built-ins shipped in 0.2.0:
+
+| Axis | Built-ins | Notes |
+|---|---|---|
+| `engine` | `claude-agent-sdk`, `gitagent` | gitagent reads `GITCLAW_MODEL_BASE_URL` + `OPENAI_API_KEY`. MCP-only tools in 0.2.0. |
+| `runtime` (substrate) | `local` | Caller-owned `Path`, or git-clone an `https://` / `git@` `.git` URL into a temp dir. |
+| `session_store` | `memory` | In-process dict. Mongo + SQLite stores in 0.3.0. |
+| `identity_loader` | `passthrough` | Treats inline dicts as manifests. GAP-style loaders in 0.3.0. |
+
+Plug-ins register at import time via `register_engine(name, instance)` etc. — third-party engines (e2b substrate, deepagents engine, mongo session store) drop in by implementing the matching Protocol in `computeragent.protocol_types`.
 
 ## Quickstart
 

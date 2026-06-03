@@ -103,7 +103,7 @@ class AgentRegistrySink:
                 "started_at": event.timestamp,
                 "agent_name": event.agent_name,
                 "prompt": event.payload.get("prompt") or "",
-                "model": event.payload.get("model"),
+                "model": _bare_model_name(event.payload.get("model")),
             }
             if self._write_sessions:
                 # Track whether _open_session actually created the doc this
@@ -153,6 +153,16 @@ class AgentRegistrySink:
         name = event.agent_name or _agent_name_from_event(event)
         description = event.agent_description or ""
         now = _utcnow()
+        # Harness-mode agents run in-process (no remote HTTP harness on
+        # :8787 to proxy to) — write a ``type: "library"`` source so
+        # AgentOS's ``hasResolvableSource`` returns false and the UI
+        # hides the chat-sandbox button. Drop-in proxy callers stay on
+        # the ``type: "inline"`` shape so their existing chat-sandbox
+        # flow keeps working when the TS harness server is deployed.
+        if event.payload.get("harness_mode"):
+            source = _library_source_for(name, event.payload, description)
+        else:
+            source = _inline_source_for(name, event.payload, description)
         await self._registry.update_one(
             {"_id": name},
             {
@@ -165,8 +175,11 @@ class AgentRegistrySink:
                     # `source.manifest` carries the description too so any
                     # downstream consumer that reads the inline manifest
                     # gets the same value as the top-level `description`.
-                    "source": _inline_source_for(name, event.payload, description),
-                    "model": event.payload.get("model"),
+                    "source": source,
+                    # Strip GAP routing prefixes (anthropic:claude-…) so
+                    # the registry doc lands a model id Claude CLI + every
+                    # other consumer accepts.
+                    "model": _bare_model_name(event.payload.get("model")),
                     "description": description,
                     "registeredBy": self._registered_by,
                     "updatedAt": now,
@@ -246,7 +259,7 @@ class AgentRegistrySink:
                 "$set": {
                     "agentName": agent_name,
                     "source": self._source,
-                    "model": (
+                    "model": _bare_model_name(
                         event.payload.get("model")
                         or self._session_meta.get(event.session_id, {}).get("model")
                     ),
@@ -364,6 +377,59 @@ DEFAULT_AGENT_INSTRUCTIONS = (
 )
 
 
+_PROVIDER_PREFIXES = ("anthropic", "openai", "bedrock", "lyzr", "vertex", "azure")
+
+
+def _bare_model_name(model: Any) -> str | None:
+    """Strip GAP-style provider prefixes (``anthropic:claude-…``) from a
+    model string so downstream consumers that pass it to the Claude CLI
+    (or any model-id-only API) don't fail.
+
+    The prefix is a routing hint our :class:`GitAgentEngine` uses to pick
+    a backend; it's not a real model id. Returning the bare form here
+    means ``agent_registry.model`` always lands as something every
+    consumer accepts.
+    """
+    if not isinstance(model, str) or ":" not in model:
+        return model if isinstance(model, str) else None
+    prefix, _, rest = model.partition(":")
+    if prefix.lower() in _PROVIDER_PREFIXES:
+        return rest
+    return model
+
+
+def _library_source_for(
+    name: str,
+    options_payload: dict[str, Any],
+    description: str = "",
+) -> dict[str, Any]:
+    """Build a ``type: "library"`` source for harness-mode agents.
+
+    Used when the agent runs in-process (no remote HTTP harness reachable
+    at the AgentOS server's ``CA_BASE``). The ``type`` deliberately does
+    NOT match ``git`` / ``local`` / ``inline`` so AgentOS's
+    ``hasResolvableSource`` returns ``false`` — the chat-sandbox button
+    is hidden and ``POST /agents/<name>/chat-sandbox`` refuses cleanly
+    instead of 502-ing on a proxy to nothing.
+
+    The ``manifest`` block is preserved so AgentOS's "Agent details"
+    pane still shows description / version / model.
+    """
+    model = _bare_model_name(options_payload.get("model"))
+    manifest_block = {
+        "name": name,
+        "version": "0.1.0",
+        "description": description,
+    }
+    if model:
+        manifest_block["model"] = str(model)
+    return {
+        "type": "library",
+        "manifest": manifest_block,
+        "model": model,
+    }
+
+
 def _inline_source_for(
     name: str,
     options_payload: dict[str, Any],
@@ -383,7 +449,7 @@ def _inline_source_for(
     can use built-in tools (Read, Glob, Grep) in live chat; custom MCP
     servers stay Python-only.
     """
-    model = options_payload.get("model")
+    model = _bare_model_name(options_payload.get("model"))
     system_prompt = options_payload.get("system_prompt") or DEFAULT_AGENT_INSTRUCTIONS
     allowed_tools = options_payload.get("allowed_tools") or ["Read", "Glob", "Grep"]
     max_turns = options_payload.get("max_turns")

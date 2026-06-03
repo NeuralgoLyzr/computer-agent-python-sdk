@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0]
+
+Adds a harness-based agent stack alongside the existing drop-in proxy,
+mirroring the TypeScript `ComputerAgent` shape (engine / substrate /
+session-store / identity-loader axes). The 0.1.x surface
+(`query`, `ClaudeSDKClient`, telemetry pipeline, policy authorizer) is
+completely untouched — this is a strictly additive release.
+
+### Added
+
+- **Public harness entry points** at the top level: `ComputerAgent`,
+  `run_task`, `ChatHandle`, `ChatResult`, `UsageRollup`.
+- **Four orthogonal Protocols** in `computeragent.protocol_types`:
+  `EngineDriver`, `Substrate`, `SessionStore`, `IdentityLoader`. Plus
+  value types: `EngineEvent`, `EngineContext`, `EngineCapabilities`,
+  `AgentManifest`, `PermissionRequest`, `SessionStoreEntry`,
+  `SubstrateHandle`, `PolicyDecider`, `IdentitySource`,
+  `PermissionDecision`.
+- **Built-in engines**:
+  - `claude-agent-sdk` — wraps `claude_agent_sdk.query()` directly
+    (deliberately not the 0.1.x `_proxy.query` — avoids double-emit
+    telemetry under the harness).
+  - `gitagent` — Python re-implementation of the TypeScript `engine-gitagent`
+    loop using `openai-python` against the same
+    `GITCLAW_MODEL_BASE_URL` / `OPENAI_API_KEY` env contract. Requires
+    the `[gitagent]` extra. **MCP-only tool execution in 0.2.0** — wire
+    an MCP filesystem server if you need `Read` / `Write` / `Bash`;
+    built-in tools land in 0.3.0.
+- **Built-in substrate**: `local` — caller-owned path passthrough, with
+  optional `git clone --depth 1` for `https://…`, `git@…`, `ssh://…`,
+  `git://…` `.git` URLs into temp dirs that are cleaned up on dispose.
+- **Built-in session store**: `memory` — process-local async dict,
+  thread-safe via `asyncio.Lock`.
+- **Built-in identity loader**: `passthrough` — treats `dict` sources
+  as inline manifests, `Path` / `str` sources as workspace-name-only.
+- **Plugin registries**: `register_engine` / `register_substrate` /
+  `register_session_store` / `register_identity_loader`. Third-party
+  plugins drop in by registering a name + a Protocol-satisfying
+  instance.
+- **New optional extra**: `[gitagent]` (pulls `openai>=1,<2`).
+- **Harness coordinator** in `computeragent.harness.coordinator`
+  converts every `EngineEvent` into the existing `TelemetryEvent`
+  factories so OTel + AgentOS sinks light up automatically. Telemetry
+  reuse is zero-glue — same `Pipeline`, same sinks, same middleware.
+- **Policy reuse is zero-glue too**: the existing
+  `PolicyToolAuthorizer` is structurally compatible with the new
+  `PolicyDecider` Protocol. Pass `policy_decider=PolicyToolAuthorizer(...)`
+  into `ComputerAgent(...)` and the Claude engine wires it into
+  `ClaudeAgentOptions.can_use_tool`. The gitagent engine routes every
+  tool call through the same `PolicyDecider` slot.
+
+### Two modes
+
+Drop-in (0.1.x, unchanged)::
+
+    from computeragent import ClaudeAgentOptions, query
+    async for msg in query(prompt="...", options=ClaudeAgentOptions(...)):
+        ...
+
+Harness (new in 0.2.0)::
+
+    from computeragent import ComputerAgent
+    async with ComputerAgent(source=Path.cwd()) as agent:
+        result = await agent.chat("Hello")
+        print(result.messages)
+
+### Backwards compatibility
+
+Strictly additive. 0.1.x callers see no behaviour change — `query` /
+`ClaudeSDKClient` still go through the proxy and emit telemetry the same
+way. New code can opt into the harness; old code keeps running unchanged.
+
+### Out of scope (parked for 0.3.0+)
+
+- HTTP+SSE harness-server mode.
+- Built-in filesystem tools in `GitAgentEngine` (MCP-only for now).
+- Additional engines (`deepagents`), substrates (`e2b`, `vzvm`, `bwrap`),
+  session stores (`mongo`, `sqlite`).
+- GAP-style git-repo identity loaders.
+- Tool-call risk classification.
+
 ## [0.1.3]
 
 `capture_content` now actually captures content. Prior versions accepted

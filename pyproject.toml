@@ -1,6 +1,6 @@
 [project]
 name = "computer-agent-py"
-version = "0.1.3"
+version = "0.2.0"
 description = "Drop-in replacement for claude-agent-sdk that adds a proxied telemetry pipeline (PII redaction + guardrails) with OpenTelemetry and AgentOS sinks."
 authors = [
     { name = "Abhi Bhat", email = "abhishek.bhat@lyzr.ai" },
@@ -40,6 +40,14 @@ agentos = [
 cedar = [
     "cedarpy>=4,<5",
 ]
+gitagent = [
+    "openai>=1,<2",
+    "anthropic>=0.40,<1",
+    "pyyaml>=6,<7",
+]
+gap = [
+    "pyyaml>=6,<7",
+]
 all = [
     "opentelemetry-api>=1.27",
     "opentelemetry-sdk>=1.27",
@@ -47,6 +55,9 @@ all = [
     "opentelemetry-semantic-conventions>=0.48b0",
     "motor>=3.5",
     "cedarpy>=4,<5",
+    "openai>=1,<2",
+    "anthropic>=0.40,<1",
+    "pyyaml>=6,<7",
 ]
 
 [project.urls]
@@ -80,6 +91,9 @@ dev = [
     "opentelemetry-semantic-conventions>=0.48b0",
     "motor>=3.5",
     "cedarpy>=4,<5",
+    "openai>=1,<2",
+    "anthropic>=0.40,<1",
+    "pyyaml>=6,<7",
 ]
 
 [tool.ruff]
@@ -103,10 +117,19 @@ select = [
 ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["E501", "ASYNC"]
+"tests/**" = ["E501", "ASYNC", "TC001", "TC003"]
 "examples/**" = ["E501"]
 "src/computeragent/__init__.py" = ["F401", "F403"]
 "src/computeragent/types.py" = ["F401", "F403"]
+# 0.2.0 harness layer: protocol value types are referenced from both
+# annotations and runtime code (isinstance, dataclass field defaults).
+# TYPE_CHECKING-only imports would break runtime; ignore the TC nudges.
+"src/computeragent/harness/**" = ["TC001", "TC003", "SIM101"]
+"src/computeragent/engines/**" = ["TC001", "TC003"]
+"src/computeragent/substrates/**" = ["TC003"]
+"src/computeragent/identity/**" = ["TC003"]
+"src/computeragent/session_stores/**" = ["TC001"]
+"src/computeragent/protocol_types/**" = ["TC003"]
 
 [tool.mypy]
 strict = true
