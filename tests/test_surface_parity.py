@@ -40,5 +40,5 @@ def test_telemetry_addons_present():
 
 
 def test_version_is_ours_not_upstream():
-    assert computeragent.__version__ == "0.2.0"
+    assert computeragent.__version__ == "0.2.1"
     assert computeragent.upstream_version == claude_agent_sdk.__version__

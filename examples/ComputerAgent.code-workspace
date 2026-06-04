@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "../../iac"
+		},
+		{
+			"path": "../../computeragent-smoke"
 		}
 	]
 }

@@ -272,10 +272,11 @@ class HarnessCoordinator:
 
         # session_started fires ONCE per ComputerAgent lifecycle so AgentOS
         # treats N chats as one conversation. The first chat's prompt is
-        # captured for the OtelSink's gen_ai.prompt.1 attribute AND for
-        # AgentRegistrySink's first-turn seeding of sessions[].entries.
-        # Subsequent chats emit user_message events so each new prompt
-        # appends to entries without re-seeding.
+        # captured for the OtelSink's gen_ai.prompt.1 attribute AND for the
+        # AgentOS server's first-turn seeding of sessions[].entries (the
+        # server-side ingest projection now owns that write; AgentOSHttpSink
+        # just forwards the event). Subsequent chats emit user_message events
+        # so each new prompt appends to entries without re-seeding.
         prompt_str = _stringify_prompt(message)
         is_first_chat = not self._lifecycle_started
         if is_first_chat:
@@ -284,7 +285,7 @@ class HarnessCoordinator:
             self._lifecycle_started_at = time.monotonic()
             await self._emit_session_started(state, ctx, prompt=prompt_str)
         elif prompt_str and prompt_str != "<streaming>":
-            # AgentRegistrySink.user_message handler unconditionally appends
+            # The server's user_message projection unconditionally appends
             # — no first_open race. OtelSink ignores user_message events.
             user_ev = TelemetryEvent(
                 kind="user_message",
@@ -429,8 +430,8 @@ class HarnessCoordinator:
             options=opts_view,
             prompt=prompt,
         )
-        # Signal to AgentRegistrySink that this is a harness-mode run.
-        # The sink writes ``source.type = "library"`` for harness-mode
+        # Signal harness-mode to the AgentOS server's ingest projection.
+        # The server writes ``source.type = "library"`` for harness-mode
         # docs, which fails AgentOS's ``hasResolvableSource`` check so
         # the UI hides the chat-sandbox button (there's no Python HTTP
         # harness on :8787 to proxy to). Drop-in proxy callers don't set
