@@ -31,10 +31,14 @@ from .types import (
     PolicyResult,
 )
 
+from .srs import SrsPolicyEngine, srs_authorizer_from_env
+
 __all__ = [
     "FailMode",
     "OpaPolicyEngine",
     "CedarPolicyEngine",
+    "SrsPolicyEngine",
+    "srs_authorizer_from_env",
     "PolicyAction",
     "PolicyDecision",
     "PolicyEngine",

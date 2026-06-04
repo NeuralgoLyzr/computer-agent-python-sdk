@@ -304,6 +304,15 @@ class ComputerAgent:
         else:
             normalised_source = source
 
+        # Auto-wire SRS-backed policy enforcement from env when the caller
+        # didn't pass one and SRS is configured (SRS_BASE_URL + SRS_POLICY_ID).
+        # Keeps library-mode Python agents on the same centrally-managed RAI
+        # policies (OPA + Cedar) as the TS stack — "just pass the env".
+        if policy_decider is None:
+            from ..policy.srs import srs_authorizer_from_env
+
+            policy_decider = srs_authorizer_from_env(agent_name or "")
+
         self._coordinator = HarnessCoordinator(
             engine=resolved_engine,
             substrate=resolved_substrate,
