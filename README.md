@@ -37,7 +37,8 @@ pip install computer-agent-py                     # core drop-in + OPA policy en
 pip install 'computer-agent-py[otel]'             # + OpenTelemetry sink
 pip install 'computer-agent-py[agentos]'          # + AgentOS Mongo sinks
 pip install 'computer-agent-py[cedar]'            # + Cedar policy engine (in-process)
-pip install 'computer-agent-py[gitagent]'         # + gitagent engine (OpenAI-compatible)
+pip install 'computer-agent-py[gitagent]'         # + gitagent engine (Anthropic + OpenAI dispatch) + GAP loader
+pip install 'computer-agent-py[gap]'              # + GAP identity loader only (pyyaml; subset of [gitagent])
 pip install 'computer-agent-py[all]'              # everything
 ```
 
@@ -123,8 +124,8 @@ That's it — same shape as `claude-agent-sdk`. Telemetry is configured from env
 | `OTEL_SERVICE_NAME` | `service.name` attribute on every span. Default: `computeragent`. |
 | `COMPUTERAGENT_OTEL` | `disabled` to suppress OtelSink. |
 | `COMPUTERAGENT_OTEL_TEMPORALITY` | `delta` (default) or `cumulative`. SaaS OTLP intakes (New Relic, Datadog direct, Honeycomb) require delta; cumulative is only correct when exporting to a collector that aggregates downstream. |
-| `AGENTOS_MONGO_URL` | When set + `[agentos]` installed, attaches AgentOS sinks (registry, logs, sessions, agent_messages, slack_threads). |
-| `AGENTOS_MONGO_DB` | Mongo database name. Default: `agentos`. |
+| `AGENTOS_INGEST_URL` | When set + `[agentos]` installed, attaches `AgentOSHttpSink` — POSTs telemetry events to the AgentOS server, which writes the Mongo collections (registry, logs, sessions, chat_sessions, agent_messages). E.g. `http://host:8788/agentos/api/ingest/events`. |
+| `AGENTOS_INGEST_TOKEN` | Optional bearer token sent as `Authorization: Bearer …`. Match the server's `AGENTOS_INGEST_TOKEN`. |
 | `COMPUTERAGENT_CAPTURE_CONTENT` | `1` to include prompts/responses on OTel spans. Default: off. |
 | `COMPUTERAGENT_CAPTURE_CONTENT_MODE` | `events` (default) \| `attributes` \| `both`. |
 
@@ -132,7 +133,7 @@ That's it — same shape as `claude-agent-sdk`. Telemetry is configured from env
 
 ```python
 from computeragent import configure, PiiRedactor, GuardrailFilter
-from computeragent.telemetry.sinks import OtelSink, AgentRegistrySink, MongoMessageSink
+from computeragent.telemetry.sinks import OtelSink, AgentOSHttpSink
 
 configure(
     middleware=[
@@ -145,8 +146,7 @@ configure(
     ],
     sinks=[
         OtelSink(),                                                     # picks up env
-        AgentRegistrySink(mongo_url="mongodb://..."),                   # registry + logs + sessions + slack_threads
-        MongoMessageSink(mongo_url="mongodb://..."),                    # per-message archive
+        AgentOSHttpSink(url="http://host:8788/agentos/api/ingest/events"),  # → server writes Mongo
     ],
 )
 ```
@@ -211,25 +211,30 @@ Every authorization decision emits a `policy_decision` telemetry event — `Otel
 
 ## AgentOS integration
 
-When `[agentos]` is installed and `AGENTOS_MONGO_URL` is set, every agent run writes to the Mongo collections the AgentOS frontend already reads:
+When `[agentos]` is installed and `AGENTOS_INGEST_URL` is set, every agent run POSTs telemetry events to the AgentOS server, which projects them into the Mongo collections the frontend reads. The SDK holds no Mongo creds — the server owns the writes:
 
 | Collection | Per | What's in it |
 |---|---|---|
 | `agent_registry` | agent name | Identity + harness + model + last-seen; idempotent upsert |
 | `agent_logs` | run | Rolled-up query/reply + tokens + cost + ok/error — drives the Logs tab |
 | `sessions` | session | `entries[]` of `{type, text}` chat-bubble messages — drives the Chat tab transcript |
-| `slack_threads` | session | TS parity row that drives the per-agent `sessionCount` + `lastActivity` aggregates |
+| `chat_sessions` | session | Canonical session-index row (`agent`, `createdAt`, `lastMessageAt`) the session list + per-agent `sessionCount`/`lastActivity` read |
 | `agent_messages` | message | Per-event archive (`user_message`, `assistant_message`, `tool_use`, `tool_result`, `usage_snapshot`, `policy_decision`, `system_message`) for replay, RAG, audit |
 
-The doc shapes are byte-for-byte compatible with the TypeScript `@open-gitagent/agent-registry-mongo` package — Python-driven agents show up in the same AgentOS UI that hosted TS agents do, with no frontend change.
+The projection runs in `@computeragent/agentos-server` (`POST /agentos/api/ingest/events`). Doc shapes match what the dashboard already reads — Python-driven agents show up in the same AgentOS UI as hosted TS agents, with no frontend change. The server is also the idempotency boundary: each event carries a stable `event_id`, so a retried batch never duplicates rows.
 
 ### Live chat for library-mode agents
 
-When the AgentRegistrySink writes its `agent_registry.source` row, it includes a full inline `IdentitySource` with `files: {agent.yaml, CLAUDE.md}` derived from your `ClaudeAgentOptions`. If a user clicks "New Chat" on the agent in the AgentOS SPA, the harness can clone those files into a sandbox workdir and spawn a live conversation — same UX as hosted (git-sourced) agents. The historical transcript stays available in the Chat tab regardless.
+Two registry shapes for `agent_registry.source`, depending on which mode emitted the event:
+
+- **Drop-in proxy (`computeragent.query(...)` / `ClaudeSDKClient`)** writes a `type: "inline"` source with `files: {agent.yaml, CLAUDE.md}` derived from your `ClaudeAgentOptions`. If a user clicks "New Chat" on the agent in the AgentOS SPA, the harness can clone those files into a sandbox workdir and spawn a live conversation — same UX as hosted (git-sourced) agents.
+- **Harness (`ComputerAgent`, new in 0.2.0)** writes a `type: "library"` source. There's no remote `harness-server` to proxy a chat-sandbox spawn to (the agent runs in your Python process), so this shape deliberately fails AgentOS's `hasResolvableSource()` check. The AgentOS UI hides the chat-sandbox button (via the matching `liveChatCapable` derived field on `GET /agents`); historical transcripts remain visible in the Chat tab.
+
+Either way, every event still flows through OTel and the AgentOS ingest endpoint so the Agents list, Logs tab, and Chat transcript stay populated.
 
 ### DocumentDB compatibility
 
-Prod deployments on AWS DocumentDB work without changes. The sinks use only operators DocumentDB supports — `$set`, `$setOnInsert`, `$push`, `update_one(upsert=True)`, `insert_one`. No aggregation pipelines, transactions, change streams, or TTL indexes. Set `MONGO_URL` with the standard `tls=true&tlsCAFile=...` params and mount the DocumentDB CA bundle.
+Prod deployments on AWS DocumentDB work without changes. The server-side projection uses only operators DocumentDB supports — `$set`, `$setOnInsert`, `$push`, `updateOne(upsert)`, `insertOne`. No aggregation pipelines, transactions, change streams, or TTL indexes. Set the server's `MONGO_URL` with the standard `tls=true&tlsCAFile=...` params and mount the DocumentDB CA bundle.
 
 ## Architecture
 
@@ -256,15 +261,14 @@ Prod deployments on AWS DocumentDB work without changes. The sinks use only oper
                 ▼
      ┌──── fan-out to sinks ───────────────────────────┐
      │                                                  │
-     ▼            ▼                       ▼             ▼
-  OtelSink   AgentRegistrySink     MongoMessageSink  <user>
-     │            │                       │
-     ▼            ▼                       ▼
-  OTLP backend  agent_registry      agent_messages
-  (NR / DD /    agent_logs          (per-message
-   ClickHouse / sessions             archive)
-   Tempo …)     slack_threads
-                (drives AgentOS UI)
+     ▼            ▼                                     ▼
+  OtelSink   AgentOSHttpSink                          <user>
+     │            │
+     ▼            │  POST /agentos/api/ingest/events
+  OTLP backend    ▼
+  (NR / DD /   agentos-server  ──▶  agent_registry / agent_logs /
+   ClickHouse / (owns the Mongo      sessions / chat_sessions /
+   Tempo …)     writes)              agent_messages  (drives AgentOS UI)
 ```
 
 The proxy is a pure tap — messages are never modified or reordered. Sinks run as background tasks so a slow exporter never stalls the agent hot path; `query()`'s `finally` block awaits them with a 5 s default timeout. Telemetry never breaks an agent run: middleware and sink exceptions are absorbed and logged.
@@ -281,8 +285,7 @@ The proxy is a pure tap — messages are never modified or reordered. Sinks run 
 | [`examples/with_otel.py`](examples/with_otel.py) | OTel pointed at a local collector |
 | [`examples/with_new_relic.py`](examples/with_new_relic.py) | OTel pointed at New Relic (just env vars) |
 | [`examples/with_datadog.py`](examples/with_datadog.py) | OTel pointed at Datadog |
-| [`examples/with_agentos.py`](examples/with_agentos.py) | AgentOS Mongo writes |
-| [`examples/with_message_archive.py`](examples/with_message_archive.py) | Per-message archive |
+| [`examples/with_agentos.py`](examples/with_agentos.py) | AgentOS HTTP ingest |
 | [`examples/with_pii_redaction.py`](examples/with_pii_redaction.py) | PII middleware in front of every sink |
 | [`examples/with_opa_policy.py`](examples/with_opa_policy.py) | OPA-gated tool use |
 | [`examples/with_cedar_policy.py`](examples/with_cedar_policy.py) | Cedar-gated tool use (in-process) |

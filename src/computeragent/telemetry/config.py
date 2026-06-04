@@ -50,7 +50,7 @@ def configure(
     """Programmatic configuration. Idempotent — replaces the active pipeline.
 
     Auto-attaches the bundled :class:`~computeragent.telemetry.sinks.otel.OtelSink`
-    and :class:`~computeragent.telemetry.sinks.agentos.AgentRegistrySink` if their
+    and :class:`~computeragent.telemetry.sinks.agentos_http.AgentOSHttpSink` if their
     extras are installed and not already in ``sinks``. Pass ``sinks=[]`` to
     disable all auto-attachment.
 
@@ -128,8 +128,9 @@ def _auto_sinks() -> list[TelemetrySink]:
     ``opentelemetry-*`` packages are importable. Falls back to console
     exporter when no OTLP endpoint is configured.
 
-    AgentOS sink: on when ``AGENTOS_MONGO_URL`` is set AND ``motor`` is
-    importable.
+    AgentOS sink: on when ``AGENTOS_INGEST_URL`` is set AND ``httpx`` is
+    importable. POSTs telemetry events to the AgentOS server, which owns the
+    Mongo writes (registry / logs / sessions / chat_sessions / agent_messages).
     """
     sinks: list[TelemetrySink] = []
 
@@ -141,27 +142,15 @@ def _auto_sinks() -> list[TelemetrySink]:
         except ImportError:
             logger.debug("OtelSink not attached (computer-agent-py[otel] not installed)")
 
-    mongo_url = os.environ.get("AGENTOS_MONGO_URL")
-    if mongo_url:
+    ingest_url = os.environ.get("AGENTOS_INGEST_URL")
+    if ingest_url:
         try:
-            from .sinks.agentos import AgentRegistrySink  # noqa: WPS433
+            from .sinks.agentos_http import AgentOSHttpSink  # noqa: WPS433
 
-            sinks.append(AgentRegistrySink(mongo_url=mongo_url))
+            sinks.append(AgentOSHttpSink(url=ingest_url))
         except ImportError:
             logger.debug(
-                "AgentRegistrySink not attached (computer-agent-py[agentos] not installed)"
-            )
-        # MongoMessageSink — per-message archive that pairs with
-        # AgentRegistrySink to give the AgentOS Chat tab full transcript
-        # coverage. Same extra, same env var, so wiring it here is the
-        # cheapest fix for "I can't see the agent reply in Mongo".
-        try:
-            from .sinks.message_archive import MongoMessageSink  # noqa: WPS433
-
-            sinks.append(MongoMessageSink(mongo_url=mongo_url))
-        except ImportError:
-            logger.debug(
-                "MongoMessageSink not attached (computer-agent-py[agentos] not installed)"
+                "AgentOSHttpSink not attached (computer-agent-py[agentos] not installed)"
             )
 
     return sinks

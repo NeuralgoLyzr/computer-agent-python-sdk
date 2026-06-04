@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — AgentOS telemetry now ships over HTTP (**BREAKING**)
+
+The AgentOS Mongo sinks have been replaced by a single HTTP sink. The AgentOS
+server now owns the document schema and performs the Mongo writes; the SDK just
+POSTs telemetry events to it. This removes the `motor` dependency from the
+`[agentos]` extra and decouples the dashboard schema from a Python release.
+
+- **Added** `AgentOSHttpSink` (`computeragent.telemetry.sinks.AgentOSHttpSink`):
+  buffers `TelemetryEvent`s and POSTs batches to
+  `POST {AGENTOS_INGEST_URL}` (e.g. `…/agentos/api/ingest/events`), with an
+  optional `Authorization: Bearer {AGENTOS_INGEST_TOKEN}`. Drains on
+  `session_ended`, on a size threshold, and on `flush()`/`aclose()`.
+- **Auto-attach** now keys on `AGENTOS_INGEST_URL` (+ optional
+  `AGENTOS_INGEST_TOKEN`) instead of `AGENTOS_MONGO_URL` / `AGENTOS_MONGO_DB`.
+- **Removed** `AgentRegistrySink` and `MongoMessageSink` (and the `motor` dep).
+  The registry/log/session/message projection they performed now lives in the
+  AgentOS server (`@computeragent/agentos-server`, `POST /agentos/api/ingest/events`).
+  The server additionally writes the canonical `chat_sessions` row so
+  library-mode sessions finally appear in the dashboard session list, and no
+  longer writes the dead `slack_threads` collection.
+- **Migration:** swap `AGENTOS_MONGO_URL`/`AGENTOS_MONGO_DB` for
+  `AGENTOS_INGEST_URL` (+ `AGENTOS_INGEST_TOKEN`). Code that constructed
+  `AgentRegistrySink`/`MongoMessageSink` directly should use `AgentOSHttpSink`
+  (or rely on env auto-attach). Breaking → release as **0.3.0**.
+
 ## [0.2.0]
 
 Adds a harness-based agent stack alongside the existing drop-in proxy,
@@ -15,7 +40,7 @@ session-store / identity-loader axes). The 0.1.x surface
 (`query`, `ClaudeSDKClient`, telemetry pipeline, policy authorizer) is
 completely untouched — this is a strictly additive release.
 
-### Added
+### Added — harness layer
 
 - **Public harness entry points** at the top level: `ComputerAgent`,
   `run_task`, `ChatHandle`, `ChatResult`, `UsageRollup`.
@@ -29,34 +54,95 @@ completely untouched — this is a strictly additive release.
   - `claude-agent-sdk` — wraps `claude_agent_sdk.query()` directly
     (deliberately not the 0.1.x `_proxy.query` — avoids double-emit
     telemetry under the harness).
-  - `gitagent` — Python re-implementation of the TypeScript `engine-gitagent`
-    loop using `openai-python` against the same
-    `GITCLAW_MODEL_BASE_URL` / `OPENAI_API_KEY` env contract. Requires
-    the `[gitagent]` extra. **MCP-only tool execution in 0.2.0** — wire
-    an MCP filesystem server if you need `Read` / `Write` / `Bash`;
-    built-in tools land in 0.3.0.
+  - `gitagent` — Python re-implementation of the TypeScript
+    `engine-gitagent` loop. **Dispatches on model prefix:**
+    - `anthropic:claude-…` / bare `claude-…` → native Anthropic
+      Messages API via `ANTHROPIC_API_KEY` (+ optional
+      `ANTHROPIC_BASE_URL`).
+    - `openai:gpt-…` / bare `gpt-…` / unknown → OpenAI-compatible
+      Chat Completions via `GITCLAW_MODEL_BASE_URL` + `OPENAI_API_KEY`.
+    Requires the `[gitagent]` extra. **MCP-only tool execution in
+    0.2.0** — wire an MCP filesystem server if you need `Read` /
+    `Write` / `Bash`; built-in tools land in 0.3.0.
 - **Built-in substrate**: `local` — caller-owned path passthrough, with
-  optional `git clone --depth 1` for `https://…`, `git@…`, `ssh://…`,
-  `git://…` `.git` URLs into temp dirs that are cleaned up on dispose.
+  `git clone --depth 1` for `https://github.com/…` / `git@…` / `ssh://…`
+  URLs (with or without the `.git` suffix) into temp dirs that are
+  cleaned up on dispose.
 - **Built-in session store**: `memory` — process-local async dict,
   thread-safe via `asyncio.Lock`.
-- **Built-in identity loader**: `passthrough` — treats `dict` sources
-  as inline manifests, `Path` / `str` sources as workspace-name-only.
+- **Built-in identity loaders** in `computeragent.identity`:
+  - `passthrough` — treats `dict` sources as inline manifests,
+    `Path` / `str` sources as workspace-name-only.
+  - `gap` — Python port of `@open-gitagent/identity-gitagentprotocol`.
+    Reads `agent.yaml` from the cloned workspace, stitches `SOUL.md` +
+    `RULES.md` + `AGENTS.md` into the system prompt, maps GAP fields
+    to engine-specific options (strips `anthropic:` prefix for the
+    Claude SDK adapter, keeps the prefix for gitagent's backend
+    dispatch). Requires the `[gap]` (or `[gitagent]`) extra for
+    `pyyaml`.
 - **Plugin registries**: `register_engine` / `register_substrate` /
   `register_session_store` / `register_identity_loader`. Third-party
   plugins drop in by registering a name + a Protocol-satisfying
   instance.
-- **New optional extra**: `[gitagent]` (pulls `openai>=1,<2`).
+- **New optional extras**:
+  - `[gitagent]` → `openai>=1,<2`, `anthropic>=0.40,<1`, `pyyaml>=6,<7`.
+  - `[gap]` → `pyyaml>=6,<7` (subset of `[gitagent]`, for GAP-only
+    consumers that don't use the gitagent engine).
 - **Harness coordinator** in `computeragent.harness.coordinator`
-  converts every `EngineEvent` into the existing `TelemetryEvent`
-  factories so OTel + AgentOS sinks light up automatically. Telemetry
-  reuse is zero-glue — same `Pipeline`, same sinks, same middleware.
-- **Policy reuse is zero-glue too**: the existing
-  `PolicyToolAuthorizer` is structurally compatible with the new
-  `PolicyDecider` Protocol. Pass `policy_decider=PolicyToolAuthorizer(...)`
-  into `ComputerAgent(...)` and the Claude engine wires it into
-  `ClaudeAgentOptions.can_use_tool`. The gitagent engine routes every
-  tool call through the same `PolicyDecider` slot.
+  - One stable `session_id` reused across every `.chat()` call on a
+    single `ComputerAgent` instance — multi-turn lands as **one** Mongo
+    `sessions` doc with `entries = [user, asst, user, asst, ...]` in
+    chronological order instead of N orphan sessions.
+  - `session_started` fires once per lifecycle, `session_ended` fires
+    once on `dispose()` — **one `agent_logs` row per conversation**,
+    not per turn.
+  - Per-chat `user_message` events keep `sessions[].entries` ordered
+    deterministically (pipeline flush at chat boundary serialises sink
+    writes).
+  - Synthesises `assistant_message` / `tool_use` / `tool_result`
+    `TelemetryEvent`s for non-`claude-agent-sdk` payloads (Anthropic
+    response blocks, OpenAI `ChatCompletionMessage`, dict tool-result
+    envelopes) so every engine writes to the AgentOS sinks the same
+    way.
+- **Policy reuse is zero-glue**: the existing `PolicyToolAuthorizer`
+  is structurally compatible with the new `PolicyDecider` Protocol.
+  Pass `policy_decider=PolicyToolAuthorizer(...)` into
+  `ComputerAgent(...)` and the Claude engine wires it into
+  `ClaudeAgentOptions.can_use_tool`; the gitagent engine routes every
+  tool call through the same slot.
+
+### Fixed — AgentOS Mongo write flow
+
+These fixes apply to BOTH the 0.1.x proxy path and the new harness
+path:
+
+- **`MongoMessageSink` is now auto-attached** by
+  `telemetry.config._auto_sinks()` whenever `AGENTOS_MONGO_URL` is
+  set. Previously only `AgentRegistrySink` auto-attached, so the
+  per-event `agent_messages` collection stayed empty unless the
+  caller wired the sink explicitly. (qa-worker-demo's existing
+  `setup_telemetry()` wiring keeps working unchanged — its manual
+  `MongoMessageSink(...)` overrides the auto-attach.)
+- **Model name prefix stripped at every Mongo write site.** GAP
+  manifests use `model: "anthropic:claude-sonnet-4-5-20250929"` as a
+  routing hint, but Claude CLI and downstream consumers reject the
+  prefix. `agent_registry.model`, `agent_registry.source.model`,
+  `agent_registry.source.manifest.model`, and `sessions.model` all
+  land as the bare model id.
+
+### Added — AgentOS UI signalling
+
+- **`source.type = "library"`** for harness-mode registry docs.
+  Library-mode agents run in their host process (no remote
+  `harness-server` to proxy a chat-sandbox spawn to), so writing a
+  source shape that fails AgentOS's `hasResolvableSource()` check is
+  the right signal. Combined with the matching AgentOS-side patch
+  (a derived `liveChatCapable` field on `GET /agents`), the
+  "New chat" button disappears for these agents and the chat-sandbox
+  endpoint refuses cleanly with `LIBRARY_AGENT_NO_LIVE_CHAT`. The
+  0.1.x drop-in proxy still writes the original `type: "inline"`
+  shape so any existing chat-sandbox setup keeps working for those
+  callers.
 
 ### Two modes
 
@@ -73,6 +159,15 @@ Harness (new in 0.2.0)::
         result = await agent.chat("Hello")
         print(result.messages)
 
+Harness + GAP repo (new in 0.2.0)::
+
+    async with ComputerAgent(
+        source="https://github.com/NeuralgoLyzr/lyzr-docs-agent",
+        engine="gitagent",
+        identity_loader="gap",
+    ) as agent:
+        result = await agent.chat("In one sentence, what does this agent do?")
+
 ### Backwards compatibility
 
 Strictly additive. 0.1.x callers see no behaviour change — `query` /
@@ -81,11 +176,10 @@ way. New code can opt into the harness; old code keeps running unchanged.
 
 ### Out of scope (parked for 0.3.0+)
 
-- HTTP+SSE harness-server mode.
-- Built-in filesystem tools in `GitAgentEngine` (MCP-only for now).
+- HTTP+SSE `harness-server` mode (in-process only in 0.2.0).
+- Built-in filesystem tools for `GitAgentEngine` (MCP-only for now).
 - Additional engines (`deepagents`), substrates (`e2b`, `vzvm`, `bwrap`),
   session stores (`mongo`, `sqlite`).
-- GAP-style git-repo identity loaders.
 - Tool-call risk classification.
 
 ## [0.1.3]

@@ -1,9 +1,9 @@
-"""Regression coverage for the new ``agent_description`` plumbing in 0.1.2.
+"""Regression coverage for the ``agent_description`` plumbing in 0.1.2.
 
-The description threads through three layers — TelemetryEvent →
-AgentRegistrySink (Mongo doc + inline manifest) → OtelSink (invoke_agent
-span attribute). Tests lock that the value supplied via
-``options.agent_description`` survives all three.
+The description threads through TelemetryEvent → OtelSink (invoke_agent span
+attribute). (Its third hop — the AgentOS Mongo registry doc + inline manifest —
+now lives in the agentos-server projection, covered by that package's tests.)
+Tests lock that the value supplied via ``options.agent_description`` survives.
 """
 
 from __future__ import annotations
@@ -23,11 +23,6 @@ from computeragent._proxy.query import (  # noqa: E402
 )
 from computeragent.telemetry import TelemetryEvent  # noqa: E402
 from computeragent.telemetry.sinks import OtelSink  # noqa: E402
-
-mongomock_motor = pytest.importorskip("mongomock_motor")
-from mongomock_motor import AsyncMongoMockClient  # noqa: E402
-
-from computeragent.telemetry.sinks import AgentRegistrySink  # noqa: E402
 
 # ── proxy derivation ─────────────────────────────────────────────────────
 
@@ -99,90 +94,6 @@ def test_telemetry_event_description_optional_default_none():
         prompt="What is X?",
     )
     assert ev.agent_description is None
-
-
-# ── AgentRegistrySink — Mongo doc + inline manifest ──────────────────────
-
-
-@pytest.fixture
-def mock_client():
-    return AsyncMongoMockClient()
-
-
-def _ev_with_desc(payload, desc):
-    return TelemetryEvent(
-        kind="session_started",
-        session_id="sess_d",
-        agent_name="QA-Bot",
-        agent_description=desc,
-        payload=payload,
-    )
-
-
-@pytest.mark.asyncio
-async def test_registry_doc_carries_description(mock_client):
-    sink = AgentRegistrySink(client=mock_client, database="agentos_test")
-    await sink.emit(
-        _ev_with_desc(
-            {"model": "m", "system_prompt": "...", "prompt": "q"},
-            "Specialist in pytest fixtures.",
-        )
-    )
-
-    docs = await mock_client["agentos_test"]["agent_registry"].find().to_list(length=10)
-    assert len(docs) == 1
-    d = docs[0]
-    assert d["_id"] == "QA-Bot"
-    assert d["description"] == "Specialist in pytest fixtures."
-    # And the inline manifest carries the same value, for harness clones
-    # that read manifest.description directly.
-    assert d["source"]["manifest"]["description"] == "Specialist in pytest fixtures."
-
-
-@pytest.mark.asyncio
-async def test_registry_doc_omits_manifest_description_when_unset(mock_client):
-    """Backwards-compat — pre-0.1.2 callers (no description) get the same
-    manifest shape they had in 0.1.1 (no `description` key)."""
-    sink = AgentRegistrySink(client=mock_client, database="agentos_test")
-    await sink.emit(
-        TelemetryEvent(
-            kind="session_started",
-            session_id="sess_e",
-            agent_name="QA-Bot",
-            payload={"model": "m", "system_prompt": "...", "prompt": "q"},
-        )
-    )
-
-    docs = await mock_client["agentos_test"]["agent_registry"].find().to_list(length=10)
-    d = docs[0]
-    # Top-level description is "" (not omitted — keeps the schema stable
-    # so downstream SPAs don't have to special-case "missing").
-    assert d["description"] == ""
-    # Inline manifest: description key is absent (manifest stays minimal).
-    assert "description" not in d["source"]["manifest"]
-
-
-@pytest.mark.asyncio
-async def test_agent_yaml_contains_description(mock_client):
-    """The agent.yaml inside the inline source is what the harness clones
-    into the sandbox workdir. Verify the description is rendered as a
-    top-level YAML field (between name and model)."""
-    sink = AgentRegistrySink(client=mock_client, database="agentos_test")
-    await sink.emit(
-        _ev_with_desc(
-            {"model": "m", "system_prompt": "...", "prompt": "q"},
-            "Pytest specialist",
-        )
-    )
-
-    docs = await mock_client["agentos_test"]["agent_registry"].find().to_list(length=10)
-    yaml = docs[0]["source"]["files"]["agent.yaml"]
-    assert 'description: "Pytest specialist"' in yaml
-    # Position: between `name` and `model` (matches the rendering order).
-    name_idx = yaml.index("name:")
-    desc_idx = yaml.index("description:")
-    model_idx = yaml.index("model:")
-    assert name_idx < desc_idx < model_idx
 
 
 # ── OtelSink — gen_ai.agent.description on invoke_agent ──────────────────

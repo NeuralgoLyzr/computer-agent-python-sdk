@@ -135,8 +135,26 @@ docker compose -f docker-compose.yml \
                down -v
 ```
 
+## Self-contained ingest E2E (no docker-compose)
+
+[`ingest_live_e2e.py`](ingest_live_e2e.py) is a one-command live test for the
+HTTP ingest path that replaced the in-process Mongo sinks. It boots a real
+`agentos-server` against a throwaway Mongo database, drives telemetry through
+`AgentOSHttpSink` over HTTP, then asserts the server projected the run into
+`agent_registry` / `agent_logs` / `sessions` / `chat_sessions` /
+`agent_messages` (and did **not** write `slack_threads`). It verifies via both a
+direct Mongo read and the dashboard read API, and drops the test DB on exit.
+Needs `MONGO_URL` (+ `API_AUTH_USER/PASS` for the read-API checks) in
+`../ComputerAgent/.env`.
+
+```bash
+cd <computeragent-py>
+uv run python examples/e2e/ingest_live_e2e.py            # synthetic (offline model, free)
+uv run python examples/e2e/ingest_live_e2e.py --real     # live 2-turn Claude run (needs ANTHROPIC_API_KEY)
+```
+
 ## See also
 
 - [destinations.md](destinations.md) — point OTel at New Relic / Datadog / Honeycomb / Tempo / Jaeger by changing env vars only.
 - [../with_otel.py](../with_otel.py), [../with_new_relic.py](../with_new_relic.py), [../with_datadog.py](../with_datadog.py) — single-vendor variants.
-- [../with_message_archive.py](../with_message_archive.py) — the full pipeline (OTel + AgentOS + per-message archive) but without docker-compose.
+- [../with_agentos.py](../with_agentos.py) — the AgentOS HTTP ingest sink wired into a plain `query()` run (no docker-compose).

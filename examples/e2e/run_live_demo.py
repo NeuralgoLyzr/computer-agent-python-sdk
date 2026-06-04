@@ -24,9 +24,9 @@ Run:
 
 What it does:
 * Configures the telemetry pipeline with PII redaction + guardrails.
-* Fans out to OtelSink (→ otel-collector → ClickHouse → SPA Observability),
-  AgentRegistrySink (→ agent_registry + agent_logs + sessions in Mongo),
-  MongoMessageSink (→ agent_messages in Mongo, per-message archive).
+* Fans out to OtelSink (→ otel-collector → ClickHouse → SPA Observability) and
+  AgentOSHttpSink (→ POST /agentos/api/ingest/events → the server writes
+  agent_registry + agent_logs + sessions + chat_sessions + agent_messages).
 * Runs a small agent that reads a couple of files in a scratch dir, so we
   generate tool_use + tool_result + usage_snapshot events.
 * Prints a mongosh-style summary of what landed in each collection.
@@ -42,8 +42,6 @@ import os
 import tempfile
 from pathlib import Path
 
-from motor.motor_asyncio import AsyncIOMotorClient
-
 from computeragent import (
     ClaudeAgentOptions,
     GuardrailFilter,
@@ -51,13 +49,16 @@ from computeragent import (
     configure,
     query,
 )
-from computeragent.telemetry.sinks import AgentRegistrySink, MongoMessageSink, OtelSink
+from computeragent.telemetry.sinks import AgentOSHttpSink, OtelSink
 from computeragent.types import ResultMessage
 
-# Honour both the package's preferred env names AND the names the existing
-# ComputerAgent docker-compose stack already uses (MONGO_URL / MONGO_DATABASE),
-# so the Python script and the running stack point at the same Mongo without
-# any duplicated env setup.
+# The SDK now writes via HTTP — point it at the agentos-server ingest endpoint.
+INGEST_URL = os.environ.get(
+    "AGENTOS_INGEST_URL", "http://localhost:8788/agentos/api/ingest/events"
+)
+INGEST_TOKEN = os.environ.get("AGENTOS_INGEST_TOKEN")
+# The verification read still hits Mongo directly (the server wrote there).
+# Honour the names the docker-compose stack uses so both point at the same DB.
 MONGO_URL = (
     os.environ.get("AGENTOS_MONGO_URL")
     or os.environ.get("MONGO_URL")
@@ -132,7 +133,8 @@ async def _summary(client: AsyncIOMotorClient) -> None:
 
 
 async def main() -> None:
-    print(f"→ Mongo URL: {MONGO_URL}  (db={MONGO_DB})")
+    print(f"→ Ingest URL: {INGEST_URL}")
+    print(f"→ Mongo URL: {MONGO_URL}  (db={MONGO_DB}, for the verification read)")
     print(f"→ OTel endpoint: {OTEL_ENDPOINT}")
 
     configure(
@@ -147,8 +149,7 @@ async def main() -> None:
         ],
         sinks=[
             OtelSink(),  # auto-picks up OTEL_EXPORTER_OTLP_ENDPOINT
-            AgentRegistrySink(mongo_url=MONGO_URL, database=MONGO_DB),
-            MongoMessageSink(mongo_url=MONGO_URL, database=MONGO_DB),
+            AgentOSHttpSink(url=INGEST_URL, token=INGEST_TOKEN),
         ],
         service_name="computeragent-e2e-demo",
     )
@@ -181,12 +182,19 @@ async def main() -> None:
             print(f"turns:  {message.num_turns}")
             print(f"cost:   ${message.total_cost_usd or 0.0:.4f}")
 
-    # Mongosh-style verification.
-    client: AsyncIOMotorClient = AsyncIOMotorClient(MONGO_URL)
+    # Mongosh-style verification — reads the docs the server wrote. `motor` is
+    # no longer an SDK dependency, so import it lazily and skip cleanly if the
+    # verification-only driver isn't installed (`pip install motor`).
     try:
-        await _summary(client)
-    finally:
-        client.close()
+        from motor.motor_asyncio import AsyncIOMotorClient
+    except ImportError:
+        print("\n(skip Mongo summary — `pip install motor` to enable the verification read)")
+    else:
+        client = AsyncIOMotorClient(MONGO_URL)
+        try:
+            await _summary(client)
+        finally:
+            client.close()
 
     print()
     print("Now open http://localhost:8080 → log in → click the new agent")

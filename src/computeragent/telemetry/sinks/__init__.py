@@ -1,4 +1,4 @@
-"""Telemetry sinks — OTel collector and AgentOS Mongo registry.
+"""Telemetry sinks — OTel collector and AgentOS HTTP ingest.
 
 Each sink is conditional on its extra. Import the sink class only after
 installing the corresponding extra; otherwise the import raises ``ImportError``
@@ -7,7 +7,7 @@ with a clean install hint.
 
 from __future__ import annotations
 
-__all__ = ["AgentRegistrySink", "MongoMessageSink", "OtelSink"]
+__all__ = ["AgentOSHttpSink", "OtelSink"]
 
 
 def __getattr__(name: str):  # type: ignore[no-untyped-def]
@@ -17,12 +17,8 @@ def __getattr__(name: str):  # type: ignore[no-untyped-def]
         from .otel import OtelSink as _OtelSink
 
         return _OtelSink
-    if name == "AgentRegistrySink":
-        from .agentos import AgentRegistrySink as _AgentRegistrySink
+    if name == "AgentOSHttpSink":
+        from .agentos_http import AgentOSHttpSink as _AgentOSHttpSink
 
-        return _AgentRegistrySink
-    if name == "MongoMessageSink":
-        from .message_archive import MongoMessageSink as _MongoMessageSink
-
-        return _MongoMessageSink
+        return _AgentOSHttpSink
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
