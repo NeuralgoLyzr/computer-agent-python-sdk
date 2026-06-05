@@ -37,6 +37,9 @@ otel = [
 agentos = [
     "httpx>=0.27",
 ]
+remote = [
+    "httpx>=0.27",
+]
 cedar = [
     "cedarpy>=4,<5",
 ]

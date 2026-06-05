@@ -181,9 +181,14 @@ async def test_child_spans_nest_under_invoke_agent():
 
     # One coherent trace
     assert invoke.context.trace_id == chat.context.trace_id == tool.context.trace_id
-    # Children point at invoke_agent
+    # chat nests under invoke_agent; execute_tool nests under chat (matches TS).
     assert chat.parent is not None and chat.parent.span_id == invoke.context.span_id
-    assert tool.parent is not None and tool.parent.span_id == invoke.context.span_id
+    assert tool.parent is not None and tool.parent.span_id == chat.context.span_id
+    # chat is a CLIENT span; execute_tool + invoke_agent are INTERNAL.
+    from opentelemetry.trace import SpanKind
+
+    assert chat.kind == SpanKind.CLIENT
+    assert tool.kind == SpanKind.INTERNAL
 
 
 # ── Bug 4: metric exporter uses delta temporality ───────────────────────────
