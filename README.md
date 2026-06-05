@@ -88,6 +88,42 @@ Built-ins shipped in 0.2.0:
 
 Plug-ins register at import time via `register_engine(name, instance)` etc. — third-party engines (e2b substrate, deepagents engine, mongo session store) drop in by implementing the matching Protocol in `computeragent.protocol_types`.
 
+### Mode 2b — remote harness (run the engine on a server)
+
+Set `harness_url` and the same `ComputerAgent` runs against a **remote harness
+server** over HTTP instead of in-process — the engine/substrate/loader execute
+there. The SDK becomes a thin, stateless client. Requires the `[remote]` extra
+(`pip install 'computer-agent-py[remote]'`).
+
+```python
+from computeragent import ComputerAgent
+
+# Bare harness protocol (@computeragent/harness-server, :7700) — default kind.
+async with ComputerAgent(
+    harness_url="http://harness:7700",
+    harness="claude-agent-sdk",            # engine to run remotely
+    source={"type": "git", "url": "github.com/org/agent"},
+) as agent:
+    async for event in agent.chat("Summarize the README"):
+        ...                                # ca_session_started, sdk_message, ca_session_ended, …
+    result = await agent.chat("…")         # ChatResult(messages, usage, session_id)
+
+# ComputerAgent server (:8787) — pick the substrate per request.
+async with ComputerAgent(
+    harness_url="http://cas:8787", harness_kind="server", runtime="bwrap",
+    harness="claude-agent-sdk", source={"type": "git", "url": "github.com/org/agent"},
+) as agent:
+    result = await agent.chat("…")
+```
+
+| `harness_kind` | Server | Substrate | Permissions |
+|---|---|---|---|
+| `"protocol"` (default) | `/v1/sessions/*` (harness-server, :7700) | server-side | `on_tool_call` round-trip |
+| `"server"` | `/sandboxes` + `/run` (CAS, :8787) | client-chosen via `runtime` | server-side `permission_mode`/SRS |
+| `"auto"` | probes `/v1/health` then `/health` | — | — |
+
+The protocol layer is also usable directly: `from computeragent import HarnessClient, ComputerAgentServerClient`. `run_task(harness_url=...)` works the same for one-shots.
+
 ## Quickstart
 
 ```python

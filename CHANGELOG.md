@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — remote harness support (`ComputerAgent(harness_url=...)`)
+
+`ComputerAgent` can now run an agent on a **remote harness server** instead of
+in-process, speaking the Harness / Computer-Agent Protocol over HTTP. This makes
+the SDK a thin, stateless client — engine execution lives on the harness pod.
+
+- `ComputerAgent(harness_url=..., harness="claude-agent-sdk", source=..., harness_kind=...)`:
+  - `harness_kind="protocol"` (default) → the bare `/v1/sessions/*` harness server
+    (`@computeragent/harness-server`, port 7700). Full multi-turn + `on_tool_call`
+    permission round-trip.
+  - `harness_kind="server"` → the ComputerAgent server (port 8787): the client picks
+    the substrate via `runtime` (`local`/`bwrap`/`e2b`), warm `/sandboxes/:id/chat`
+    multi-turn, `/run` one-shot. (No interactive permission endpoint — the server's
+    `permission_mode`/SRS policy governs tools.)
+  - `harness_kind="auto"` probes `/v1/health` then `/health`.
+- `agent.chat()` streams raw `HarnessEvent`s (`ca_session_started`, `sdk_message`,
+  `ca_usage_snapshot`, `ca_session_ended`, …); `await handle.result()` returns the
+  usual `ChatResult` (messages + usage + session_id). `run_task(harness_url=...)` too.
+- New standalone clients (the "talk to the protocol" surface), exported lazily:
+  `from computeragent import HarnessClient, ComputerAgentServerClient`.
+- New `[remote]` extra (`httpx`). Local in-process mode is unchanged.
+
 ### Changed — AgentOS telemetry now ships over HTTP (**BREAKING**)
 
 The AgentOS Mongo sinks have been replaced by a single HTTP sink. The AgentOS

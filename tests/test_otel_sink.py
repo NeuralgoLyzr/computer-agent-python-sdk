@@ -38,35 +38,67 @@ def _ev(kind, payload=None, sid="sess_X", agent_name="NordAssist"):
 @pytest.mark.asyncio
 async def test_invoke_agent_span_attributes():
     sink, exp, _ = _build_inmemory_otel()
-    await sink.emit(_ev("session_started", {"model": "us.anthropic.claude-sonnet-4-6"}))
     await sink.emit(
         _ev(
-            "session_ended",
+            "session_started",
             {
-                "is_error": False,
-                "duration_ms": 1234.0,
-                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "model": "us.anthropic.claude-sonnet-4-6",
+                "engine": "claude-agent-sdk",
+                "agent_version": "1.2.3",
+                "agent_sha": "abc123",
             },
         )
     )
+    # Usage is sourced from usage_snapshot (per-turn deltas), not session_ended.
+    await sink.emit(
+        _ev(
+            "usage_snapshot",
+            {
+                "model": "us.anthropic.claude-sonnet-4-6",
+                "total_cost_usd": 0.42,
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 10,
+                },
+            },
+        )
+    )
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 1234.0}))
 
     spans = exp.get_finished_spans()
     [invoke] = [s for s in spans if s.name.startswith("invoke_agent")]
     attrs = dict(invoke.attributes or {})
-    assert attrs["gen_ai.system"] == "claude-agent-sdk"
+    # Item 1 — provider.name (not gen_ai.system) + engine name.
+    assert "gen_ai.system" not in attrs
+    assert attrs["gen_ai.provider.name"] == "anthropic"
+    assert attrs["computeragent.engine.name"] == "claude-agent-sdk"
     assert attrs["gen_ai.agent.name"] == "NordAssist"
+    # Item 2 — agent version + id from the manifest.
+    assert attrs["gen_ai.agent.version"] == "1.2.3"
+    assert attrs["gen_ai.agent.id"] == "abc123"
     assert attrs["gen_ai.conversation.id"] == "sess_X"
     assert attrs["gen_ai.operation.name"] == "invoke_agent"
     assert attrs["gen_ai.request.model"] == "us.anthropic.claude-sonnet-4-6"
     assert attrs["gen_ai.usage.input_tokens"] == 100
     assert attrs["gen_ai.usage.output_tokens"] == 50
+    # Item 2 — dotted cache-token keys (match TS + the SQL contract).
+    assert attrs["gen_ai.usage.cache_read.input_tokens"] == 20
+    assert attrs["gen_ai.usage.cache_creation.input_tokens"] == 10
+    assert "gen_ai.usage.cache_read_input_tokens" not in attrs
+    assert "gen_ai.usage.cache_creation_input_tokens" not in attrs
+    # cost on the root span (matches the materialized-column contract).
+    assert abs(attrs["computeragent.usage.cost_usd"] - 0.42) < 1e-9
 
 
 @pytest.mark.asyncio
 async def test_chat_span_per_assistant_message():
     sink, exp, _ = _build_inmemory_otel()
     await sink.emit(_ev("session_started", {"model": "m"}))
-    await sink.emit(_ev("assistant_message", {"model": "m", "text": "hi"}))
+    await sink.emit(
+        _ev("assistant_message", {"model": "m", "text": "hi", "stop_reason": "end_turn"})
+    )
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
 
     chats = [s for s in exp.get_finished_spans() if s.name.startswith("chat ")]
@@ -75,6 +107,23 @@ async def test_chat_span_per_assistant_message():
     assert attrs["gen_ai.operation.name"] == "chat"
     assert attrs["gen_ai.request.model"] == "m"
     assert attrs["gen_ai.conversation.id"] == "sess_X"
+    # Item 1 — provider on the chat span.
+    assert attrs["gen_ai.provider.name"] == "anthropic"
+    # Item 2 — response.model + finish_reasons.
+    assert attrs["gen_ai.response.model"] == "m"
+    assert tuple(attrs["gen_ai.response.finish_reasons"]) == ("stop",)
+
+
+@pytest.mark.asyncio
+async def test_chat_finish_reason_inferred_tool_call():
+    sink, exp, _ = _build_inmemory_otel()
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    # No explicit stop_reason, but the message called a tool → infer tool_call.
+    await sink.emit(_ev("assistant_message", {"model": "m", "text": "", "has_tool_use": True}))
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
+
+    chat = next(s for s in exp.get_finished_spans() if s.name.startswith("chat "))
+    assert tuple(dict(chat.attributes or {})["gen_ai.response.finish_reasons"]) == ("tool_call",)
 
 
 @pytest.mark.asyncio
@@ -90,6 +139,38 @@ async def test_execute_tool_span_paired_with_tool_result():
     attrs = dict(tool_spans[0].attributes or {})
     assert attrs["gen_ai.tool.name"] == "Read"
     assert attrs["gen_ai.tool.call.id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_content_is_bare_attribute(monkeypatch):
+    """Item 4 — tool args/result are bare span attributes, not .role/.content."""
+    from computeragent.telemetry.config import _reset_for_tests
+
+    _reset_for_tests()
+    monkeypatch.setenv("COMPUTERAGENT_CAPTURE_CONTENT", "1")
+    try:
+        sink, exp, _ = _build_inmemory_otel()
+        await sink.emit(_ev("session_started", {"model": "m"}))
+        await sink.emit(
+            _ev(
+                "tool_use",
+                {"tool_name": "Read", "tool_use_id": "t1", "tool_input": {"path": "/x"}},
+            )
+        )
+        await sink.emit(
+            _ev("tool_result", {"tool_use_id": "t1", "is_error": False, "content": "file body"})
+        )
+        await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
+
+        tool = next(s for s in exp.get_finished_spans() if s.name.startswith("execute_tool"))
+        attrs = dict(tool.attributes or {})
+        assert "path" in attrs["gen_ai.tool.call.arguments"]
+        assert attrs["gen_ai.tool.call.result"] == "file body"
+        assert "gen_ai.tool.call.arguments.content" not in attrs
+        assert "gen_ai.tool.call.arguments.role" not in attrs
+        assert "gen_ai.tool.call.result.content" not in attrs
+    finally:
+        _reset_for_tests()
 
 
 @pytest.mark.asyncio
@@ -125,11 +206,18 @@ async def test_token_usage_histogram_has_all_dimensions():
     assert "computeragent.usage.cost_usd" in by_name
 
     token_metric = by_name["gen_ai.client.token.usage"]
-    # Collect the token-type dimensions across data points.
+    # Collect the token-type + provider dimensions across data points.
     token_types = set()
+    providers = set()
     for dp in token_metric.data.data_points:
         token_types.add(dict(dp.attributes).get("gen_ai.token.type"))
+        providers.add(dict(dp.attributes).get("gen_ai.provider.name"))
     assert token_types == {"input", "output", "cache_read", "cache_creation"}
+    # Item 3 — provider dimension present on the histogram.
+    assert providers == {"anthropic"}
+
+    # Item 3 — cost histogram unit is "USD" (not "{usd}").
+    assert by_name["computeragent.usage.cost_usd"].unit == "USD"
 
 
 @pytest.mark.asyncio
@@ -144,6 +232,38 @@ async def test_cost_metric_recorded():
     cost = next(m for m in metrics if m.name == "computeragent.usage.cost_usd")
     sums = [dp.sum for dp in cost.data.data_points]
     assert any(abs(s - 0.123) < 1e-6 for s in sums)
+
+
+@pytest.mark.asyncio
+async def test_per_turn_roots_distinct_traces_and_deltas():
+    """Item 5a — each turn_started opens a fresh invoke_agent root (its own
+    trace); all share gen_ai.conversation.id; each root carries that turn's
+    per-turn usage delta."""
+    sink, exp, _ = _build_inmemory_otel()
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    # Turn 1
+    await sink.emit(_ev("turn_started", {"prompt": "first", "model": "m"}))
+    await sink.emit(_ev("assistant_message", {"model": "m", "text": "a1"}))
+    await sink.emit(
+        _ev("usage_snapshot", {"model": "m", "usage": {"input_tokens": 100, "output_tokens": 50}})
+    )
+    # Turn 2
+    await sink.emit(_ev("turn_started", {"prompt": "second", "model": "m"}))
+    await sink.emit(_ev("assistant_message", {"model": "m", "text": "a2"}))
+    await sink.emit(
+        _ev("usage_snapshot", {"model": "m", "usage": {"input_tokens": 200, "output_tokens": 70}})
+    )
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
+
+    invokes = [s for s in exp.get_finished_spans() if s.name.startswith("invoke_agent")]
+    assert len(invokes) == 2
+    # Distinct traces (one per turn), shared conversation id.
+    assert invokes[0].context.trace_id != invokes[1].context.trace_id
+    for inv in invokes:
+        assert dict(inv.attributes or {})["gen_ai.conversation.id"] == "sess_X"
+    # Per-turn input-token deltas (summed totals minus the per-turn baseline).
+    deltas = sorted(dict(s.attributes or {})["gen_ai.usage.input_tokens"] for s in invokes)
+    assert deltas == [100, 200]
 
 
 @pytest.mark.asyncio

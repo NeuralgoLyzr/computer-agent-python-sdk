@@ -271,12 +271,13 @@ class HarnessCoordinator:
         )
 
         # session_started fires ONCE per ComputerAgent lifecycle so AgentOS
-        # treats N chats as one conversation. The first chat's prompt is
-        # captured for the OtelSink's gen_ai.prompt.1 attribute AND for the
-        # AgentOS server's first-turn seeding of sessions[].entries (the
-        # server-side ingest projection now owns that write; AgentOSHttpSink
-        # just forwards the event). Subsequent chats emit user_message events
-        # so each new prompt appends to entries without re-seeding.
+        # treats N chats as one conversation. It carries identity + the first
+        # prompt for the AgentOS server's first-turn seeding of
+        # sessions[].entries (the server-side ingest projection owns that write;
+        # AgentOSHttpSink just forwards the event). Subsequent chats emit
+        # user_message events so each new prompt appends to entries without
+        # re-seeding. The OtelSink captures per-turn content via turn_started
+        # (emitted below), not via session_started.
         prompt_str = _stringify_prompt(message)
         is_first_chat = not self._lifecycle_started
         if is_first_chat:
@@ -295,6 +296,24 @@ class HarnessCoordinator:
                 payload={"text": prompt_str},
             )
             await self._pipeline.emit(user_ev)
+
+        # turn_started fires on EVERY chat (incl. the first). OtelSink consumes
+        # it to open a fresh invoke_agent root per turn (one trace per turn) and
+        # close the prior turn; AgentOS sinks ignore it. session_started above
+        # carries identity only.
+        _opts = ctx.manifest.options or {}
+        turn_model = (
+            _opts.get("model") if isinstance(_opts, dict) else getattr(_opts, "model", None)
+        )
+        await self._pipeline.emit(
+            TelemetryEvent.turn_started(
+                session_id=session_id,
+                agent_name=state.agent_name,
+                agent_description=state.agent_description,
+                prompt=prompt_str,
+                model=turn_model,
+            )
+        )
 
         return state, self._stream_engine_events(state, ctx)
 
@@ -430,6 +449,15 @@ class HarnessCoordinator:
             options=opts_view,
             prompt=prompt,
         )
+        # Engine + agent identity → OTel gen_ai.provider.name /
+        # computeragent.engine.name / gen_ai.agent.version / gen_ai.agent.id.
+        # The proxy path omits these; the sink falls back to claude-agent-sdk.
+        ev.payload["engine"] = self._engine.name
+        manifest = ctx.manifest
+        if getattr(manifest, "version", None):
+            ev.payload["agent_version"] = manifest.version
+        if getattr(manifest, "sha", None):
+            ev.payload["agent_sha"] = manifest.sha
         # Signal harness-mode to the AgentOS server's ingest projection.
         # The server writes ``source.type = "library"`` for harness-mode
         # docs, which fails AgentOS's ``hasResolvableSource`` check so
@@ -498,11 +526,11 @@ class _QueueAsyncIterable:
 
 
 def _stringify_prompt(message: Any) -> str:
-    """Derive a string-prompt for the ``session_started`` telemetry event.
+    """Derive a string-prompt for the session_started / turn_started events.
 
-    The OtelSink uses this for ``gen_ai.prompt.1.content``. Multi-message /
-    streaming inputs return ``"<streaming>"`` so the sink's existing
-    skip-on-sentinel logic kicks in.
+    The OtelSink captures this as the turn's user input message. Multi-message /
+    streaming inputs return ``"<streaming>"`` so the sink's skip-on-sentinel
+    logic kicks in.
     """
     if isinstance(message, str):
         return message

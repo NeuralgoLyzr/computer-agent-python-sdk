@@ -431,6 +431,9 @@ otel = [
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
 ]
+remote = [
+    { name = "httpx" },
+]
 sqlite = [
     { name = "aiosqlite" },
 ]
@@ -466,6 +469,7 @@ requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2,<0.3" },
     { name = "httpx", marker = "extra == 'agentos'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'all'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'remote'", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1,<2" },
     { name = "openai", marker = "extra == 'gitagent'", specifier = ">=1,<2" },
     { name = "opentelemetry-api", marker = "extra == 'all'", specifier = ">=1.27" },
@@ -481,7 +485,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'gitagent'", specifier = ">=6,<7" },
     { name = "typing-extensions", specifier = ">=4.12" },
 ]
-provides-extras = ["otel", "agentos", "cedar", "gitagent", "gap", "sqlite", "all"]
+provides-extras = ["otel", "agentos", "remote", "cedar", "gitagent", "gap", "sqlite", "all"]
 
 [package.metadata.requires-dev]
 dev = [
