@@ -289,3 +289,29 @@ async def test_error_session_ended_marks_span_error():
     [invoke] = [s for s in exp.get_finished_spans() if s.name.startswith("invoke_agent")]
     attrs = dict(invoke.attributes or {})
     assert attrs.get("error.type") == "RuntimeError"
+
+
+def test_agentos_otel_gateway_sets_endpoint_and_injects_cak(monkeypatch):
+    # AGENTOS_OTEL_URL + the cak_ key → export THROUGH the AgentOS gateway with
+    # an auto-injected Authorization: Bearer <cak_>; no vendor key needed.
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.trace import TracerProvider
+
+    monkeypatch.setenv("AGENTOS_OTEL_URL", "https://host/agentos/api/otel")
+    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_abc")
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_HEADERS", raising=False)
+    sink = OtelSink(tracer_provider=TracerProvider(), meter_provider=MeterProvider())
+    assert sink._endpoint == "https://host/agentos/api/otel"
+    assert sink._headers.get("Authorization") == "Bearer cak_abc"
+
+
+def test_no_gateway_leaves_direct_endpoint_unauthed(monkeypatch):
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.trace import TracerProvider
+
+    monkeypatch.delenv("AGENTOS_OTEL_URL", raising=False)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://otlp.nr-data.net")
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_HEADERS", raising=False)
+    sink = OtelSink(tracer_provider=TracerProvider(), meter_provider=MeterProvider())
+    assert sink._endpoint == "https://otlp.nr-data.net"
+    assert "Authorization" not in sink._headers

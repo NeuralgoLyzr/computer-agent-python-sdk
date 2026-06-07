@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — single AgentOS config via a discovery document (no endpoint paths in the SDK)
+
+A consumer now gives the SDK **one** AgentOS URL plus its `cak_` key, and the SDK
+discovers every other endpoint at runtime — so a server-side route change never
+forces an SDK release.
+
+- **`AGENTOS_DISCOVERY_URL`** — the full URL of the AgentOS discovery document
+  (e.g. `https://host/agentos/api/discovery`). The SDK GETs it once (memoized)
+  and reads the **absolute URLs** for ingest, `agent_id`/git-cred resolve, and
+  the OTLP trace gateway straight from it. **No endpoint path is hardcoded or
+  constructed in the SDK** — move a route server-side, update its discovery
+  document, and existing SDKs pick up the new URLs on next start.
+- The discovery document is public (URLs only, no secrets) — the OIDC
+  `.well-known` pattern. Server side: new `GET /agentos/api/discovery` in
+  `@computeragent/agentos-server` returns `{ version, endpoints }` with absolute
+  URLs derived from the request origin (honouring `X-Forwarded-*`, pinnable via
+  `AGENTOS_PUBLIC_URL`).
+- **Overrides** still win for a single endpoint or a discovery-less setup:
+  `AGENTOS_INGEST_URL`, `AGENTOS_API_URL`, `AGENTOS_OTEL_URL` (full URLs).
+- The remote-harness URL gained an env fallback, `COMPUTERAGENT_HARNESS_URL`
+  (the `harness_url=` kwarg still wins) — the harness/CAS is a separate service,
+  always a full URL, never discovered.
+- The one `cak_` key (`COMPUTERAGENT_HARNESS_TOKEN`, legacy `AGENTOS_INGEST_TOKEN`
+  honoured) now authenticates ingest + every resolved endpoint, including the
+  ingest sink's bearer.
+
 ### Added — remote harness support (`ComputerAgent(harness_url=...)`)
 
 `ComputerAgent` can now run an agent on a **remote harness server** instead of
@@ -28,6 +54,24 @@ the SDK a thin, stateless client — engine execution lives on the harness pod.
 - New standalone clients (the "talk to the protocol" surface), exported lazily:
   `from computeragent import HarnessClient, ComputerAgentServerClient`.
 - New `[remote]` extra (`httpx`). Local in-process mode is unchanged.
+
+### Added — OTel traces via the AgentOS gateway (one key, no vendor creds on the SDK)
+
+`OtelSink` can now export OTLP **through the AgentOS server** instead of straight
+to a vendor, so SDK consumers carry only their `cak_` key — the vendor/collector
+credential lives solely on the server.
+
+- Set `AGENTOS_OTEL_URL=<host>/agentos/api/otel`; the sink targets it and
+  **auto-injects** `Authorization: Bearer <COMPUTERAGENT_HARNESS_TOKEN ||
+  AGENTOS_INGEST_TOKEN>`. No `OTEL_EXPORTER_OTLP_HEADERS`, no New Relic key on the
+  client. A direct `endpoint=`/`configure()` endpoint or an explicit
+  `Authorization` header is respected (not overridden).
+- Server side (`@computeragent/agentos-server`): new cak_-authed (fail-closed)
+  OTLP reverse proxy `POST /agentos/api/otel/v1/{traces,metrics,logs}` that
+  forwards the raw OTLP body verbatim (protobuf/gzip preserved) to
+  `OTEL_GATEWAY_UPSTREAM_ENDPOINT` with `OTEL_GATEWAY_UPSTREAM_HEADERS`.
+- The SDK's three AgentOS URLs (`AGENTOS_INGEST_URL`, `AGENTOS_API_URL`,
+  `AGENTOS_OTEL_URL`) are now all keyed by the single `cak_`.
 
 ### Added — `agent_id` as a resolvable handle + mandatory ingest
 

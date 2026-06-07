@@ -14,23 +14,23 @@ public-repo behavior). The token is NEVER logged.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 logger = logging.getLogger("computeragent.git_credentials")
 
 
 def _api_base(explicit: str | None) -> str | None:
-    base = explicit or os.environ.get("AGENTOS_API_URL")
-    return base.rstrip("/") if base else None
+    if explicit:
+        return explicit.rstrip("/")
+    from .. import agentos
+
+    return agentos.api_url()
 
 
 def _token(explicit: str | None) -> str | None:
-    return (
-        explicit
-        or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN")
-        or os.environ.get("AGENTOS_INGEST_TOKEN")
-    )
+    from .. import agentos
+
+    return explicit or agentos.cak()
 
 
 async def resolve_git_credential(
