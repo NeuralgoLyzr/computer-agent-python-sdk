@@ -169,6 +169,8 @@ class ComputerAgentServerTransport:
         envs: Mapping[str, str],
         options: Mapping[str, Any],
         model: str | None,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
     ) -> None:
         self._client = client
         self._engine = engine
@@ -177,6 +179,8 @@ class ComputerAgentServerTransport:
         self._envs = dict(envs)
         self._options = dict(options)
         self._model = model
+        self._agent_id = agent_id
+        self._agent_name = agent_name
         self._sandbox_id: str | None = None
 
     async def ensure_open(self, lifecycle_session_id: str) -> str:
@@ -195,6 +199,14 @@ class ComputerAgentServerTransport:
             body["options"] = self._options
         if self._model:
             body["model"] = self._model
+        # RBAC / dashboard identity — mirrors the AgentOS UI's sandboxBodyFor.
+        # The CAS reads body.identity to (a) tag OTel spans (computeragent.agent.id)
+        # and (b) write the chat_sessions index so the run shows in the dashboard
+        # session list. groupId/ownerId are filled server-side from the cak_ key.
+        if self._agent_id:
+            body["identity"] = {"agentId": self._agent_id}
+        if self._agent_name:
+            body["agentName"] = self._agent_name
         resp = await self._client.create_sandbox(body)
         self._sandbox_id = str(resp["sandboxId"])
         return self._sandbox_id
@@ -254,8 +266,9 @@ class RemoteCoordinator:
         self._model = model
         self._agent_name = agent_name
         self._agent_description = agent_description
-        # Stable agent identifier (telemetry/registry only — never sent in the
-        # sandbox/session create body). Stamped onto every event in _emit_safe.
+        # Stable agent identifier. Stamped onto every telemetry event in
+        # _emit_safe AND sent in the CAS sandbox body (server transport) as
+        # `identity.agentId` so the server tags spans + writes the session index.
         self._agent_id = agent_id
         self._on_tool_call = on_tool_call
         self._auth = auth
@@ -293,6 +306,8 @@ class RemoteCoordinator:
                 envs=self._envs,
                 options=self._options,
                 model=self._model,
+                agent_id=self._agent_id,
+                agent_name=self._agent_name,
             )
         else:
             opts = dict(self._options)

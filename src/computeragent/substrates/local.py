@@ -119,6 +119,13 @@ def _clone_env(url: str, credential: Mapping[str, str] | None) -> dict[str, str]
         host = (credential.get("host") or _host_of(url)).lower()
         username = credential.get("username") or "x-access-token"
         basic = base64.b64encode(f"{username}:{token}".encode()).decode()
+        # Disable the system gitconfig so platform credential helpers
+        # (osxkeychain, git-credential-manager) can't inject a conflicting
+        # Authorization header alongside our extraHeader. GIT_CONFIG_NOSYSTEM
+        # is the only reliable way to silence system-level helpers — setting
+        # credential.helper="" via GIT_CONFIG_KEY_* only appends an empty
+        # entry without clearing the system-installed one.
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
         env["GIT_CONFIG_COUNT"] = "1"
         env["GIT_CONFIG_KEY_0"] = f"http.https://{host}/.extraHeader"
         env["GIT_CONFIG_VALUE_0"] = f"Authorization: Basic {basic}"
