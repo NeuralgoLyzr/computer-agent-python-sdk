@@ -20,6 +20,7 @@ Engines are imported lazily so a user who installs only ``computer-agent-py``
 from __future__ import annotations
 
 from .authorizer import PolicyToolAuthorizer
+from .srs import SrsPolicyEngine, srs_authorizer_from_env
 from .types import (
     FailMode,
     PolicyAction,
@@ -30,8 +31,6 @@ from .types import (
     PolicyResource,
     PolicyResult,
 )
-
-from .srs import SrsPolicyEngine, srs_authorizer_from_env
 
 __all__ = [
     "FailMode",
