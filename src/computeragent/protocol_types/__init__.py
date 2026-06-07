@@ -157,10 +157,14 @@ class SubstrateHandle:
 
     ``workspace_path`` is where the engine should rest the agent's cwd.
     ``close`` is awaited when the harness disposes the substrate; idempotent.
+    ``revision`` is the resolved commit SHA when the source was a git repo
+    (else ``None``) — the coordinator stamps it onto the manifest so it rides
+    ``session_started`` telemetry for the server's SHA sync.
     """
 
     workspace_path: Path
     close: Callable[[], Awaitable[None]]
+    revision: str | None = None
 
 
 # ── Protocols ──────────────────────────────────────────────────────────────
@@ -200,6 +204,7 @@ class Substrate(Protocol):
         *,
         source: IdentitySource,
         envs: Mapping[str, str],
+        git_credential: Mapping[str, str] | None = None,
     ) -> SubstrateHandle: ...
 
 

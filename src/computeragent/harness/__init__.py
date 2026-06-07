@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -188,9 +189,16 @@ class ComputerAgent:
         harness: str | None = None,
         harness_kind: str = "protocol",
         harness_auth: tuple[str, str] | str | None = None,
+        # API key for the remote server, sent as `Authorization: Bearer`.
+        # Falls back to the COMPUTERAGENT_HARNESS_TOKEN env var when omitted.
         harness_token: str | None = None,
     ) -> None:
         if harness_url is not None:
+            # The API key the remote harness/ComputerAgent server validates.
+            # Explicit harness_token= wins; otherwise fall back to the env var
+            # (mirrors AgentOSHttpSink reading AGENTOS_INGEST_TOKEN). Sent as
+            # `Authorization: Bearer <token>` by the remote clients.
+            harness_token = harness_token or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN")
             _engine_src = harness if harness is not None else engine
             remote_engine: str = (
                 _engine_src if isinstance(_engine_src, str) else getattr(_engine_src, "name", "claude-agent-sdk")

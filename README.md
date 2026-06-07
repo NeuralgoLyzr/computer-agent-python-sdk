@@ -124,6 +124,33 @@ async with ComputerAgent(
 
 The protocol layer is also usable directly: `from computeragent import HarnessClient, ComputerAgentServerClient`. `run_task(harness_url=...)` works the same for one-shots.
 
+**Authentication.** The remote harness / CAS validate an AgentOS API key (`cak_…`).
+Pass it as `harness_token="cak_…"` (sent as `Authorization: Bearer`), or set
+`COMPUTERAGENT_HARNESS_TOKEN` and omit the arg — explicit wins, env is the
+fallback. The **same key works everywhere**: remote auth, telemetry ingest, and
+the private-repo credential resolve below.
+
+### Mode 2c — private GAP repos (git credentials)
+
+When `source` is a **private** git URL, the SDK fetches a short-lived,
+group-scoped PAT from AgentOS so the clone succeeds — and the token never
+touches `argv`, the repo URL, or the logs.
+
+```python
+async with ComputerAgent(
+    source="github.com/org/private-agent",
+    harness_token="cak_…",                 # or COMPUTERAGENT_HARNESS_TOKEN
+) as agent:                                # + AGENTOS_API_URL → resolves the PAT
+    result = await agent.chat("…")
+```
+
+- The SDK POSTs the repo URL + its `cak_` key to `POST {AGENTOS_API_URL}/git-credentials/resolve`; AgentOS returns the decrypted PAT for the key's **group** + the repo **host** (strictly group-scoped — no admin bypass).
+- The token is injected via `GIT_CONFIG_*` → `http.<host>.extraHeader`, so it never appears in process args, the URL, or logs (host-only logging). `git@`/`ssh://` URLs pass through untouched.
+- **Best-effort:** missing config, a miss (404), or an auth failure (401/403) falls back to an unauthenticated clone — public repos are unaffected.
+- **SHA sync:** after cloning, the SDK captures `git rev-parse HEAD` and rides it on `session_started` as `agent_sha`; the AgentOS server stamps `sourceSha`/`sourceSyncedAt` on the registry doc.
+
+Requires `AGENTOS_API_URL` (e.g. `https://host:8788/agentos/api/v1`) + a `cak_` key whose role includes `git-credentials:read`. Uses `httpx` (the `[remote]`/`[agentos]` extra).
+
 ## Quickstart
 
 ```python

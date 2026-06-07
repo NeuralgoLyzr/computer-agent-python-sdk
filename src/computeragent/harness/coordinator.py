@@ -137,8 +137,17 @@ class HarnessCoordinator:
     async def _ensure_booted(self) -> None:
         if self._substrate_handle is not None:
             return
+        # Private GAP repos: ask AgentOS (with our API key) for a group-scoped
+        # PAT for this repo's host. Best-effort — a miss/!config leaves it None
+        # and the substrate clones unauthenticated (public-repo behavior).
+        git_credential = None
+        if isinstance(self._source, str):
+            from .git_credential_client import resolve_git_credential
+
+            with suppress(Exception):
+                git_credential = await resolve_git_credential(self._source)
         self._substrate_handle = await self._substrate.boot(
-            source=self._source, envs=self._envs
+            source=self._source, envs=self._envs, git_credential=git_credential
         )
         self._workspace_path = self._substrate_handle.workspace_path
         loaded = await self._identity_loader.load(
@@ -146,6 +155,13 @@ class HarnessCoordinator:
             target_engine=self._engine.name,
             workspace_path=self._workspace_path,
         )
+        # Stamp the cloned commit SHA onto the manifest (if the loader didn't
+        # already provide one) so it rides session_started → server SHA sync.
+        revision = getattr(self._substrate_handle, "revision", None)
+        if revision and not getattr(loaded, "sha", None):
+            from dataclasses import replace
+
+            loaded = replace(loaded, sha=revision)
         # Overlay caller-supplied options (from ComputerAgent kwargs) on
         # top of whatever the loader resolved. Caller intent wins.
         if self._options_overlay:

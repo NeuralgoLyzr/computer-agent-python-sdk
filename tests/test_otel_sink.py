@@ -112,6 +112,9 @@ async def test_chat_span_per_assistant_message():
     # Item 2 — response.model + finish_reasons.
     assert attrs["gen_ai.response.model"] == "m"
     assert tuple(attrs["gen_ai.response.finish_reasons"]) == ("stop",)
+    # Agent identity propagated onto the child chat span (not just the root) so a
+    # flat `WHERE gen_ai.agent.name = X` filter selects the whole trace.
+    assert attrs["gen_ai.agent.name"] == "AcmeAssist"
 
 
 @pytest.mark.asyncio
@@ -139,6 +142,8 @@ async def test_execute_tool_span_paired_with_tool_result():
     attrs = dict(tool_spans[0].attributes or {})
     assert attrs["gen_ai.tool.name"] == "Read"
     assert attrs["gen_ai.tool.call.id"] == "t1"
+    # Agent identity propagated onto the child execute_tool span.
+    assert attrs["gen_ai.agent.name"] == "AcmeAssist"
 
 
 @pytest.mark.asyncio
