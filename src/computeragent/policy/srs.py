@@ -2,22 +2,24 @@
 SRS, so Python agents enforce the **same RAI policies authored in the Console**
 (OPA + Cedar guardrails) as the TypeScript stack.
 
-**Where the policy comes from mirrors the TS path — fetched from agentos over
-HTTP**, the same channel library-mode agents already use to register telemetry
-(``AGENTOS_INGEST_URL`` / ``AGENTOS_INGEST_TOKEN``). agentos resolves the
-per-agent ``agent_policies`` binding (its ``srsPolicyForAgent``) and returns the
-``{endpoint, apiKey, policyId, principalId}`` block — so the Python process needs
-**no Mongo creds and no SRS key**; agentos hands it everything, exactly like
-agentos hands the harness the ``policy`` block on a TS run.
+**Every SRS call is routed through the agentos ingest proxy** (bearer token —
+``AGENTOS_INGEST_URL`` / ``AGENTOS_INGEST_TOKEN``), the same channel library-mode
+agents already use for telemetry. agentos resolves the per-agent
+``agent_policies`` binding (its ``srsPolicyForAgent``) and proxies both the
+policy fetch and the per-tool evaluation to SRS, injecting the SRS key
+**server-side**. So the Python process needs **no Mongo creds, no SRS key, and
+no network path to SRS** — it only ever talks to agentos.
 
 Resolution order:
-  1. explicit ``SRS_BASE_URL`` + ``SRS_POLICY_ID`` (standalone, no agentos), else
-  2. fetch ``GET {ingest_base}/policy-config/{agent_name}`` from agentos.
+  1. explicit ``endpoint`` + ``SRS_POLICY_ID`` → legacy *standalone* path that
+     calls SRS directly (testing / no agentos), else
+  2. ``GET {ingest_base}/policy-config/{agent_name}`` → agentos returns just the
+     bound ``policyId`` (no endpoint/key); all further calls go via agentos.
 Unbound agent → no policy → runs free (inert), like TS returning null.
 
-Enforcement: fetch the RAI policy once (``GET /v1/rai/policies/{id}``), cache its
-cedar + opa guardrails, then ``POST /v1/guardrails/evaluate-tool-call`` per tool.
-Fail-closed on SRS errors; fail-open if the binding can't be resolved.
+Enforcement: fetch the RAI policy once (cache cedar + opa guardrails), then
+``POST .../guardrails/evaluate-tool-call`` per tool — both through the agentos
+proxy. Fail-closed on SRS errors; fail-open if the binding can't be resolved.
 
 Only depends on ``httpx`` (a core dependency).
 """
@@ -81,10 +83,11 @@ class SrsPolicyEngine:
         self._guardrails: dict[str, Any] | None = None
         self._resolved = False
         self._inert = False  # no policy bound -> allow everything
+        self._via_agentos = False  # set in _resolve_config: proxy vs direct SRS
         self._client = client or httpx.AsyncClient(timeout=timeout)
 
     @classmethod
-    def from_env(cls, *, agent_name: str = "", **overrides: Any) -> "SrsPolicyEngine":
+    def from_env(cls, *, agent_name: str = "", **overrides: Any) -> SrsPolicyEngine:
         return cls(
             endpoint=overrides.pop("endpoint", None) or os.environ.get("SRS_BASE_URL"),
             api_key=overrides.pop("api_key", None) or os.environ.get("SRS_API_KEY", ""),
@@ -96,42 +99,60 @@ class SrsPolicyEngine:
         )
 
     async def _resolve_config(self) -> None:
-        """Resolve endpoint + api_key + policy_id (once). Explicit config wins;
-        otherwise fetch the agent's policy block from agentos (the TS-style
-        binding lookup, over HTTP)."""
+        """Decide transport + resolve ``policy_id`` (once).
+
+        Default: route **through the agentos ingest proxy** (bearer token) — the
+        SDK never holds the SRS api key nor needs network access to SRS; agentos
+        injects the key server-side. An explicit ``endpoint`` + ``policy_id``
+        selects a legacy standalone path that calls SRS directly (testing only).
+        """
         if self._resolved:
             return
         self._resolved = True
         if self._endpoint and self._policy_id:
-            return  # fully explicit
+            self._via_agentos = False  # explicit standalone SRS (no agentos)
+            return
         if not self._agentos_base or not self._agent_name:
             self._inert = True
             return
+        self._via_agentos = True
         try:
-            headers = {"authorization": f"Bearer {self._agentos_token}"} if self._agentos_token else {}
             resp = await self._client.get(
                 f"{self._agentos_base}/policy-config/{self._agent_name}",
-                headers=headers,
+                headers=self._headers(),
             )
             resp.raise_for_status()
             policy = (resp.json() or {}).get("policy")
             if not policy or not policy.get("policyId"):
                 self._inert = True  # unbound -> run free
                 return
-            self._endpoint = str(policy.get("endpoint", "")).rstrip("/") or self._endpoint
-            self._api_key = policy.get("apiKey", "") or self._api_key
             self._policy_id = policy.get("policyId")
         except Exception as exc:  # noqa: BLE001 - a control-plane blip shouldn't brick the agent
             logger.warning("agentos policy-config fetch failed for %r: %s", self._agent_name, exc)
             self._inert = True
+
+    def _url(self, suffix: str) -> str:
+        """Build the SRS URL — via the agentos proxy (default) or SRS directly
+        (standalone). ``suffix`` is the SRS path *without* the ``/v1`` prefix,
+        e.g. ``/rai/policies/<id>`` or ``/guardrails/evaluate-tool-call``."""
+        if self._via_agentos:
+            return f"{self._agentos_base}{suffix}"
+        return f"{self._endpoint}/v1{suffix}"
+
+    def _headers(self) -> dict[str, str]:
+        """Auth for the chosen transport: agentos bearer token (proxy) vs the
+        SRS api key (standalone direct)."""
+        if self._via_agentos:
+            return {"authorization": f"Bearer {self._agentos_token}"} if self._agentos_token else {}
+        return {"x-api-key": self._api_key}
 
     async def _load_policy(self) -> None:
         await self._resolve_config()
         if self._inert or self._guardrails is not None:
             return
         resp = await self._client.get(
-            f"{self._endpoint}/v1/rai/policies/{self._policy_id}",
-            headers={"x-api-key": self._api_key},
+            self._url(f"/rai/policies/{self._policy_id}"),
+            headers=self._headers(),
         )
         resp.raise_for_status()
         doc = resp.json()
@@ -156,8 +177,8 @@ class SrsPolicyEngine:
                 "bundle_name": input.resource.agent_name,
             }
             resp = await self._client.post(
-                f"{self._endpoint}/v1/guardrails/evaluate-tool-call",
-                headers={"x-api-key": self._api_key},
+                self._url("/guardrails/evaluate-tool-call"),
+                headers=self._headers(),
                 json=body,
             )
             resp.raise_for_status()
