@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — remote harness support (`ComputerAgent(harness_url=...)`)
+
+`ComputerAgent` can now run an agent on a **remote harness server** instead of
+in-process, speaking the Harness / Computer-Agent Protocol over HTTP. This makes
+the SDK a thin, stateless client — engine execution lives on the harness pod.
+
+- `ComputerAgent(harness_url=..., harness="claude-agent-sdk", source=..., harness_kind=...)`:
+  - `harness_kind="protocol"` (default) → the bare `/v1/sessions/*` harness server
+    (`@computeragent/harness-server`, port 7700). Full multi-turn + `on_tool_call`
+    permission round-trip.
+  - `harness_kind="server"` → the ComputerAgent server (port 8787): the client picks
+    the substrate via `runtime` (`local`/`bwrap`/`e2b`), warm `/sandboxes/:id/chat`
+    multi-turn, `/run` one-shot. (No interactive permission endpoint — the server's
+    `permission_mode`/SRS policy governs tools.)
+  - `harness_kind="auto"` probes `/v1/health` then `/health`.
+- `agent.chat()` streams raw `HarnessEvent`s (`ca_session_started`, `sdk_message`,
+  `ca_usage_snapshot`, `ca_session_ended`, …); `await handle.result()` returns the
+  usual `ChatResult` (messages + usage + session_id). `run_task(harness_url=...)` too.
+- New standalone clients (the "talk to the protocol" surface), exported lazily:
+  `from computeragent import HarnessClient, ComputerAgentServerClient`.
+- New `[remote]` extra (`httpx`). Local in-process mode is unchanged.
+
+### Added — remote auth (`cak_` API key)
+
+- `ComputerAgent(harness_token="cak_…")` is sent as `Authorization: Bearer` to
+  the remote harness / CAS. When omitted it falls back to the
+  `COMPUTERAGENT_HARNESS_TOKEN` env var (mirroring how `AgentOSHttpSink` reads
+  `AGENTOS_INGEST_TOKEN`). One key serves remote auth, telemetry ingest, and the
+  git-credential resolve below.
+
+### Added — private GAP repos (group-scoped git credentials + SHA sync)
+
+The `local` substrate can now clone **private** git repos by resolving a
+short-lived PAT from AgentOS, without leaking the token.
+
+- New `computeragent.harness.git_credential_client.resolve_git_credential()`:
+  POSTs the repo URL + the SDK's `cak_` key to
+  `POST {AGENTOS_API_URL}/git-credentials/resolve`; AgentOS returns the
+  decrypted PAT for the key's **group** + the repo **host**. Best-effort — any
+  missing config / network error / 401 / 403 / 404 returns `None` and the
+  substrate clones unauthenticated (public-repo behavior unchanged). The token
+  is never logged.
+- `LocalSubstrate.boot(..., git_credential=...)` injects the PAT via
+  `GIT_CONFIG_*` → `http.<host>.extraHeader` (Basic), so the token never appears
+  in `argv`, the URL, or error/log surfaces (clone errors log host-only).
+  `git@`/`ssh://` URLs pass through. `Substrate.boot` + `SubstrateHandle` gain
+  the `git_credential` param / `revision` field.
+- **SHA sync:** after cloning, the substrate runs `git rev-parse HEAD` and the
+  coordinator stamps it onto the manifest (when the loader didn't supply one) so
+  it rides `session_started` as `agent_sha` → the server records
+  `sourceSha`/`sourceSyncedAt` on the registry doc.
+- New env: `AGENTOS_API_URL` (credential-resolve base) + the existing
+  `COMPUTERAGENT_HARNESS_TOKEN` (the `cak_` key; role needs `git-credentials:read`).
+
+### Fixed — OTel agent identity on every span
+
+`gen_ai.agent.{name,version,id,description}` are now stamped on **every** span of
+a session (the `invoke_agent` root *and* its `chat` / `execute_tool` children),
+not just the root. A flat `WHERE gen_ai.agent.name = X` filter now selects the
+whole trace; previously any per-agent aggregate over all spans (span count,
+latency-by-operation, throughput) silently dropped every child span.
+
 ### Changed — AgentOS telemetry now ships over HTTP (**BREAKING**)
 
 The AgentOS Mongo sinks have been replaced by a single HTTP sink. The AgentOS

@@ -53,6 +53,18 @@ async def query(  # noqa: PLR0912 - mirror upstream's tolerant param surface
                 prompt=prompt,
             )
         )
+        # One query() == one turn. turn_started opens the per-turn invoke_agent
+        # root in OtelSink and carries the user prompt for content capture
+        # (session_started carries identity + system prompt only).
+        await pipeline.emit(
+            TelemetryEvent.turn_started(
+                session_id=session_id,
+                agent_name=agent_name,
+                agent_description=agent_description,
+                prompt=prompt,
+                model=getattr(options, "model", None),
+            )
+        )
 
         last_result: ResultMessage | None = None
         upstream_kwargs: dict[str, Any] = {"prompt": prompt}

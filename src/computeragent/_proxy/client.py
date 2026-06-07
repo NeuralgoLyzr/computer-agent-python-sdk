@@ -81,6 +81,16 @@ class ClaudeSDKClient:
                 prompt=prompt if prompt is not None else "<connect>",
             )
         )
+        if prompt is not None:
+            # First turn's prompt — open a per-turn invoke_agent root in OtelSink.
+            await pipeline.emit(
+                TelemetryEvent.turn_started(
+                    session_id=self._session_id,
+                    agent_name=self._agent_name,
+                    agent_description=self._agent_description,
+                    prompt=prompt,
+                )
+            )
         if prompt is None:
             await self._inner.connect()
         else:
@@ -107,6 +117,16 @@ class ClaudeSDKClient:
     async def query(
         self, prompt: str | AsyncIterable[dict[str, Any]], session_id: str = "default"
     ) -> None:
+        # Each query() is a new turn — open a fresh per-turn invoke_agent root
+        # (one trace per turn) and close the prior turn in OtelSink.
+        await get_pipeline().emit(
+            TelemetryEvent.turn_started(
+                session_id=self._session_id,
+                agent_name=self._agent_name,
+                agent_description=self._agent_description,
+                prompt=prompt,
+            )
+        )
         await self._inner.query(prompt, session_id=session_id)
 
     async def receive_messages(self) -> AsyncIterator[Any]:

@@ -43,7 +43,7 @@ def configure(
     sample_rate: float = 1.0,
     capture_content: bool = False,
     capture_content_mode: Literal["events", "attributes", "both"] = "events",
-    max_attribute_length: int = 8192,
+    max_attribute_length: int = 4096,
     fail_open: bool = False,
     temporality: Literal["delta", "cumulative"] | None = None,
 ) -> Pipeline:
@@ -116,7 +116,7 @@ def _build_default_pipeline() -> Pipeline:
         "temporality": os.environ.get("COMPUTERAGENT_OTEL_TEMPORALITY"),
         "capture_content": _env_bool("COMPUTERAGENT_CAPTURE_CONTENT", default=False),
         "capture_content_mode": os.environ.get("COMPUTERAGENT_CAPTURE_CONTENT_MODE", "events"),
-        "max_attribute_length": int(os.environ.get("COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH", "8192")),
+        "max_attribute_length": int(os.environ.get("COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH", "4096")),
     }
     return Pipeline(middleware=[], sinks=_auto_sinks(), fail_open=False)
 
