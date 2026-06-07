@@ -23,6 +23,7 @@ logger = logging.getLogger("computeragent.telemetry")
 
 EventKind = Literal[
     "session_started",
+    "turn_started",
     "user_message",
     "assistant_message",
     "system_message",
@@ -96,6 +97,33 @@ class TelemetryEvent:
             agent_description=agent_description,
             payload=payload,
             raw=options,
+        )
+
+    @classmethod
+    def turn_started(
+        cls,
+        *,
+        session_id: str,
+        agent_name: str | None,
+        agent_description: str | None = None,
+        prompt: Any,
+        model: str | None = None,
+    ) -> TelemetryEvent:
+        """Per-turn boundary. Mirrors the TS ``ca_turn_started`` — the OtelSink
+        closes the prior turn's tree and opens a fresh ``invoke_agent`` root.
+
+        Emitted on EVERY turn (the first chat and each subsequent one). Other
+        sinks ignore it; only ``OtelSink`` consumes it.
+        """
+        return cls(
+            kind="turn_started",
+            session_id=session_id,
+            agent_name=agent_name,
+            agent_description=agent_description,
+            payload={
+                "prompt": prompt if isinstance(prompt, str) else "<streaming>",
+                "model": model,
+            },
         )
 
     @classmethod
@@ -222,8 +250,10 @@ class TelemetryEvent:
 
         if isinstance(msg, AssistantMessage):
             text_parts: list[str] = []
+            has_tool_use = False
             for block in getattr(msg, "content", []) or []:
                 if isinstance(block, ToolUseBlock):
+                    has_tool_use = True
                     events.append(
                         cls(
                             kind="tool_use",
@@ -250,6 +280,10 @@ class TelemetryEvent:
                         "model": getattr(msg, "model", None),
                         "text": "".join(text_parts),
                         "block_count": len(getattr(msg, "content", []) or []),
+                        # stop_reason + has_tool_use feed gen_ai.response.finish_reasons
+                        # on the chat span (OtelSink._map_finish_reason).
+                        "stop_reason": getattr(msg, "stop_reason", None),
+                        "has_tool_use": has_tool_use,
                     },
                     raw=msg,
                 )

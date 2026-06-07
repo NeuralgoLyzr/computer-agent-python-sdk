@@ -20,17 +20,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from ..engines import resolve_engine
 from ..identity import resolve_identity_loader
 from ..protocol_types import (
     EngineDriver,
-    EngineEvent,
     IdentityLoader,
     IdentitySource,
     PermissionRequest,
@@ -67,35 +67,45 @@ class ChatResult:
     duration_ms: float
 
 
+class _CoordinatorLike(Protocol):
+    """The slice of a coordinator that :class:`ChatHandle` drives. Both the
+    local :class:`HarnessCoordinator` and the remote ``RemoteCoordinator``
+    satisfy it structurally."""
+
+    async def run_chat(self, message: Any) -> tuple[_SessionState, AsyncIterator[Any]]: ...
+    async def dispose(self) -> None: ...
+
+
 class ChatHandle:
     """Live handle to one in-flight chat session.
 
-    ``async for ev in handle`` streams :class:`EngineEvent`s in order.
+    ``async for ev in handle`` streams events in order — :class:`EngineEvent`s
+    in local mode, raw ``HarnessEvent``s (``ca_*``) in remote mode.
     ``await handle`` drains the stream and returns a :class:`ChatResult`.
     Both forms compose: a partial iteration before ``await`` resumes
     where iteration left off.
 
-    The actual engine run is launched lazily on first iteration — calling
+    The actual run is launched lazily on first iteration — calling
     ``chat()`` itself does not block, mirroring the TS surface.
     """
 
     def __init__(
         self,
         *,
-        coordinator: HarnessCoordinator,
+        coordinator: _CoordinatorLike,
         message: Any,
     ) -> None:
         self._coordinator = coordinator
         self._message = message
         self._state: _SessionState | None = None
-        self._stream: AsyncIterator[EngineEvent] | None = None
+        self._stream: AsyncIterator[Any] | None = None
         self._drained = False
         self._result: ChatResult | None = None
 
-    def __aiter__(self) -> AsyncIterator[EngineEvent]:
+    def __aiter__(self) -> AsyncIterator[Any]:
         return self._iterate()
 
-    async def _iterate(self) -> AsyncIterator[EngineEvent]:
+    async def _iterate(self) -> AsyncIterator[Any]:
         if self._drained:
             return
         if self._stream is None:
@@ -172,7 +182,47 @@ class ComputerAgent:
         budget_max_usd: float | None = None,
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
+        # ── remote harness mode ──────────────────────────────────────────
+        # When ``harness_url`` is set, the engine runs on a REMOTE harness
+        # server (the engine/substrate/loader run there, not locally).
+        harness_url: str | None = None,
+        harness: str | None = None,
+        harness_kind: str = "protocol",
+        harness_auth: tuple[str, str] | str | None = None,
+        # API key for the remote server, sent as `Authorization: Bearer`.
+        # Falls back to the COMPUTERAGENT_HARNESS_TOKEN env var when omitted.
+        harness_token: str | None = None,
     ) -> None:
+        if harness_url is not None:
+            # The API key the remote harness/ComputerAgent server validates.
+            # Explicit harness_token= wins; otherwise fall back to the env var
+            # (mirrors AgentOSHttpSink reading AGENTOS_INGEST_TOKEN). Sent as
+            # `Authorization: Bearer <token>` by the remote clients.
+            harness_token = harness_token or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN")
+            _engine_src = harness if harness is not None else engine
+            remote_engine: str = (
+                _engine_src if isinstance(_engine_src, str) else getattr(_engine_src, "name", "claude-agent-sdk")
+            )
+            self._coordinator: _CoordinatorLike = _build_remote_coordinator_from_kwargs(
+                harness_url=harness_url,
+                harness_kind=harness_kind,
+                engine=remote_engine,
+                identity_loader=identity_loader,
+                source=source,
+                runtime=runtime,
+                envs=dict(envs or {}),
+                options=dict(options or {}),
+                model=model,
+                session_id=session_id,
+                agent_name=agent_name,
+                agent_description=agent_description,
+                on_tool_call=on_tool_call,
+                harness_auth=harness_auth,
+                harness_token=harness_token,
+                telemetry_pipeline=telemetry_pipeline,
+            )
+            return
+
         resolved_engine = engine if isinstance(engine, EngineDriver) else resolve_engine(engine)
         resolved_substrate = (
             runtime if isinstance(runtime, Substrate) else resolve_substrate(runtime)
@@ -244,6 +294,60 @@ class ComputerAgent:
         return ChatHandle(coordinator=self._coordinator, message=message)
 
 
+def _build_remote_coordinator_from_kwargs(
+    *,
+    harness_url: str,
+    harness_kind: str,
+    engine: str,
+    identity_loader: str | IdentityLoader,
+    source: IdentitySource,
+    runtime: str | Substrate,
+    envs: Mapping[str, str],
+    options: Mapping[str, Any],
+    model: str | None,
+    session_id: str | None,
+    agent_name: str | None,
+    agent_description: str | None,
+    on_tool_call: Callable[[PermissionRequest], Awaitable[dict[str, Any]]] | None,
+    harness_auth: tuple[str, str] | str | None,
+    harness_token: str | None,
+    telemetry_pipeline: Pipeline | None,
+) -> _CoordinatorLike:
+    """Map ``ComputerAgent`` kwargs → a ``RemoteCoordinator``. Imported lazily
+    so the ``[remote]`` extra (httpx) is only required in remote mode."""
+    from .remote import build_remote_coordinator
+
+    loader = identity_loader if isinstance(identity_loader, str) else getattr(
+        identity_loader, "name", "gitagentprotocol"
+    )
+    # Remote harness servers register "gitagentprotocol"; the local default
+    # "passthrough" isn't registered there, so map it across.
+    if loader == "passthrough":
+        loader = "gitagentprotocol"
+    runtime_name = runtime if isinstance(runtime, str) else None
+    if harness_kind == "protocol":
+        # Bare /v1 protocol: the substrate is server-side; runtime is N/A.
+        runtime_name = None
+    return build_remote_coordinator(
+        harness_url=harness_url,
+        harness_kind=harness_kind,
+        engine=engine,
+        loader=loader,
+        source=source,
+        runtime=runtime_name,
+        envs=envs,
+        options=options,
+        model=model,
+        session_id=session_id,
+        agent_name=agent_name,
+        agent_description=agent_description,
+        on_tool_call=on_tool_call,
+        auth=harness_auth,
+        token=harness_token,
+        telemetry_pipeline=telemetry_pipeline,
+    )
+
+
 async def run_task(
     *,
     message: ChatInput,
@@ -263,6 +367,11 @@ async def run_task(
     budget_max_usd: float | None = None,
     telemetry_pipeline: Pipeline | None = None,
     project_key: str = "default",
+    harness_url: str | None = None,
+    harness: str | None = None,
+    harness_kind: str = "protocol",
+    harness_auth: tuple[str, str] | str | None = None,
+    harness_token: str | None = None,
 ) -> ChatResult:
     """One-shot convenience: spin up :class:`ComputerAgent`, send one
     message, drain, dispose, return the :class:`ChatResult`."""
@@ -283,6 +392,11 @@ async def run_task(
         budget_max_usd=budget_max_usd,
         telemetry_pipeline=telemetry_pipeline,
         project_key=project_key,
+        harness_url=harness_url,
+        harness=harness,
+        harness_kind=harness_kind,
+        harness_auth=harness_auth,
+        harness_token=harness_token,
     ) as agent:
         return await agent.chat(message)
 

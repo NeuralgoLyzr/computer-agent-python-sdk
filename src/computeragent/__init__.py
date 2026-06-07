@@ -139,6 +139,9 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "ChatInput",
     "ChatResult",
     "ComputerAgent",
+    # remote-harness clients (0.3.0; lazy — require the [remote] extra)
+    "ComputerAgentServerClient",
+    "HarnessClient",
     "EngineCapabilities",
     "EngineContext",
     "EngineDriver",
@@ -161,3 +164,18 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "UsageRollup",
     "run_task",
 ]
+
+
+def __getattr__(name: str):  # type: ignore[no-untyped-def]
+    """Lazy exports for the optional ``[remote]`` extra — so a local-only
+    install never imports ``httpx`` at package import time. Raises a clean
+    ImportError (with an install hint) only when actually accessed."""
+    if name == "HarnessClient":
+        from .harness.protocol import HarnessClient
+
+        return HarnessClient
+    if name == "ComputerAgentServerClient":
+        from .harness.cas_client import ComputerAgentServerClient
+
+        return ComputerAgentServerClient
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
