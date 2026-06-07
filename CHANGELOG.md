@@ -29,6 +29,44 @@ the SDK a thin, stateless client — engine execution lives on the harness pod.
   `from computeragent import HarnessClient, ComputerAgentServerClient`.
 - New `[remote]` extra (`httpx`). Local in-process mode is unchanged.
 
+### Added — `agent_id` as a resolvable handle + mandatory ingest
+
+Building on the stable `agent_id` below, it's now a **handle to a registered
+agent** and AgentOS-backed runs are guaranteed to ship telemetry.
+
+- **Run by reference:** `ComputerAgent(agent_id="…")` with **no `source`** fetches
+  the agent's `source`/`harness`/`model` from AgentOS
+  (`POST {AGENTOS_API_URL}/agents/resolve`, cak_-authed, group-scoped) — you no
+  longer repeat them. `source` is now optional (`source` *or* `agent_id`
+  required). Explicit `source`/`harness`/`model` override the resolved values; an
+  unregistered `agent_id` with no `source` is a hard, explicit error (run-existing
+  only — pass `source` to define on first run). New
+  `computeragent.harness.agent_resolve_client.resolve_agent`.
+- **No event-loss holes:** when `agent_id` is set, an ingest sink is **required**
+  — `ComputerAgent` raises at construction if neither `AGENTOS_INGEST_URL` nor an
+  explicit `telemetry_pipeline` is configured. Pure-local runs without `agent_id`
+  are unaffected.
+- Server: new `POST /agentos/api/v1/agents/resolve` (`@computeragent/agentos-server`)
+  returns the registry agent's run definition by `agentId`, scoped to the key's group.
+
+### Added — stable `agent_id` (rename-safe registry identity)
+
+`ComputerAgent(agent_id="…")` (or the `COMPUTERAGENT_AGENT_ID` env var) supplies a
+**stable agent identifier** decoupled from `agent_name` (the display label), so
+renaming an agent no longer re-registers it as a new one in AgentOS.
+
+- New `agent_id` kwarg on `ComputerAgent` + `run_task`; falls back to
+  `COMPUTERAGENT_AGENT_ID`, then to legacy name-keyed behavior when unset.
+- Stamped onto **every** telemetry event (`TelemetryEvent.agent_id`, serialized
+  on the AgentOS ingest wire) via the coordinator's emit chokepoint — both the
+  in-process and remote paths. **Telemetry/registry only — never affects
+  execution** (decided by `source`) and never sent in the sandbox/session-create
+  body.
+- Server side (`@computeragent/agentos-server`): when present, the registry +
+  per-agent joins (`sessions`/`chat_sessions`/`agent_logs`) key on `agent_id`
+  (name becomes a mutable field); a legacy name-keyed doc is adopted, not
+  duplicated. Absent → unchanged.
+
 ### Added — remote auth (`cak_` API key)
 
 - `ComputerAgent(harness_token="cak_…")` is sent as `Authorization: Bearer` to

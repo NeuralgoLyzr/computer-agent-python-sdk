@@ -83,6 +83,7 @@ class HarnessCoordinator:
         session_id: str | None = None,
         agent_name: str | None = None,
         agent_description: str | None = None,
+        agent_id: str | None = None,
         policy_decider: PolicyDecider | None = None,
         on_permission_request: (
             Callable[[PermissionRequest], Awaitable[PermissionDecision]] | None
@@ -101,6 +102,9 @@ class HarnessCoordinator:
         self._session_id_override = session_id
         self._agent_name = agent_name
         self._agent_description = agent_description
+        # Stable agent identifier (telemetry/registry only — never affects
+        # execution). Stamped onto every emitted event via ``_emit``.
+        self._agent_id = agent_id
         self._policy_decider = policy_decider
         self._on_permission_request_user = on_permission_request
         self._budget_max_usd = budget_max_usd
@@ -228,7 +232,7 @@ class HarnessCoordinator:
                 },
             )
         ev.agent_description = self._agent_description
-        await self._pipeline.emit(ev)
+        await self._emit(ev)
 
     # ── one chat turn ──────────────────────────────────────────────────────
 
@@ -311,7 +315,7 @@ class HarnessCoordinator:
                 agent_description=state.agent_description,
                 payload={"text": prompt_str},
             )
-            await self._pipeline.emit(user_ev)
+            await self._emit(user_ev)
 
         # turn_started fires on EVERY chat (incl. the first). OtelSink consumes
         # it to open a fresh invoke_agent root per turn (one trace per turn) and
@@ -321,7 +325,7 @@ class HarnessCoordinator:
         turn_model = (
             _opts.get("model") if isinstance(_opts, dict) else getattr(_opts, "model", None)
         )
-        await self._pipeline.emit(
+        await self._emit(
             TelemetryEvent.turn_started(
                 session_id=session_id,
                 agent_name=state.agent_name,
@@ -350,7 +354,7 @@ class HarnessCoordinator:
                     self._lifecycle_usage.absorb(ev)
                     # Forward as a synthetic ResultMessage-shaped telemetry
                     # event so the existing OTel sink picks it up.
-                    await self._pipeline.emit(
+                    await self._emit(
                         TelemetryEvent(
                             kind="usage_snapshot",
                             session_id=state.session_id,
@@ -386,7 +390,7 @@ class HarnessCoordinator:
                         for tev in upstream_events:
                             if state.agent_description is not None:
                                 tev.agent_description = state.agent_description
-                            await self._pipeline.emit(tev)
+                            await self._emit(tev)
                     else:
                         # Engine yielded a non-claude-agent-sdk payload
                         # (Anthropic raw response, OpenAI ChatCompletion
@@ -399,7 +403,7 @@ class HarnessCoordinator:
                             agent_name=state.agent_name,
                             agent_description=state.agent_description,
                         ):
-                            await self._pipeline.emit(tev)
+                            await self._emit(tev)
                 elif ev.kind == "permission_request":
                     # Engines ask the harness; the harness routes to user
                     # callbacks / policy decider. The Future returned by
@@ -422,7 +426,7 @@ class HarnessCoordinator:
                     duration_ms=duration_ms,
                 )
                 err_ev.agent_description = state.agent_description
-                await self._pipeline.emit(err_ev)
+                await self._emit(err_ev)
             raise
         else:
             # Persist the latest assistant text + ResultMessage so dispose
@@ -481,6 +485,14 @@ class HarnessCoordinator:
         # harness on :8787 to proxy to). Drop-in proxy callers don't set
         # this flag → existing ``type: "inline"`` shape is preserved.
         ev.payload["harness_mode"] = True
+        await self._emit(ev)
+
+    async def _emit(self, ev: TelemetryEvent) -> None:
+        """Single emit chokepoint — stamps the stable ``agent_id`` onto every
+        event (so the AgentOS ingest can key the registry/joins on it) then
+        hands off to the pipeline. ``TelemetryEvent`` is mutable by design."""
+        if self._agent_id is not None:
+            ev.agent_id = self._agent_id
         await self._pipeline.emit(ev)
 
     def _build_permission_resolver(
