@@ -741,6 +741,31 @@ class OtelSink:
 
     # ── span open helpers ---------------------------------------------------
 
+    def _agent_identity_attrs(self, sid: str) -> dict[str, Any]:
+        """Agent-identity attributes (``gen_ai.agent.{name,version,id,description}``).
+
+        Stamped on EVERY span of the session — the ``invoke_agent`` root AND its
+        ``chat`` / ``execute_tool`` children — so a flat
+        ``WHERE gen_ai.agent.name = X`` filter selects the whole trace, not just
+        the root. Without this, agent name lives only on the root and any
+        per-agent aggregate over all spans (span count, latency-by-operation,
+        throughput, histogram) silently drops every child span. Empty dict when
+        the session's metadata isn't known yet.
+        """
+        meta = self._session_meta.get(sid)
+        if meta is None:
+            return {}
+        attrs: dict[str, Any] = {}
+        if meta.agent_name:
+            attrs[GEN_AI_AGENT_NAME] = meta.agent_name
+        if meta.agent_version:
+            attrs[GEN_AI_AGENT_VERSION] = meta.agent_version
+        if meta.agent_sha:
+            attrs[GEN_AI_AGENT_ID] = meta.agent_sha
+        if meta.agent_description:
+            attrs[GEN_AI_AGENT_DESCRIPTION] = meta.agent_description
+        return attrs
+
     def _open_invoke_agent(self, sid: str) -> None:
         if self._spans.get_invoke_agent(sid) is not None:
             return
@@ -752,15 +777,8 @@ class OtelSink:
             GEN_AI_PROVIDER_NAME: meta.provider,
             COMPUTERAGENT_ENGINE_NAME: meta.engine_name,
             GEN_AI_CONVERSATION_ID: sid,
+            **self._agent_identity_attrs(sid),
         }
-        if meta.agent_name:
-            attrs[GEN_AI_AGENT_NAME] = meta.agent_name
-        if meta.agent_version:
-            attrs[GEN_AI_AGENT_VERSION] = meta.agent_version
-        if meta.agent_sha:
-            attrs[GEN_AI_AGENT_ID] = meta.agent_sha
-        if meta.agent_description:
-            attrs[GEN_AI_AGENT_DESCRIPTION] = meta.agent_description
         model = self._session_model.get(sid)
         if model:
             attrs[GEN_AI_REQUEST_MODEL] = model
@@ -794,6 +812,7 @@ class OtelSink:
         attrs: dict[str, Any] = {
             GEN_AI_OPERATION_NAME: "chat",
             GEN_AI_CONVERSATION_ID: sid,
+            **self._agent_identity_attrs(sid),
         }
         provider = self._provider(sid)
         if provider:
@@ -899,6 +918,7 @@ class OtelSink:
             GEN_AI_OPERATION_NAME: "execute_tool",
             GEN_AI_TOOL_NAME: tool_name,
             GEN_AI_CONVERSATION_ID: sid,
+            **self._agent_identity_attrs(sid),
         }
         if call_id:
             attrs[GEN_AI_TOOL_CALL_ID] = call_id

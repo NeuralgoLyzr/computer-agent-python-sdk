@@ -29,6 +29,46 @@ the SDK a thin, stateless client — engine execution lives on the harness pod.
   `from computeragent import HarnessClient, ComputerAgentServerClient`.
 - New `[remote]` extra (`httpx`). Local in-process mode is unchanged.
 
+### Added — remote auth (`cak_` API key)
+
+- `ComputerAgent(harness_token="cak_…")` is sent as `Authorization: Bearer` to
+  the remote harness / CAS. When omitted it falls back to the
+  `COMPUTERAGENT_HARNESS_TOKEN` env var (mirroring how `AgentOSHttpSink` reads
+  `AGENTOS_INGEST_TOKEN`). One key serves remote auth, telemetry ingest, and the
+  git-credential resolve below.
+
+### Added — private GAP repos (group-scoped git credentials + SHA sync)
+
+The `local` substrate can now clone **private** git repos by resolving a
+short-lived PAT from AgentOS, without leaking the token.
+
+- New `computeragent.harness.git_credential_client.resolve_git_credential()`:
+  POSTs the repo URL + the SDK's `cak_` key to
+  `POST {AGENTOS_API_URL}/git-credentials/resolve`; AgentOS returns the
+  decrypted PAT for the key's **group** + the repo **host**. Best-effort — any
+  missing config / network error / 401 / 403 / 404 returns `None` and the
+  substrate clones unauthenticated (public-repo behavior unchanged). The token
+  is never logged.
+- `LocalSubstrate.boot(..., git_credential=...)` injects the PAT via
+  `GIT_CONFIG_*` → `http.<host>.extraHeader` (Basic), so the token never appears
+  in `argv`, the URL, or error/log surfaces (clone errors log host-only).
+  `git@`/`ssh://` URLs pass through. `Substrate.boot` + `SubstrateHandle` gain
+  the `git_credential` param / `revision` field.
+- **SHA sync:** after cloning, the substrate runs `git rev-parse HEAD` and the
+  coordinator stamps it onto the manifest (when the loader didn't supply one) so
+  it rides `session_started` as `agent_sha` → the server records
+  `sourceSha`/`sourceSyncedAt` on the registry doc.
+- New env: `AGENTOS_API_URL` (credential-resolve base) + the existing
+  `COMPUTERAGENT_HARNESS_TOKEN` (the `cak_` key; role needs `git-credentials:read`).
+
+### Fixed — OTel agent identity on every span
+
+`gen_ai.agent.{name,version,id,description}` are now stamped on **every** span of
+a session (the `invoke_agent` root *and* its `chat` / `execute_tool` children),
+not just the root. A flat `WHERE gen_ai.agent.name = X` filter now selects the
+whole trace; previously any per-agent aggregate over all spans (span count,
+latency-by-operation, throughput) silently dropped every child span.
+
 ### Changed — AgentOS telemetry now ships over HTTP (**BREAKING**)
 
 The AgentOS Mongo sinks have been replaced by a single HTTP sink. The AgentOS

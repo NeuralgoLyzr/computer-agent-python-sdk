@@ -19,7 +19,9 @@ No subprocess management lives here. ``claude-agent-sdk`` and
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import os
 import shutil
 import tempfile
 from collections.abc import Mapping
@@ -39,16 +41,18 @@ class LocalSubstrate:
         *,
         source: IdentitySource,
         envs: Mapping[str, str],  # noqa: ARG002 - reserved for parity with remote substrates
+        git_credential: Mapping[str, str] | None = None,
     ) -> SubstrateHandle:
         if isinstance(source, Path):
             return SubstrateHandle(workspace_path=source, close=_noop_close)
 
         if isinstance(source, str):
             if _looks_like_git_url(source):
-                workspace = await _git_clone(source)
+                workspace, revision = await _git_clone(source, git_credential)
                 return SubstrateHandle(
                     workspace_path=workspace,
                     close=_make_rmtree_close(workspace),
+                    revision=revision,
                 )
             # Plain filesystem path — caller-owned.
             return SubstrateHandle(workspace_path=Path(source), close=_noop_close)
@@ -90,7 +94,54 @@ def _looks_like_git_url(source: str) -> bool:
     return False
 
 
-async def _git_clone(url: str) -> Path:
+def _host_of(url: str) -> str:
+    """Bare host from a clone URL (for credential scoping + safe logging)."""
+    s = url
+    if "://" in s:
+        s = s.split("://", 1)[1]
+    if "@" in s:
+        s = s.split("@", 1)[1]
+    # host ends at the first '/' or ':' (path or port)
+    for sep in ("/", ":"):
+        if sep in s:
+            s = s.split(sep, 1)[0]
+    return s.lower()
+
+
+def _clone_env(url: str, credential: Mapping[str, str] | None) -> dict[str, str]:
+    """Build the subprocess env. When a credential is present and the URL is
+    HTTPS, inject the auth as an ``http.<host>.extraHeader`` via ``GIT_CONFIG_*``
+    so the token never appears in argv (or the URL). git >= 2.31."""
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")  # never block on a credential prompt
+    token = (credential or {}).get("token")
+    if credential and token and url.startswith("https://"):
+        host = (credential.get("host") or _host_of(url)).lower()
+        username = credential.get("username") or "x-access-token"
+        basic = base64.b64encode(f"{username}:{token}".encode()).decode()
+        env["GIT_CONFIG_COUNT"] = "1"
+        env["GIT_CONFIG_KEY_0"] = f"http.https://{host}/.extraHeader"
+        env["GIT_CONFIG_VALUE_0"] = f"Authorization: Basic {basic}"
+    return env
+
+
+async def _rev_parse(workspace: Path) -> str | None:
+    """The cloned commit SHA, or None if it can't be read (best-effort)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "-C", str(workspace), "rev-parse", "HEAD",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode == 0:
+            return out.decode(errors="replace").strip() or None
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return None
+
+
+async def _git_clone(url: str, credential: Mapping[str, str] | None = None) -> tuple[Path, str | None]:
     workspace = Path(tempfile.mkdtemp(prefix="computeragent-substrate-"))
     proc = await asyncio.create_subprocess_exec(
         "git",
@@ -99,17 +150,21 @@ async def _git_clone(url: str) -> Path:
         "1",
         url,
         str(workspace),
+        env=_clone_env(url, credential),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
     _, stderr = await proc.communicate()
     if proc.returncode != 0:
         shutil.rmtree(workspace, ignore_errors=True)
+        # Log/raise with host only — the token is in env config, not the URL,
+        # but keep error surfaces clean regardless.
         raise RuntimeError(
-            f"git clone failed for {url!r}: {stderr.decode(errors='replace')!r}"
+            f"git clone failed for host {_host_of(url)}: {stderr.decode(errors='replace')!r}"
         )
-    logger.debug("cloned %s into %s", url, workspace)
-    return workspace
+    revision = await _rev_parse(workspace)
+    logger.debug("cloned host %s into %s (sha %s)", _host_of(url), workspace, (revision or "?")[:8])
+    return workspace, revision
 
 
 def _make_rmtree_close(path: Path) -> Any:

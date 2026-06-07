@@ -135,3 +135,58 @@ async def test_server_mode_forwards_runtime_and_collects_result():
     assert body["runtime"] == "bwrap" and body["harness"] == "claude-agent-sdk" and body["model"] == "claude-sonnet-4-5"
     assert result.usage.cost_usd == 0.01
     assert any(isinstance(m, dict) and m.get("type") == "result" for m in result.messages)
+
+
+# ── API-key token threading (COMPUTERAGENT_HARNESS_TOKEN) ─────────────────────
+
+
+def test_harness_token_explicit_arg(monkeypatch):
+    monkeypatch.delenv("COMPUTERAGENT_HARNESS_TOKEN", raising=False)
+    agent = ComputerAgent(
+        harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}}, harness_token="cak_explicit"
+    )
+    assert agent._coordinator._token == "cak_explicit"
+
+
+def test_harness_token_env_fallback(monkeypatch):
+    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_env")
+    agent = ComputerAgent(harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}})
+    assert agent._coordinator._token == "cak_env"
+
+
+def test_harness_token_explicit_wins_over_env(monkeypatch):
+    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_env")
+    agent = ComputerAgent(
+        harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}}, harness_token="cak_explicit"
+    )
+    assert agent._coordinator._token == "cak_explicit"
+
+
+def test_harness_token_none_when_unset(monkeypatch):
+    monkeypatch.delenv("COMPUTERAGENT_HARNESS_TOKEN", raising=False)
+    agent = ComputerAgent(harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}})
+    assert agent._coordinator._token is None
+
+
+@respx.mock
+async def test_harness_token_sent_as_bearer(monkeypatch):
+    # End-to-end: the resolved token reaches the wire as `Authorization: Bearer`.
+    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_env")
+    create = respx.post(f"{BASE}/v1/sessions").mock(
+        return_value=httpx.Response(
+            201,
+            json={"sessionId": "s1", "engine": "e", "identity": {"name": "a", "version": "1"}, "capabilities": {}, "eventsUrl": "/v1/sessions/s1/events"},
+        )
+    )
+    respx.post(f"{BASE}/v1/sessions/s1/messages").mock(return_value=httpx.Response(200, json={"ok": True}))
+    respx.get(f"{BASE}/v1/sessions/s1/events").mock(
+        return_value=httpx.Response(200, content=_sse({"kind": "sdk_message", "sessionId": "s1", "payload": {"type": "result", "result": "ok"}}))
+    )
+    respx.delete(f"{BASE}/v1/sessions/s1").mock(return_value=httpx.Response(200, json={"ok": True}))
+
+    async with ComputerAgent(
+        harness_url=BASE, harness_kind="protocol", source={"type": "inline", "manifest": {"name": "a"}}, harness="claude-agent-sdk"
+    ) as agent:
+        await agent.chat("hi")
+
+    assert create.calls.last.request.headers["authorization"] == "Bearer cak_env"
