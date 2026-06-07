@@ -130,6 +130,7 @@ class AgentOSHttpSink:
             "event_id": uuid.uuid4().hex,
             "kind": event.kind,
             "session_id": event.session_id,
+            "agent_id": event.agent_id,
             "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(ts),
             "agent_name": event.agent_name,
             "agent_description": event.agent_description,
