@@ -237,6 +237,7 @@ class RemoteCoordinator:
         session_id: str | None,
         agent_name: str | None,
         agent_description: str | None,
+        agent_id: str | None,
         on_tool_call: PermissionCallback | None,
         auth: tuple[str, str] | str | None,
         token: str | None,
@@ -253,6 +254,9 @@ class RemoteCoordinator:
         self._model = model
         self._agent_name = agent_name
         self._agent_description = agent_description
+        # Stable agent identifier (telemetry/registry only — never sent in the
+        # sandbox/session create body). Stamped onto every event in _emit_safe.
+        self._agent_id = agent_id
         self._on_tool_call = on_tool_call
         self._auth = auth
         self._token = token
@@ -472,6 +476,10 @@ class RemoteCoordinator:
             await self._emit_safe(tev)
 
     async def _emit_safe(self, ev: TelemetryEvent) -> None:
+        # Stamp the stable agent_id onto every event (single chokepoint) so the
+        # AgentOS ingest keys the registry/joins on it. TelemetryEvent is mutable.
+        if self._agent_id is not None:
+            ev.agent_id = self._agent_id
         with suppress(Exception):
             await self._pipeline.emit(ev)
 
@@ -575,6 +583,7 @@ def build_remote_coordinator(
     session_id: str | None,
     agent_name: str | None,
     agent_description: str | None,
+    agent_id: str | None = None,
     on_tool_call: PermissionCallback | None,
     auth: tuple[str, str] | str | None,
     token: str | None,
@@ -593,6 +602,7 @@ def build_remote_coordinator(
         session_id=session_id,
         agent_name=agent_name,
         agent_description=agent_description,
+        agent_id=agent_id,
         on_tool_call=on_tool_call,
         auth=auth,
         token=token,

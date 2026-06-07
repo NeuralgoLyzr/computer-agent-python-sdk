@@ -130,6 +130,38 @@ Pass it as `harness_token="cak_…"` (sent as `Authorization: Bearer`), or set
 fallback. The **same key works everywhere**: remote auth, telemetry ingest, and
 the private-repo credential resolve below.
 
+**Stable agent identity.** Pass `agent_id="my-stable-slug"` (or set
+`COMPUTERAGENT_AGENT_ID`) to give the agent a stable identifier that's decoupled
+from `agent_name` (the display label). AgentOS keys the registry + per-agent
+sessions/logs on it, so **renaming the agent doesn't re-register it** or strand
+its history. Omit it and AgentOS falls back to keying on `agent_name` (legacy
+behavior). Works in both in-process and remote modes.
+
+**Run a registered agent by reference.** Once an agent exists in AgentOS, pass
+**only** `agent_id` (no `source`) and the SDK resolves its `source`/`harness`/
+`model` from the server (`POST {AGENTOS_API_URL}/agents/resolve`, authed with your
+`cak_` key, scoped to the key's group):
+
+```python
+# Define + register on first run (source given):
+async with ComputerAgent(agent_id="my-agent", source="github.com/org/agent") as a:
+    await a.chat("…")
+# Thereafter, run it by reference — no source needed:
+async with ComputerAgent(agent_id="my-agent") as a:   # source fetched from AgentOS
+    await a.chat("…")
+```
+
+Explicit `source`/`harness`/`model` override the resolved values; an unregistered
+`agent_id` with no `source` raises a clear error (it's strictly "run an existing
+agent"). Needs `AGENTOS_API_URL` + a `cak_` key (`COMPUTERAGENT_HARNESS_TOKEN`).
+
+**No lost events.** Because an `agent_id` run is AgentOS-backed, ingest is
+**required**: `ComputerAgent` raises at construction if `agent_id` is set but
+neither `AGENTOS_INGEST_URL` nor an explicit `telemetry_pipeline` is configured —
+so a run's telemetry is never silently dropped. (Runs without `agent_id` are
+unaffected.) `agent_id` itself rides telemetry only and never touches the harness
+wire body.
+
 ### Mode 2c — private GAP repos (git credentials)
 
 When `source` is a **private** git URL, the SDK fetches a short-lived,
