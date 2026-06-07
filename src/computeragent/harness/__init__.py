@@ -166,7 +166,7 @@ class ComputerAgent:
     def __init__(
         self,
         *,
-        source: IdentitySource,
+        source: IdentitySource | None = None,
         engine: str | EngineDriver = "claude-agent-sdk",
         runtime: str | Substrate = "local",
         session_store: str | SessionStore | None = None,
@@ -175,6 +175,13 @@ class ComputerAgent:
         session_id: str | None = None,
         agent_name: str | None = None,
         agent_description: str | None = None,
+        # Stable agent identifier (telemetry/registry key). Decoupled from
+        # agent_name so renaming the agent doesn't re-register it. Falls back to
+        # the COMPUTERAGENT_AGENT_ID env var. Also a HANDLE: when set with no
+        # `source`, the SDK resolves the agent's source/harness/model from
+        # AgentOS (run-an-existing-agent by reference). Never rides the harness
+        # wire body — resolution is a separate construction-time call.
+        agent_id: str | None = None,
         model: str | None = None,
         options: Mapping[str, Any] | None = None,
         policy_decider: PolicyDecider | None = None,
@@ -193,6 +200,45 @@ class ComputerAgent:
         # Falls back to the COMPUTERAGENT_HARNESS_TOKEN env var when omitted.
         harness_token: str | None = None,
     ) -> None:
+        # Stable agent identifier: explicit kwarg wins, else the env var. When
+        # still None the server falls back to keying on agent_name (legacy).
+        agent_id = agent_id or os.environ.get("COMPUTERAGENT_AGENT_ID")
+
+        # ── agent_id semantics: ingest guarantee + run-by-reference ──────────
+        if agent_id is not None:
+            # (a) No event-loss holes: an AgentOS-backed run (agent_id set) MUST
+            # ship its telemetry. Require an ingest sink — either AGENTOS_INGEST_URL
+            # (auto-attaches AgentOSHttpSink) or a caller-supplied pipeline.
+            if telemetry_pipeline is None and not os.environ.get("AGENTOS_INGEST_URL"):
+                raise ValueError(
+                    "agent_id is set but no AgentOS ingest is configured — set "
+                    "AGENTOS_INGEST_URL (or pass telemetry_pipeline=) so the run's "
+                    "events aren't dropped."
+                )
+            # (b) Run-by-reference: agent_id + no source → fetch the agent's
+            # source/harness/model from AgentOS. Explicit kwargs override the
+            # resolved values; a miss (unregistered) is a hard, explicit error.
+            if source is None:
+                from .agent_resolve_client import resolve_agent
+
+                resolved = resolve_agent(
+                    agent_id,
+                    token=harness_token or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN"),
+                )
+                if resolved is None:
+                    raise ValueError(
+                        f"agent_id {agent_id!r} is not registered in AgentOS — register "
+                        "it (or pass source=… to define it on first run)."
+                    )
+                source = resolved.get("source")
+                if harness is None and isinstance(resolved.get("harness"), str):
+                    harness = resolved["harness"]
+                if model is None and isinstance(resolved.get("model"), str):
+                    model = resolved["model"]
+
+        if source is None:
+            raise ValueError("source or agent_id is required")
+
         if harness_url is not None:
             # The API key the remote harness/ComputerAgent server validates.
             # Explicit harness_token= wins; otherwise fall back to the env var
@@ -216,6 +262,7 @@ class ComputerAgent:
                 session_id=session_id,
                 agent_name=agent_name,
                 agent_description=agent_description,
+                agent_id=agent_id,
                 on_tool_call=on_tool_call,
                 harness_auth=harness_auth,
                 harness_token=harness_token,
@@ -267,6 +314,7 @@ class ComputerAgent:
             session_id=session_id,
             agent_name=agent_name,
             agent_description=agent_description,
+            agent_id=agent_id,
             policy_decider=policy_decider,
             on_permission_request=on_tool_call,
             budget_max_usd=budget_max_usd,
@@ -308,6 +356,7 @@ def _build_remote_coordinator_from_kwargs(
     session_id: str | None,
     agent_name: str | None,
     agent_description: str | None,
+    agent_id: str | None,
     on_tool_call: Callable[[PermissionRequest], Awaitable[dict[str, Any]]] | None,
     harness_auth: tuple[str, str] | str | None,
     harness_token: str | None,
@@ -341,6 +390,7 @@ def _build_remote_coordinator_from_kwargs(
         session_id=session_id,
         agent_name=agent_name,
         agent_description=agent_description,
+        agent_id=agent_id,
         on_tool_call=on_tool_call,
         auth=harness_auth,
         token=harness_token,
@@ -351,7 +401,7 @@ def _build_remote_coordinator_from_kwargs(
 async def run_task(
     *,
     message: ChatInput,
-    source: IdentitySource,
+    source: IdentitySource | None = None,
     engine: str | EngineDriver = "claude-agent-sdk",
     runtime: str | Substrate = "local",
     session_store: str | SessionStore | None = None,
@@ -360,6 +410,7 @@ async def run_task(
     session_id: str | None = None,
     agent_name: str | None = None,
     agent_description: str | None = None,
+    agent_id: str | None = None,
     model: str | None = None,
     options: Mapping[str, Any] | None = None,
     policy_decider: PolicyDecider | None = None,
@@ -385,6 +436,7 @@ async def run_task(
         session_id=session_id,
         agent_name=agent_name,
         agent_description=agent_description,
+        agent_id=agent_id,
         model=model,
         options=options,
         policy_decider=policy_decider,

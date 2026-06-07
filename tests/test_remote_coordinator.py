@@ -168,6 +168,146 @@ def test_harness_token_none_when_unset(monkeypatch):
     assert agent._coordinator._token is None
 
 
+# ── stable agent_id resolution (explicit kwarg / env / fallback) ─────────────
+
+
+def test_agent_id_explicit_arg(monkeypatch):
+    monkeypatch.delenv("COMPUTERAGENT_AGENT_ID", raising=False)
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")  # agent_id requires ingest
+    agent = ComputerAgent(
+        harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}}, agent_id="aid-explicit"
+    )
+    assert agent._coordinator._agent_id == "aid-explicit"
+
+
+def test_agent_id_env_fallback(monkeypatch):
+    monkeypatch.setenv("COMPUTERAGENT_AGENT_ID", "aid-env")
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")
+    agent = ComputerAgent(harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}})
+    assert agent._coordinator._agent_id == "aid-env"
+
+
+def test_agent_id_explicit_wins_over_env(monkeypatch):
+    monkeypatch.setenv("COMPUTERAGENT_AGENT_ID", "aid-env")
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")
+    agent = ComputerAgent(
+        harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}}, agent_id="aid-explicit"
+    )
+    assert agent._coordinator._agent_id == "aid-explicit"
+
+
+def test_agent_id_none_when_unset(monkeypatch):
+    monkeypatch.delenv("COMPUTERAGENT_AGENT_ID", raising=False)
+    agent = ComputerAgent(harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}})
+    assert agent._coordinator._agent_id is None
+
+
+async def test_agent_id_stamped_on_emitted_event(monkeypatch):
+    # The coordinator's emit chokepoint stamps agent_id onto every event so the
+    # AgentOS ingest can key the registry/joins on it.
+    from computeragent.telemetry.event import TelemetryEvent
+
+    monkeypatch.delenv("COMPUTERAGENT_AGENT_ID", raising=False)
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")  # agent_id requires ingest
+    agent = ComputerAgent(
+        harness_url=BASE, source={"type": "inline", "manifest": {"name": "a"}}, agent_id="aid-1"
+    )
+    captured: list[TelemetryEvent] = []
+
+    async def _fake_emit(ev: TelemetryEvent) -> None:
+        captured.append(ev)
+
+    agent._coordinator._pipeline.emit = _fake_emit  # type: ignore[assignment]
+    ev = TelemetryEvent(kind="user_message", session_id="s", agent_name="display-name")
+    await agent._coordinator._emit_safe(ev)
+    assert captured and captured[0].agent_id == "aid-1"
+
+
+def test_agentos_http_sink_serializes_agent_id():
+    # The wire dto carries agent_id alongside agent_name.
+    from computeragent.telemetry.event import TelemetryEvent
+    from computeragent.telemetry.sinks import AgentOSHttpSink
+
+    # Pass a dummy client so no real httpx.AsyncClient is created/leaked.
+    sink = AgentOSHttpSink(url="http://x/ingest", client=object())
+    dto = sink._serialize(TelemetryEvent(kind="session_started", session_id="s", agent_name="n", agent_id="aid-1"))
+    assert dto["agent_id"] == "aid-1"
+    assert dto["agent_name"] == "n"
+
+
+# ── agent_id: ingest enforcement + run-by-reference resolution ───────────────
+
+
+def test_agent_id_requires_ingest(monkeypatch):
+    # agent_id set + no AGENTOS_INGEST_URL + no pipeline → raise (no event-loss hole).
+    monkeypatch.delenv("AGENTOS_INGEST_URL", raising=False)
+    monkeypatch.delenv("COMPUTERAGENT_AGENT_ID", raising=False)
+    with pytest.raises(ValueError, match="no AgentOS ingest"):
+        ComputerAgent(source={"type": "inline", "manifest": {"name": "a"}}, agent_id="aid-x")
+
+
+def test_agent_id_explicit_pipeline_satisfies_ingest(monkeypatch):
+    # An explicit pipeline counts as ingest configured → no raise.
+    from computeragent.telemetry import Pipeline
+
+    monkeypatch.delenv("AGENTOS_INGEST_URL", raising=False)
+    agent = ComputerAgent(
+        source={"type": "inline", "manifest": {"name": "a"}},
+        agent_id="aid-x",
+        telemetry_pipeline=Pipeline(sinks=[]),
+    )
+    assert agent._coordinator._agent_id == "aid-x"
+
+
+def test_agent_id_resolves_source_when_omitted(monkeypatch):
+    # agent_id + no source → fetch source from AgentOS (local mode).
+    import computeragent.harness.agent_resolve_client as arc
+
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")
+    monkeypatch.setenv("AGENTOS_API_URL", "http://x/agentos/api/v1")
+    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_x")
+    monkeypatch.setattr(
+        arc, "resolve_agent",
+        lambda *a, **k: {"name": "n", "source": "github.com/org/repo", "harness": "claude-agent-sdk", "model": "claude-y"},
+    )
+    agent = ComputerAgent(agent_id="aid-x")  # no source → resolved
+    assert agent._coordinator._source == "github.com/org/repo"
+
+
+def test_agent_id_source_passed_skips_resolve(monkeypatch):
+    # When source IS given, the caller is authoritative — no resolve call.
+    import computeragent.harness.agent_resolve_client as arc
+
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")
+    calls = {"n": 0}
+
+    def _resolve(*a, **k):
+        calls["n"] += 1
+        return
+
+    monkeypatch.setattr(arc, "resolve_agent", _resolve)
+    ComputerAgent(source={"type": "inline", "manifest": {"name": "a"}}, agent_id="aid-x")
+    assert calls["n"] == 0
+
+
+def test_agent_id_unregistered_raises(monkeypatch):
+    # agent_id + no source + resolve miss → hard error (run-existing only).
+    import computeragent.harness.agent_resolve_client as arc
+
+    monkeypatch.setenv("AGENTOS_INGEST_URL", "http://x/ingest")
+    monkeypatch.setenv("AGENTOS_API_URL", "http://x/agentos/api/v1")
+    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_x")
+    monkeypatch.setattr(arc, "resolve_agent", lambda *a, **k: None)
+    with pytest.raises(ValueError, match="not registered"):
+        ComputerAgent(agent_id="aid-x")
+
+
+def test_no_source_no_agent_id_raises(monkeypatch):
+    monkeypatch.delenv("COMPUTERAGENT_AGENT_ID", raising=False)
+    with pytest.raises(ValueError, match="source or agent_id"):
+        ComputerAgent()
+
+
 @respx.mock
 async def test_harness_token_sent_as_bearer(monkeypatch):
     # End-to-end: the resolved token reaches the wire as `Authorization: Bearer`.

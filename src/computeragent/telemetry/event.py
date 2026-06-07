@@ -47,6 +47,12 @@ class TelemetryEvent:
     session_id: str
     timestamp: datetime = field(default_factory=_utcnow)
     agent_name: str | None = None
+    # Stable, caller-supplied agent identifier. Decoupled from ``agent_name``
+    # (the display label) so renaming an agent doesn't re-register it. Stamped
+    # by the coordinator at emit time onto every event; rides the AgentOS ingest
+    # so the server can key the registry + per-agent joins on it. ``None`` →
+    # the server falls back to keying on ``agent_name`` (legacy behavior).
+    agent_id: str | None = None
     # Human-readable description of the agent. Mirrors `agent_name`'s
     # opt-in shape: derived from ``options.agent_description`` (set via
     # setattr by the caller) and propagated through the same event path.
