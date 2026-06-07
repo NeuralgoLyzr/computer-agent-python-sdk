@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import socket
 import uuid
 from datetime import datetime
@@ -73,12 +72,17 @@ class AgentOSHttpSink:
         client: Any | None = None,
         timeout: float = 30.0,
     ) -> None:
-        self._url = url or os.environ.get("AGENTOS_INGEST_URL")
+        from ... import agentos as _agentos
+
+        self._url = url or _agentos.ingest_url()
         if not self._url:
             raise ValueError(
-                "AgentOSHttpSink requires url= (or the AGENTOS_INGEST_URL env var)"
+                "AgentOSHttpSink requires url= (or AGENTOS_DISCOVERY_URL / the "
+                "AGENTOS_INGEST_URL override env var)"
             )
-        self._token = token or os.environ.get("AGENTOS_INGEST_TOKEN")
+        # The one cak_ key the SDK presents everywhere is the ingest bearer; a
+        # legacy AGENTOS_INGEST_TOKEN string is still honoured via agentos.cak().
+        self._token = token or _agentos.cak()
         self._source = source
         self._host = host or socket.gethostname()
         self._flush_threshold = max(1, flush_threshold)

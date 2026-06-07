@@ -20,23 +20,23 @@ Unlike the best-effort git-credential resolve, this is **fail-fast**: a miss
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
 
 logger = logging.getLogger("computeragent.agent_resolve")
 
 
 def _api_base(explicit: str | None) -> str | None:
-    base = explicit or os.environ.get("AGENTOS_API_URL")
-    return base.rstrip("/") if base else None
+    if explicit:
+        return explicit.rstrip("/")
+    from .. import agentos
+
+    return agentos.api_url()
 
 
 def _token(explicit: str | None) -> str | None:
-    return (
-        explicit
-        or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN")
-        or os.environ.get("AGENTOS_INGEST_TOKEN")
-    )
+    from .. import agentos
+
+    return explicit or agentos.cak()
 
 
 class AgentResolveError(RuntimeError):
@@ -62,7 +62,8 @@ def resolve_agent(
     bearer = _token(token)
     if not base:
         raise AgentResolveError(
-            "agent_id resolution needs AGENTOS_API_URL (e.g. https://host/agentos/api/v1)"
+            "agent_id resolution needs an AgentOS API base — set AGENTOS_DISCOVERY_URL "
+            "(the SDK reads the api endpoint from it) or AGENTOS_API_URL to override"
         )
     if not bearer:
         raise AgentResolveError(

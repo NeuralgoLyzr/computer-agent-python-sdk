@@ -565,6 +565,24 @@ class OtelSink:
             self._headers = cfg["headers"]
         else:
             self._headers = _parse_otlp_headers_env(os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"))
+
+        # AgentOS OTLP gateway: when AGENTOS_OTEL_URL is set, export OTLP THROUGH
+        # the AgentOS server (cak_-authed) instead of straight to a vendor — so
+        # the SDK carries only its cak_ key, no vendor OTLP credential. Give the
+        # AgentOS base + the key; the Authorization: Bearer <cak_> the gateway
+        # validates is auto-injected. A direct `endpoint=`/cfg endpoint or an
+        # explicit Authorization header is respected (not overridden).
+        if endpoint is None and not cfg.get("endpoint"):
+            from ... import agentos as _agentos
+
+            gateway = _agentos.otel_url()
+            if gateway:
+                self._endpoint = gateway
+                if not any(k.lower() == "authorization" for k in self._headers):
+                    key = _agentos.cak()
+                    if key:
+                        self._headers = {**self._headers, "Authorization": f"Bearer {key}"}
+
         self._exporter = exporter or cfg.get("exporter") or _infer_exporter(self._endpoint)
         self._temporality: Temporality = _resolve_temporality(temporality or cfg.get("temporality"))
 
