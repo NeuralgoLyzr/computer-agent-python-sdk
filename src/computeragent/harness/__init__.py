@@ -216,7 +216,14 @@ class ComputerAgent:
             # ship its telemetry. Require an ingest sink — either a resolvable
             # ingest URL (AGENTOS_DISCOVERY_URL / AGENTOS_INGEST_URL, which
             # auto-attaches AgentOSHttpSink) or a caller-supplied pipeline.
-            if telemetry_pipeline is None and _agentos.ingest_url() is None:
+            # Skipped in harness mode (harness_url set): there the remote
+            # ComputerAgent server owns persistence + telemetry, so the SDK
+            # client emits nothing of its own (see the remote path below).
+            if (
+                harness_url is None
+                and telemetry_pipeline is None
+                and _agentos.ingest_url() is None
+            ):
                 raise ValueError(
                     "agent_id is set but no AgentOS ingest is configured — set "
                     "AGENTOS_DISCOVERY_URL (or pass telemetry_pipeline=) so the run's "
@@ -242,6 +249,12 @@ class ComputerAgent:
                     harness = resolved["harness"]
                 if model is None and isinstance(resolved.get("model"), str):
                     model = resolved["model"]
+                # Capture the registry display name so the run is attributed to
+                # the right agent in the dashboard session index (the CAS writes
+                # chat_sessions.agent from this — without it the session is
+                # invisible in the list, which filters by agent name).
+                if agent_name is None and isinstance(resolved.get("name"), str):
+                    agent_name = resolved["name"]
 
         if source is None:
             raise ValueError("source or agent_id is required")
@@ -256,6 +269,15 @@ class ComputerAgent:
             remote_engine: str = (
                 _engine_src if isinstance(_engine_src, str) else getattr(_engine_src, "name", "claude-agent-sdk")
             )
+            # In harness mode the remote ComputerAgent server OWNS persistence +
+            # telemetry: the session store writes the transcript, the server
+            # writes the dashboard session index, and its OtelAuditSink emits the
+            # spans (tagged via the `identity` we forward). So the SDK client
+            # emits NOTHING by default — otherwise its events would race the
+            # server's session store and double-write the `sessions` transcript.
+            # An explicit telemetry_pipeline= still wins for callers who want
+            # client-side telemetry on purpose.
+            remote_pipeline = telemetry_pipeline if telemetry_pipeline is not None else Pipeline(sinks=[])
             self._coordinator: _CoordinatorLike = _build_remote_coordinator_from_kwargs(
                 harness_url=harness_url,
                 harness_kind=harness_kind,
@@ -273,7 +295,7 @@ class ComputerAgent:
                 on_tool_call=on_tool_call,
                 harness_auth=harness_auth,
                 harness_token=harness_token,
-                telemetry_pipeline=telemetry_pipeline,
+                telemetry_pipeline=remote_pipeline,
             )
             return
 

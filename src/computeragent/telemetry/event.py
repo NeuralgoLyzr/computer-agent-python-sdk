@@ -361,9 +361,13 @@ class TelemetryEvent:
                     raw=msg,
                 )
             )
-        # Anything else (StreamEvent, RateLimitEvent, TaskStartedMessage, …):
-        # skip silently. These can be added later if a sink needs them.
-        return events
+        # Any remaining claude_agent_sdk type (StreamEvent, HookEventMessage,
+        # RateLimitEvent, TaskStartedMessage, …) — return [] so the coordinator
+        # skips synthesis. Non-SDK payloads (gitagent dicts, OpenAI messages)
+        # return None to trigger _synthesise_telemetry instead.
+        if type(msg).__module__.startswith("claude_agent_sdk"):
+            return events  # empty list — recognised SDK type, nothing to emit
+        return None  # unrecognised non-SDK payload — caller should synthesise
 
 
 def _extract_usage(result_like: Any) -> dict[str, int | float | None]:

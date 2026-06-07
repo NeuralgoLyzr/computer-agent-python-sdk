@@ -391,12 +391,11 @@ class HarnessCoordinator:
                             if state.agent_description is not None:
                                 tev.agent_description = state.agent_description
                             await self._emit(tev)
-                    else:
-                        # Engine yielded a non-claude-agent-sdk payload
-                        # (Anthropic raw response, OpenAI ChatCompletion
-                        # message, or a dict). Synthesise the equivalent
-                        # TelemetryEvents so AgentOS / OTel sinks see the
-                        # same picture they get for the Claude path.
+                    elif upstream_events is None:
+                        # from_message returned None → unrecognized type, not a
+                        # claude-agent-sdk message (e.g. Anthropic raw response,
+                        # OpenAI ChatCompletion, plain dict from gitagent).
+                        # Synthesise so AgentOS / OTel sinks see the same picture.
                         for tev in _synthesise_telemetry(
                             ev.payload,
                             session_id=state.session_id,
@@ -404,6 +403,8 @@ class HarnessCoordinator:
                             agent_description=state.agent_description,
                         ):
                             await self._emit(tev)
+                    # upstream_events == [] → recognised SDK type with nothing to
+                    # emit (StreamEvent, RateLimitEvent, …) — skip silently.
                 elif ev.kind == "permission_request":
                     # Engines ask the harness; the harness routes to user
                     # callbacks / policy decider. The Future returned by
