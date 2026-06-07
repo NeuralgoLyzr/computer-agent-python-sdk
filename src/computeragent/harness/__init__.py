@@ -200,19 +200,26 @@ class ComputerAgent:
         # Falls back to the COMPUTERAGENT_HARNESS_TOKEN env var when omitted.
         harness_token: str | None = None,
     ) -> None:
+        from .. import agentos as _agentos
+
         # Stable agent identifier: explicit kwarg wins, else the env var. When
         # still None the server falls back to keying on agent_name (legacy).
         agent_id = agent_id or os.environ.get("COMPUTERAGENT_AGENT_ID")
+        # Remote-harness URL: explicit kwarg wins, else the COMPUTERAGENT_HARNESS_URL
+        # env (the harness/CAS is a separate service — always a full URL, never
+        # discovered).
+        harness_url = harness_url or _agentos.harness_url()
 
         # ── agent_id semantics: ingest guarantee + run-by-reference ──────────
         if agent_id is not None:
             # (a) No event-loss holes: an AgentOS-backed run (agent_id set) MUST
-            # ship its telemetry. Require an ingest sink — either AGENTOS_INGEST_URL
-            # (auto-attaches AgentOSHttpSink) or a caller-supplied pipeline.
-            if telemetry_pipeline is None and not os.environ.get("AGENTOS_INGEST_URL"):
+            # ship its telemetry. Require an ingest sink — either a resolvable
+            # ingest URL (AGENTOS_DISCOVERY_URL / AGENTOS_INGEST_URL, which
+            # auto-attaches AgentOSHttpSink) or a caller-supplied pipeline.
+            if telemetry_pipeline is None and _agentos.ingest_url() is None:
                 raise ValueError(
                     "agent_id is set but no AgentOS ingest is configured — set "
-                    "AGENTOS_INGEST_URL (or pass telemetry_pipeline=) so the run's "
+                    "AGENTOS_DISCOVERY_URL (or pass telemetry_pipeline=) so the run's "
                     "events aren't dropped."
                 )
             # (b) Run-by-reference: agent_id + no source → fetch the agent's
