@@ -8,6 +8,8 @@
 
 **New in 0.2.0** — a Python port of the TypeScript [`ComputerAgent`](../ComputerAgent/) harness alongside the drop-in proxy. Same vocabulary (engine / substrate / session-store / identity-loader), `ComputerAgent` + `run_task()` entry points, two built-in engines (`claude-agent-sdk`, `gitagent`). The 0.1.x drop-in surface is untouched — both modes co-exist.
 
+**New in 0.2.1** — run the engine on a **remote harness server** (`ComputerAgent(harness_url=…)`); **AgentOS API-key auth** (`cak_` key via `harness_token` / `COMPUTERAGENT_HARNESS_TOKEN`); a **stable, rename-safe `agent_id`** (plus run a registered agent by reference, no `source`); **private GAP-repo git credentials** resolved per-group from AgentOS; and the `gap` identity loader. **Breaking:** AgentOS telemetry now ships over **HTTP** to the server's ingest endpoint — the old direct-Mongo sinks (`AGENTOS_MONGO_URL`) are gone. See [`CHANGELOG.md`](CHANGELOG.md).
+
 ```diff
 - from claude_agent_sdk import ClaudeAgentOptions, query
 - from claude_agent_sdk.types import ResultMessage
@@ -27,7 +29,7 @@ Adopting `computer-agent-py` in place of `claude-agent-sdk` gives you, without r
 - **PII redaction** at the package boundary — email, phone, SSN, credit cards, AWS keys redacted before anything reaches a sink.
 - **Generic guardrails** — attribute truncation, tool allowlists, per-session cost ceilings, content filters.
 - **Policy-based tool-use authorization** — gate every tool call through OPA (remote) or Cedar (in-process). Fail-closed by default.
-- **AgentOS visibility** — write to the same Mongo collections (`agent_registry`, `agent_logs`, `agent_messages`, `sessions`, `slack_threads`) the AgentOS frontend already reads. Library-mode agents show up in the Agents list, Logs tab, Chat transcript, and (with the harness running) live chat sandboxes.
+- **AgentOS visibility** — POST telemetry to the AgentOS ingest endpoint; the server projects it into the collections the frontend reads (`agent_registry`, `agent_logs`, `sessions`, `chat_sessions`, `agent_messages`). The SDK holds no Mongo creds. Library-mode agents show up in the Agents list, Logs tab, and Chat transcript.
 - **Per-message archive** — every message, tool call, and policy decision archived to `agent_messages` for replay, RAG, and forensic audit.
 
 ## Install
@@ -35,7 +37,8 @@ Adopting `computer-agent-py` in place of `claude-agent-sdk` gives you, without r
 ```bash
 pip install computer-agent-py                     # core drop-in + OPA policy engine
 pip install 'computer-agent-py[otel]'             # + OpenTelemetry sink
-pip install 'computer-agent-py[agentos]'          # + AgentOS Mongo sinks
+pip install 'computer-agent-py[agentos]'          # + AgentOS HTTP telemetry sink (ingest) + git-cred/agent resolve
+pip install 'computer-agent-py[remote]'           # + remote-harness client (ComputerAgent(harness_url=…))
 pip install 'computer-agent-py[cedar]'            # + Cedar policy engine (in-process)
 pip install 'computer-agent-py[gitagent]'         # + gitagent engine (Anthropic + OpenAI dispatch) + GAP loader
 pip install 'computer-agent-py[gap]'              # + GAP identity loader only (pyyaml; subset of [gitagent])
@@ -77,14 +80,14 @@ async with ComputerAgent(
     print(result.messages, result.usage)
 ```
 
-Built-ins shipped in 0.2.0:
+Built-ins:
 
 | Axis | Built-ins | Notes |
 |---|---|---|
-| `engine` | `claude-agent-sdk`, `gitagent` | gitagent reads `GITCLAW_MODEL_BASE_URL` + `OPENAI_API_KEY`. MCP-only tools in 0.2.0. |
-| `runtime` (substrate) | `local` | Caller-owned `Path`, or git-clone an `https://` / `git@` `.git` URL into a temp dir. |
-| `session_store` | `memory` | In-process dict. Mongo + SQLite stores in 0.3.0. |
-| `identity_loader` | `passthrough` | Treats inline dicts as manifests. GAP-style loaders in 0.3.0. |
+| `engine` | `claude-agent-sdk`, `gitagent` | gitagent reads `GITCLAW_MODEL_BASE_URL` + `OPENAI_API_KEY`. MCP-only tools. |
+| `runtime` (substrate) | `local` | Caller-owned `Path`, or git-clone an `https://` / `git@` `.git` URL into a temp dir. Remote substrates run server-side — see Mode 2b. |
+| `session_store` | `memory` | In-process dict. Mongo + SQLite stores land in 0.3.0 (with resumability). |
+| `identity_loader` | `passthrough`, `gap` | `passthrough` treats inline dicts as manifests; `gap` reads `agent.yaml` + `SOUL.md` + `RULES.md` (the `[gap]`/`[gitagent]` extra). |
 
 Plug-ins register at import time via `register_engine(name, instance)` etc. — third-party engines (e2b substrate, deepagents engine, mongo session store) drop in by implementing the matching Protocol in `computeragent.protocol_types`.
 
@@ -153,14 +156,44 @@ async with ComputerAgent(agent_id="my-agent") as a:   # source fetched from Agen
 
 Explicit `source`/`harness`/`model` override the resolved values; an unregistered
 `agent_id` with no `source` raises a clear error (it's strictly "run an existing
-agent"). Needs `AGENTOS_API_URL` + a `cak_` key (`COMPUTERAGENT_HARNESS_TOKEN`).
+agent").
+
+### One config: `AGENTOS_DISCOVERY_URL` + your `cak_` key
+
+You give the SDK **two things** and it figures out the rest:
+
+| Env (SDK) | What |
+|---|---|
+| `AGENTOS_DISCOVERY_URL` | the full URL of the AgentOS **discovery** document, e.g. `https://host/agentos/api/discovery` |
+| `COMPUTERAGENT_HARNESS_TOKEN` | the single `cak_` key the SDK presents everywhere |
+
+The SDK GETs the discovery document once and reads the **absolute URLs** for
+ingest, `agent_id`/git-cred resolve, and the OTLP trace gateway straight out of
+it — it never hardcodes or constructs an endpoint path. If the server ever moves
+a route, it updates its discovery document and the SDK picks the new URLs up on
+the next start — **no SDK upgrade needed**. (The discovery document is public —
+it carries only URLs, no secrets — exactly like OIDC's `.well-known`.)
+
+The one `cak_` key authenticates all three resolved endpoints. For OTLP traces in
+particular, `OtelSink` exports **through the AgentOS server**, which validates the
+key and forwards to the real backend (New Relic / a Collector) with a
+*server-held* credential — so you set no `OTEL_EXPORTER_OTLP_HEADERS` and ship no
+vendor license key. The remote-harness URL (`harness_url=` /
+`COMPUTERAGENT_HARNESS_URL`) is the one URL *not* discovered — the harness/CAS is
+a separate service, always a full URL you supply.
+
+**Advanced overrides.** Each endpoint also honours a full-URL override env var
+that wins over discovery: `AGENTOS_INGEST_URL`, `AGENTOS_API_URL`,
+`AGENTOS_OTEL_URL`. Set one to pin a single endpoint (or to run without discovery
+entirely). Omit `AGENTOS_OTEL_URL`/discovery's otel and `OtelSink` exports OTLP
+directly to a backend the classic way via `OTEL_EXPORTER_OTLP_ENDPOINT`/`_HEADERS`.
 
 **No lost events.** Because an `agent_id` run is AgentOS-backed, ingest is
-**required**: `ComputerAgent` raises at construction if `agent_id` is set but
-neither `AGENTOS_INGEST_URL` nor an explicit `telemetry_pipeline` is configured —
-so a run's telemetry is never silently dropped. (Runs without `agent_id` are
-unaffected.) `agent_id` itself rides telemetry only and never touches the harness
-wire body.
+**required**: `ComputerAgent` raises at construction if `agent_id` is set but no
+ingest URL resolves (from `AGENTOS_DISCOVERY_URL` or an `AGENTOS_INGEST_URL`
+override) and no explicit `telemetry_pipeline` is configured — so a run's
+telemetry is never silently dropped. (Runs without `agent_id` are unaffected.)
+`agent_id` itself rides telemetry only and never touches the harness wire body.
 
 ### Mode 2c — private GAP repos (git credentials)
 
@@ -172,7 +205,7 @@ touches `argv`, the repo URL, or the logs.
 async with ComputerAgent(
     source="github.com/org/private-agent",
     harness_token="cak_…",                 # or COMPUTERAGENT_HARNESS_TOKEN
-) as agent:                                # + AGENTOS_API_URL → resolves the PAT
+) as agent:                                # + AGENTOS_DISCOVERY_URL → resolves the PAT
     result = await agent.chat("…")
 ```
 
@@ -181,7 +214,7 @@ async with ComputerAgent(
 - **Best-effort:** missing config, a miss (404), or an auth failure (401/403) falls back to an unauthenticated clone — public repos are unaffected.
 - **SHA sync:** after cloning, the SDK captures `git rev-parse HEAD` and rides it on `session_started` as `agent_sha`; the AgentOS server stamps `sourceSha`/`sourceSyncedAt` on the registry doc.
 
-Requires `AGENTOS_API_URL` (e.g. `https://host:8788/agentos/api/v1`) + a `cak_` key whose role includes `git-credentials:read`. Uses `httpx` (the `[remote]`/`[agentos]` extra).
+Requires `AGENTOS_DISCOVERY_URL` (the SDK reads the api endpoint from it; or set `AGENTOS_API_URL` to override) + a `cak_` key whose role includes `git-credentials:read`. Uses `httpx` (the `[remote]`/`[agentos]` extra).
 
 ## Quickstart
 
@@ -219,8 +252,9 @@ That's it — same shape as `claude-agent-sdk`. Telemetry is configured from env
 | `OTEL_SERVICE_NAME` | `service.name` attribute on every span. Default: `computeragent`. |
 | `COMPUTERAGENT_OTEL` | `disabled` to suppress OtelSink. |
 | `COMPUTERAGENT_OTEL_TEMPORALITY` | `delta` (default) or `cumulative`. SaaS OTLP intakes (New Relic, Datadog direct, Honeycomb) require delta; cumulative is only correct when exporting to a collector that aggregates downstream. |
-| `AGENTOS_INGEST_URL` | When set + `[agentos]` installed, attaches `AgentOSHttpSink` — POSTs telemetry events to the AgentOS server, which writes the Mongo collections (registry, logs, sessions, chat_sessions, agent_messages). E.g. `http://host:8788/agentos/api/ingest/events`. |
-| `AGENTOS_INGEST_TOKEN` | Optional bearer token sent as `Authorization: Bearer …`. Match the server's `AGENTOS_INGEST_TOKEN`. |
+| `AGENTOS_DISCOVERY_URL` | The full URL of the AgentOS discovery document (e.g. `https://host:8788/agentos/api/discovery`). With `[agentos]` installed + a `cak_` key, the SDK reads the ingest endpoint from it and attaches `AgentOSHttpSink` — POSTing telemetry events to the AgentOS server, which writes the Mongo collections (registry, logs, sessions, chat_sessions, agent_messages). The single config for *all* AgentOS endpoints. |
+| `AGENTOS_INGEST_URL` | Full-URL **override** for the ingest endpoint (wins over discovery). E.g. `http://host:8788/agentos/api/ingest/events`. |
+| `COMPUTERAGENT_HARNESS_TOKEN` | The `cak_` key, sent as `Authorization: Bearer …` to ingest + every resolved AgentOS endpoint. (Legacy `AGENTOS_INGEST_TOKEN` is still honoured.) |
 | `COMPUTERAGENT_CAPTURE_CONTENT` | `1` to include prompts/responses on OTel spans. Default: off. |
 | `COMPUTERAGENT_CAPTURE_CONTENT_MODE` | `events` (default) \| `attributes` \| `both`. |
 

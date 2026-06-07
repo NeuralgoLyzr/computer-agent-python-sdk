@@ -128,9 +128,10 @@ def _auto_sinks() -> list[TelemetrySink]:
     ``opentelemetry-*`` packages are importable. Falls back to console
     exporter when no OTLP endpoint is configured.
 
-    AgentOS sink: on when ``AGENTOS_INGEST_URL`` is set AND ``httpx`` is
-    importable. POSTs telemetry events to the AgentOS server, which owns the
-    Mongo writes (registry / logs / sessions / chat_sessions / agent_messages).
+    AgentOS sink: on when an ingest URL resolves (from ``AGENTOS_DISCOVERY_URL``
+    or an ``AGENTOS_INGEST_URL`` override) AND ``httpx`` is importable. POSTs
+    telemetry events to the AgentOS server, which owns the Mongo writes (registry
+    / logs / sessions / chat_sessions / agent_messages).
     """
     sinks: list[TelemetrySink] = []
 
@@ -142,7 +143,9 @@ def _auto_sinks() -> list[TelemetrySink]:
         except ImportError:
             logger.debug("OtelSink not attached (computer-agent-py[otel] not installed)")
 
-    ingest_url = os.environ.get("AGENTOS_INGEST_URL")
+    from .. import agentos
+
+    ingest_url = agentos.ingest_url()
     if ingest_url:
         try:
             from .sinks.agentos_http import AgentOSHttpSink  # noqa: WPS433
