@@ -278,6 +278,16 @@ class ComputerAgent:
             # An explicit telemetry_pipeline= still wins for callers who want
             # client-side telemetry on purpose.
             remote_pipeline = telemetry_pipeline if telemetry_pipeline is not None else Pipeline(sinks=[])
+            # SRS policy parity with the AgentOS UI: the UI's chat-sandbox route
+            # looks up the agent's bound policy and attaches it; talking to the CAS
+            # directly skips that. So resolve the binding here (by agent name) from
+            # AgentOS and forward only {policyId, principalId} — the CAS fills the
+            # SRS endpoint/key from its own env. None → no bound policy → no change.
+            remote_policy = (
+                _agentos.fetch_policy_binding(agent_name, token=harness_token)
+                if agent_name
+                else None
+            )
             self._coordinator: _CoordinatorLike = _build_remote_coordinator_from_kwargs(
                 harness_url=harness_url,
                 harness_kind=harness_kind,
@@ -296,6 +306,7 @@ class ComputerAgent:
                 harness_auth=harness_auth,
                 harness_token=harness_token,
                 telemetry_pipeline=remote_pipeline,
+                policy=remote_policy,
             )
             return
 
@@ -399,6 +410,7 @@ def _build_remote_coordinator_from_kwargs(
     harness_auth: tuple[str, str] | str | None,
     harness_token: str | None,
     telemetry_pipeline: Pipeline | None,
+    policy: Mapping[str, Any] | None = None,
 ) -> _CoordinatorLike:
     """Map ``ComputerAgent`` kwargs → a ``RemoteCoordinator``. Imported lazily
     so the ``[remote]`` extra (httpx) is only required in remote mode."""
@@ -433,6 +445,7 @@ def _build_remote_coordinator_from_kwargs(
         auth=harness_auth,
         token=harness_token,
         telemetry_pipeline=telemetry_pipeline,
+        policy=policy,
     )
 
 
