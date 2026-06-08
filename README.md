@@ -4,20 +4,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/computer-agent-py.svg)](https://pypi.org/project/computer-agent-py/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Drop-in replacement for [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/)** — change the import line, get a proxied telemetry pipeline with PII redaction, configurable OTel export, policy-based tool authorization, and full AgentOS integration for free.
+**Drop-in replacement for [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/)** — change one import line, keep every call site identical, and gain a proxied telemetry pipeline with PII redaction, configurable OTel export, policy-based tool authorization, and full AgentOS integration for free.
 
 **New in 0.2.0** — a Python port of the TypeScript [`ComputerAgent`](../ComputerAgent/) harness alongside the drop-in proxy. Same vocabulary (engine / substrate / session-store / identity-loader), `ComputerAgent` + `run_task()` entry points, two built-in engines (`claude-agent-sdk`, `gitagent`). The 0.1.x drop-in surface is untouched — both modes co-exist.
 
 **New in 0.2.1** — run the engine on a **remote harness server** (`ComputerAgent(harness_url=…)`); **AgentOS API-key auth** (`cak_` key via `harness_token` / `COMPUTERAGENT_HARNESS_TOKEN`); a **stable, rename-safe `agent_id`** (plus run a registered agent by reference, no `source`); **private GAP-repo git credentials** resolved per-group from AgentOS; and the `gap` identity loader. **Breaking:** AgentOS telemetry now ships over **HTTP** to the server's ingest endpoint — the old direct-Mongo sinks (`AGENTOS_MONGO_URL`) are gone. See [`CHANGELOG.md`](CHANGELOG.md).
-
-```diff
-- from claude_agent_sdk import ClaudeAgentOptions, query
-- from claude_agent_sdk.types import ResultMessage
-+ from computeragent import ClaudeAgentOptions, query
-+ from computeragent.types import ResultMessage
-```
-
-Every other line stays identical. `isinstance(msg, ResultMessage)` still works. The `claude` CLI subprocess, AWS Bedrock auth, MCP servers, permission modes, `cwd`, `add_dirs` — all behave exactly as the upstream SDK does.
 
 > **Package vs import name** — PyPI distribution is `computer-agent-py` (hyphens for the wheel); the import name is `computeragent` (Python doesn't allow hyphens). So `pip install computer-agent-py` then `from computeragent import …`.
 
@@ -104,17 +95,20 @@ from computeragent import ComputerAgent
 # Bare harness protocol (@computeragent/harness-server, :7700) — default kind.
 async with ComputerAgent(
     harness_url="http://harness:7700",
-    harness="claude-agent-sdk",            # engine to run remotely
+    harness_token="cak_…",               # AgentOS API key — required
+    harness="claude-agent-sdk",
     source={"type": "git", "url": "github.com/org/agent"},
 ) as agent:
-    async for event in agent.chat("Summarize the README"):
-        ...                                # ca_session_started, sdk_message, ca_session_ended, …
-    result = await agent.chat("…")         # ChatResult(messages, usage, session_id)
+    result = await agent.chat("Summarize the README.")
 
-# ComputerAgent server (:8787) — pick the substrate per request.
+# ComputerAgent server / CAS (:8787) — full sandbox API, substrate chosen per request.
 async with ComputerAgent(
-    harness_url="http://cas:8787", harness_kind="server", runtime="bwrap",
-    harness="claude-agent-sdk", source={"type": "git", "url": "github.com/org/agent"},
+    harness_url="http://cas:8787",
+    harness_kind="server",
+    harness_token="cak_…",               # or set COMPUTERAGENT_HARNESS_TOKEN
+    runtime="bwrap",
+    harness="claude-agent-sdk",
+    source={"type": "git", "url": "github.com/org/agent"},
 ) as agent:
     result = await agent.chat("…")
 ```
@@ -132,6 +126,26 @@ Pass it as `harness_token="cak_…"` (sent as `Authorization: Bearer`), or set
 `COMPUTERAGENT_HARNESS_TOKEN` and omit the arg — explicit wins, env is the
 fallback. The **same key works everywhere**: remote auth, telemetry ingest, and
 the private-repo credential resolve below.
+
+**No `ANTHROPIC_API_KEY` on the client — two paths:**
+
+| Path | When to use | What to set |
+|---|---|---|
+| **Remote harness** (`harness_url=`) | Engine runs server-side | No Anthropic key on the client — the harness server holds it (`ANTHROPIC_API_KEY` in the server's env) |
+| **AgentOS messages gateway** | Engine runs in-process | `ANTHROPIC_BASE_URL=https://<host>/agentos/api` + `ANTHROPIC_AUTH_TOKEN=cak_…` — the server validates the `cak_` and forwards with its own key |
+
+```bash
+# Remote harness — client needs zero Anthropic credentials:
+COMPUTERAGENT_HARNESS_URL=https://cas.example.com
+COMPUTERAGENT_HARNESS_TOKEN=cak_…
+# (no ANTHROPIC_API_KEY)
+
+# In-process + AgentOS gateway — also no raw Anthropic key on the client:
+ANTHROPIC_BASE_URL=https://agentos.example.com/agentos/api
+ANTHROPIC_AUTH_TOKEN=cak_…
+AGENTOS_DISCOVERY_URL=https://agentos.example.com/agentos/api/discovery
+COMPUTERAGENT_HARNESS_TOKEN=cak_…
+```
 
 **Stable agent identity.** Pass `agent_id="my-stable-slug"` (or set
 `COMPUTERAGENT_AGENT_ID`) to give the agent a stable identifier that's decoupled
@@ -216,30 +230,199 @@ async with ComputerAgent(
 
 Requires `AGENTOS_DISCOVERY_URL` (the SDK reads the api endpoint from it; or set `AGENTOS_API_URL` to override) + a `cak_` key whose role includes `git-credentials:read`. Uses `httpx` (the `[remote]`/`[agentos]` extra).
 
-## Quickstart
+### Mode 2d — Anthropic messages gateway (no client API key)
+
+AgentOS ships a transparent Anthropic-API reverse proxy (`POST /agentos/api/v1/messages`). Point `ANTHROPIC_BASE_URL` at it and use your `cak_` key as the auth token — the client holds **no raw Anthropic key**. The server validates the `cak_` key (checks `completion:run` permission) and forwards to Anthropic with its own server-held credential.
+
+```bash
+# .env — set once, every ComputerAgent run in this process uses the gateway
+ANTHROPIC_BASE_URL=https://agentos.example.com/agentos/api
+ANTHROPIC_AUTH_TOKEN=cak_…          # same key as COMPUTERAGENT_HARNESS_TOKEN
+AGENTOS_DISCOVERY_URL=https://agentos.example.com/agentos/api/discovery
+COMPUTERAGENT_HARNESS_TOKEN=cak_…
+# ANTHROPIC_API_KEY — intentionally absent
+```
+
+```python
+from computeragent import ComputerAgent
+
+# No ANTHROPIC_API_KEY in env — the gateway handles it.
+async with ComputerAgent(
+    source={"type": "inline",
+            "manifest": {"name": "my-agent", "version": "0.1.0"},
+            "files": {"CLAUDE.md": "You are terse.",
+                      "agent.yaml": "spec_version: '0.1.0'\nname: my-agent\nversion: 0.1.0\nmodel:\n  preferred: claude-haiku-4-5\nruntime:\n  permission_mode: bypassPermissions\n  max_turns: 2\n"}},
+    engine="claude-agent-sdk",
+    runtime="local",
+    options={"model": "claude-haiku-4-5", "permission_mode": "bypassPermissions", "max_turns": 2},
+) as agent:
+    result = await agent.chat("Say hello.")
+    print(result.messages)
+```
+
+The Anthropic client library reads `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` automatically — no code change beyond the env vars. Works with any `claude-agent-sdk` engine run (local or remote harness).
+
+### Mode 2e — run an agent by MongoDB `_id`
+
+When an agent is registered via the AgentOS UI or `POST /agents/register`, the API returns a MongoDB `_id` (24-hex string). Pass that directly as `agent_id` — the resolve endpoint now accepts both the sparse stable `agentId` field **and** the registry `_id`, so you don't need a prior SDK run to stamp the field:
+
+```python
+# Agent was registered in the AgentOS UI → got back _id = "6a243b029cd2a68df349da77"
+async with ComputerAgent(
+    agent_id="6a243b029cd2a68df349da77",   # registry _id OR stable agentId
+    harness_url="https://cas.example.com",
+    harness_kind="server",
+    harness_token="cak_…",
+) as agent:
+    result = await agent.chat("Explain the architecture.")
+```
+
+No `source` needed — the SDK calls `POST {AGENTOS_API_URL}/agents/resolve`, the server looks up by `agentId` field first and falls back to `_id` if the field is absent (covers UI-registered agents that have never been run with `agent_id=`).
+
+## End-to-end cookbook
+
+The four patterns below map directly to the smoke test [`scripts/10_local_harness_gap.py`](scripts/10_local_harness_gap.py). Run them together to validate your AgentOS deployment end-to-end.
+
+**Prerequisites** — set these in your environment (or a `.env` file):
+
+```bash
+AGENTOS_DISCOVERY_URL=https://<agentos-host>/agentos/api/discovery
+COMPUTERAGENT_HARNESS_TOKEN=cak_…
+COMPUTERAGENT_HARNESS_URL=https://<cas-host>          # for B
+SMOKE_AGENT_ID=6a243b029cd2a68df349da77               # for B — registry _id or stable agentId
+SMOKE_PRIVATE_REPO_URL=https://github.com/org/repo    # for C + D
+```
+
+### A — local run, model calls through the AgentOS gateway
+
+```python
+import os, asyncio
+from computeragent import ComputerAgent
+from computeragent.telemetry import Pipeline
+from computeragent.telemetry.sinks import AgentOSHttpSink
+
+# Route Anthropic calls through AgentOS — client holds no API key.
+os.environ["ANTHROPIC_BASE_URL"] = "https://<agentos-host>/agentos/api"
+os.environ["ANTHROPIC_AUTH_TOKEN"] = "cak_…"
+
+ingest_url = "https://<agentos-host>/agentos/api/ingest/events"
+pipeline = Pipeline(sinks=[AgentOSHttpSink(url=ingest_url, token="cak_…")])
+
+inline = {
+    "type": "inline",
+    "manifest": {"name": "smoke-a", "version": "0.1.0"},
+    "files": {
+        "CLAUDE.md": "You are a general assistant.",
+        "agent.yaml": "spec_version: '0.1.0'\nname: smoke-a\nversion: 0.1.0\nmodel:\n  preferred: claude-haiku-4-5\nruntime:\n  permission_mode: bypassPermissions\n  max_turns: 2\n",
+    },
+}
+
+async def run():
+    async with ComputerAgent(
+        source=inline, engine="claude-agent-sdk", runtime="local",
+        options={"model": "claude-haiku-4-5", "permission_mode": "bypassPermissions", "max_turns": 2},
+        telemetry_pipeline=pipeline,
+    ) as agent:
+        result = await agent.chat("Say hello.")
+    print(result.messages)
+
+asyncio.run(run())
+```
+
+### B — run a registered agent by `agent_id`, no source
 
 ```python
 import asyncio
+from computeragent import ComputerAgent
+
+async def run():
+    async with ComputerAgent(
+        agent_id="6a243b029cd2a68df349da77",   # registry _id returned by /agents/register
+        harness_url="https://cas.example.com",
+        harness_kind="server",
+        harness_token="cak_…",
+    ) as agent:
+        result = await agent.chat("Explain the Lyzr Cognis architecture.")
+    print(result.usage)
+
+asyncio.run(run())
+```
+
+### C — verify a private-repo PAT is stored and decryptable
+
+```python
+import asyncio
+from computeragent.harness.git_credential_client import resolve_git_credential
+
+async def check():
+    cred = await resolve_git_credential("https://github.com/org/private-agent")
+    if cred:
+        tok = cred["token"]
+        print(f"PAT OK: {tok[:4]}…{tok[-4:]}")  # never log the full token
+    else:
+        print("PAT not found — add it in AgentOS Settings → Git Credentials")
+
+asyncio.run(check())
+```
+
+### D — full private-repo clone + agent run
+
+The coordinator auto-resolves the PAT (via `POST {AGENTOS_API_URL}/git-credentials/resolve`) and injects it as an HTTP auth header via `GIT_CONFIG_*` — the token never touches `argv` or the clone URL:
+
+```python
+import asyncio, os
+from computeragent import ComputerAgent
+
+# Ensure we run locally, not against the remote CAS.
+os.environ.pop("COMPUTERAGENT_HARNESS_URL", None)
+
+async def run():
+    async with ComputerAgent(
+        source="https://github.com/org/private-agent",
+        engine="claude-agent-sdk",
+        runtime="local",
+        options={"model": "claude-haiku-4-5", "permission_mode": "bypassPermissions", "max_turns": 2},
+    ) as agent:
+        result = await agent.chat("Summarize the README.")
+    print(result.messages)
+
+asyncio.run(run())
+```
+
+Requirements: `AGENTOS_DISCOVERY_URL` + `COMPUTERAGENT_HARNESS_TOKEN` with `git-credentials:read` role. A PAT for the repo's host must be stored in AgentOS Settings → Git Credentials under the key's group. Public repos work without any credential stored.
+
+## Drop-in replacement for `claude-agent-sdk`
+
+```diff
+- from claude_agent_sdk import ClaudeAgentOptions, query
+- from claude_agent_sdk.types import ResultMessage
++ from computeragent import ClaudeAgentOptions, query
++ from computeragent.types import ResultMessage
+```
+
+Every other line stays identical. `isinstance(msg, ResultMessage)` still works. The `claude` CLI subprocess, AWS Bedrock auth, MCP servers, permission modes, `cwd`, `add_dirs` — all behave exactly as the upstream SDK does. The `claude-agent-sdk` binary is bundled — no separate install needed.
+
+```python
 from computeragent import ClaudeAgentOptions, query
 from computeragent.types import ResultMessage
 
-async def main():
-    options = ClaudeAgentOptions(
-        model="claude-sonnet-4-5",
-        system_prompt="You are a helpful assistant.",
-        allowed_tools=["Read", "Glob", "Grep"],
-        permission_mode="bypassPermissions",
-    )
+options = ClaudeAgentOptions(
+    model="claude-haiku-4-5",
+    system_prompt="You are a helpful assistant.",
+    allowed_tools=["Read", "Glob", "Grep"],
+    permission_mode="bypassPermissions",
+)
 
-    async for message in query(prompt="Summarize the README.md in this directory.", options=options):
-        if isinstance(message, ResultMessage):
-            print(f"answer ({message.num_turns} turns, ${message.total_cost_usd:.4f}):")
-            print(message.result)
-
-asyncio.run(main())
+async for message in query(prompt="Summarize the README.md.", options=options):
+    if isinstance(message, ResultMessage):
+        print(f"answer ({message.num_turns} turns): {message.result}")
 ```
 
-That's it — same shape as `claude-agent-sdk`. Telemetry is configured from env vars; without anything set, nothing leaves your process.
+You gain OTel traces, PII redaction, policy-gated tool calls, and AgentOS visibility for free — with zero changes beyond the import line.
+
+## Quickstart
+
+See the [Drop-in replacement](#drop-in-replacement-for-claude-agent-sdk) section for the one-import-line quick start, or the [End-to-end cookbook](#end-to-end-cookbook) for the full AgentOS-integrated flow. Telemetry is configured from env vars — without any set, nothing leaves your process.
 
 ## Configure telemetry
 
