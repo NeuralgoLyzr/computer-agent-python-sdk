@@ -171,6 +171,7 @@ class ComputerAgentServerTransport:
         model: str | None,
         agent_id: str | None = None,
         agent_name: str | None = None,
+        policy: Mapping[str, Any] | None = None,
     ) -> None:
         self._client = client
         self._engine = engine
@@ -181,6 +182,7 @@ class ComputerAgentServerTransport:
         self._model = model
         self._agent_id = agent_id
         self._agent_name = agent_name
+        self._policy = dict(policy) if policy else None
         self._sandbox_id: str | None = None
 
     async def ensure_open(self, lifecycle_session_id: str) -> str:
@@ -207,6 +209,11 @@ class ComputerAgentServerTransport:
             body["identity"] = {"agentId": self._agent_id}
         if self._agent_name:
             body["agentName"] = self._agent_name
+        # Per-tool-call SRS policy. We send only the binding (policyId/principalId);
+        # the CAS fills the SRS endpoint+key from its own env, so the key never
+        # rides the wire. Omitted entirely when the agent has no bound policy.
+        if self._policy:
+            body["policy"] = self._policy
         resp = await self._client.create_sandbox(body)
         self._sandbox_id = str(resp["sandboxId"])
         return self._sandbox_id
@@ -254,6 +261,7 @@ class RemoteCoordinator:
         auth: tuple[str, str] | str | None,
         token: str | None,
         telemetry_pipeline: Pipeline | None,
+        policy: Mapping[str, Any] | None = None,
     ) -> None:
         self._url = harness_url.rstrip("/")
         self._kind = harness_kind
@@ -270,6 +278,9 @@ class RemoteCoordinator:
         # _emit_safe AND sent in the CAS sandbox body (server transport) as
         # `identity.agentId` so the server tags spans + writes the session index.
         self._agent_id = agent_id
+        # SRS policy binding ({kind, policyId, principalId}); attached to the CAS
+        # sandbox body so the server builds its SrsPolicyDecider. None → no policy.
+        self._policy = dict(policy) if policy else None
         self._on_tool_call = on_tool_call
         self._auth = auth
         self._token = token
@@ -308,6 +319,7 @@ class RemoteCoordinator:
                 model=self._model,
                 agent_id=self._agent_id,
                 agent_name=self._agent_name,
+                policy=self._policy,
             )
         else:
             opts = dict(self._options)
@@ -603,6 +615,7 @@ def build_remote_coordinator(
     auth: tuple[str, str] | str | None,
     token: str | None,
     telemetry_pipeline: Pipeline | None,
+    policy: Mapping[str, Any] | None = None,
 ) -> RemoteCoordinator:
     return RemoteCoordinator(
         harness_url=harness_url,
@@ -622,6 +635,7 @@ def build_remote_coordinator(
         auth=auth,
         token=token,
         telemetry_pipeline=telemetry_pipeline,
+        policy=policy,
     )
 
 
