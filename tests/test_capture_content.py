@@ -142,7 +142,7 @@ async def test_capture_content_attributes_mode(monkeypatch):
     await _run_one_turn_with_tool(sink)
 
     spans = exp.get_finished_spans()
-    chat = _span(spans, "chat ")
+    chat = _span(spans, "invoke_agent")
     tool = _span(spans, "execute_tool")
     chat_attrs = dict(chat.attributes or {})
 
@@ -223,7 +223,7 @@ async def test_capture_content_both_mode(monkeypatch):
     sink, exp, log_exp = _build_inmemory()
     await _run_one_turn_with_tool(sink)
 
-    chat = _span(exp.get_finished_spans(), "chat ")
+    chat = _span(exp.get_finished_spans(), "invoke_agent")
     chat_attrs = dict(chat.attributes or {})
     # Attribute path populated.
     assert json.loads(chat_attrs["gen_ai.input.messages"])[0]["parts"][0]["content"] == (
@@ -255,7 +255,7 @@ async def test_capture_content_truncates_oversized_payload(monkeypatch):
     await sink.emit(_ev("assistant_message", {"model": "m", "text": "ok"}))
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 1.0}))
 
-    chat = _span(exp.get_finished_spans(), "chat ")
+    chat = _span(exp.get_finished_spans(), "invoke_agent")
     content = (chat.attributes or {}).get("gen_ai.input.messages")
     assert content is not None
     # head is (max-32) chars + the ..."[truncated:N]" marker → bounded by ~max.
@@ -278,7 +278,7 @@ async def test_streaming_prompt_sentinel_not_captured(monkeypatch):
     await sink.emit(_ev("assistant_message", {"model": "m", "text": "ok"}))
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 1.0}))
 
-    chat = _span(exp.get_finished_spans(), "chat ")
+    chat = _span(exp.get_finished_spans(), "invoke_agent")
     attrs = dict(chat.attributes or {})
     # System prompt was real → captured.
     assert json.loads(attrs["gen_ai.system_instructions"]) == [{"type": "text", "content": "sys"}]

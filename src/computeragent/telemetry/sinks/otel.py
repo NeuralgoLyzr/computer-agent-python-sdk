@@ -126,6 +126,10 @@ GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
 GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
+# Streaming time-to-first-token (seconds). Spec semconv attribute; mirrors the
+# TS GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK. Stamped on the per-turn invoke_agent
+# root so it shares the dashboard's per-turn scope.
+GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK = "gen_ai.response.time_to_first_chunk"
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
 GEN_AI_TOOL_NAME = "gen_ai.tool.name"
 GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
@@ -145,6 +149,7 @@ COMPUTERAGENT_USAGE_COST_USD = "computeragent.usage.cost_usd"
 
 METRIC_TOKEN_USAGE = "gen_ai.client.token.usage"
 METRIC_OPERATION_DURATION = "gen_ai.client.operation.duration"
+METRIC_TIME_TO_FIRST_CHUNK = "gen_ai.client.operation.time_to_first_chunk"
 METRIC_COST_USD = "computeragent.usage.cost_usd"
 
 # Tracer + meter + logger instrumentation scope. Matches the TS
@@ -646,10 +651,22 @@ class OtelSink:
         self._spans = _SpanMap()
         self._usage = _UsageAggregator(self._meter)
         self._content = ContentAccumulator()
+        self._ttft_hist = self._meter.create_histogram(
+            METRIC_TIME_TO_FIRST_CHUNK,
+            unit="s",
+            description="Streaming time-to-first-token, measured per agent turn.",
+        )
         # Per-session identity, retained across turns (NOT cleared on
         # session_ended) and FIFO-bounded via _remember.
         self._session_meta: dict[str, _SessionMeta] = {}
         self._session_model: dict[str, str] = {}
+        # Per-LLM-call timing: sid → {"start_ns", "first_token_ns"?, "usage_seen"}.
+        # `start_ns` is the next call's wall-clock start (turn start for call 1,
+        # last tool_result for call N); `first_token_ns` the first streamed chunk
+        # of the current call (for per-call TTFT). One chat span is emitted per
+        # call from these. `usage_seen` records whether any per-call usage was
+        # captured this turn (drives the cumulative-on-root fallback).
+        self._call_timing: dict[str, dict[str, Any]] = {}
 
     # ── lifecycle ----------------------------------------------------------
 
@@ -744,7 +761,10 @@ class OtelSink:
         is off."""
         if not self._capture_content:
             return
-        target = self._spans.get_current_chat(sid) or self._spans.get_invoke_agent(sid)
+        # Turn-level content lands on the invoke_agent root: chat spans are now
+        # per-LLM-call and closed inline, so there's no single chat span to hold
+        # the turn's aggregated input/output messages.
+        target = self._spans.get_invoke_agent(sid)
         write_inference_content(
             input_msgs=self._content.input_for(sid),
             output_msgs=self._content.output_for(sid),
@@ -809,6 +829,9 @@ class OtelSink:
             context=Context(),
         )
         self._spans.set_invoke_agent(sid, span)
+        # Start the first LLM call's clock (turn start). Each chat span spans
+        # [start_ns, assistant_message]; tool_results push start_ns forward.
+        self._remember(self._call_timing, sid, {"start_ns": time.time_ns(), "usage_seen": False})
 
     def _ensure_invoke_agent(self, sid: str) -> None:
         """Lazily open the turn root (marking the usage baseline) when no
@@ -821,12 +844,34 @@ class OtelSink:
         self._usage.mark_turn_boundary(sid)
         self._open_invoke_agent(sid)
 
-    def _ensure_chat_span(self, sid: str) -> None:
-        if self._spans.get_current_chat(sid) is not None:
-            return
-        self._ensure_invoke_agent(sid)
+    @staticmethod
+    def _apply_call_usage(attrs: dict[str, Any], usage: dict[str, Any]) -> None:
+        """Stamp this LLM call's own token usage onto its chat span. Tokens live
+        on the chat span (NOT the root) so summing over a trace's spans yields the
+        turn total with no double-count; cost stays cumulative on the root."""
+        for src, key in (
+            ("input_tokens", GEN_AI_USAGE_INPUT_TOKENS),
+            ("output_tokens", GEN_AI_USAGE_OUTPUT_TOKENS),
+            ("cache_read_input_tokens", GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS),
+            ("cache_creation_input_tokens", GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS),
+        ):
+            v = usage.get(src)
+            if isinstance(v, (int, float)):
+                attrs[key] = int(v)
+
+    def _emit_call_chat_span(self, sid: str, payload: dict[str, Any]) -> None:
+        """Emit ONE chat span per LLM call, created retroactively spanning
+        [call start, now]. Carries per-call tokens, finish_reason, model, and
+        per-call TTFT. Tools are siblings (children of invoke_agent), so the chat
+        span is opened and ended here in one shot rather than kept open."""
+        end_ns = time.time_ns()
+        call = self._call_timing.get(sid)
+        start_ns = int(call["start_ns"]) if call and "start_ns" in call else end_ns
+        model = self._session_model.get(sid) or payload.get("model")
+        if model:
+            self._remember(self._session_model, sid, str(model))
         root = self._spans.get_invoke_agent(sid)
-        model = self._session_model.get(sid)
+        ctx = trace.set_span_in_context(root) if root is not None else None
         attrs: dict[str, Any] = {
             GEN_AI_OPERATION_NAME: "chat",
             GEN_AI_CONVERSATION_ID: sid,
@@ -836,15 +881,40 @@ class OtelSink:
         if provider:
             attrs[GEN_AI_PROVIDER_NAME] = provider
         if model:
-            attrs[GEN_AI_REQUEST_MODEL] = model
-        ctx = trace.set_span_in_context(root) if root is not None else None
+            attrs[GEN_AI_REQUEST_MODEL] = str(model)
+            attrs[GEN_AI_RESPONSE_MODEL] = str(model)
+        finish_reason = map_finish_reason(
+            payload.get("stop_reason"), bool(payload.get("has_tool_use"))
+        )
+        attrs[GEN_AI_RESPONSE_FINISH_REASONS] = [finish_reason]
+        usage = payload.get("usage")
+        if isinstance(usage, dict):
+            self._apply_call_usage(attrs, usage)
+            if call is not None:
+                call["usage_seen"] = True
+        ttft_s: float | None = None
+        if call is not None:
+            ft = call.get("first_token_ns")
+            if isinstance(ft, int) and ft >= start_ns:
+                ttft_s = (ft - start_ns) / 1e9
+                attrs[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] = ttft_s
+        if ttft_s is not None:
+            self._ttft_hist.record(
+                ttft_s, attributes=_UsageAggregator._metric_attrs(self._metric_ctx(sid))
+            )
         span = self._tracer.start_span(
             name=f"chat {model}" if model else "chat",
             kind=SpanKind.CLIENT,
             attributes=attrs,
             context=ctx,
+            start_time=start_ns,
         )
-        self._spans.open_chat(sid, span)
+        span.set_status(Status(StatusCode.OK))
+        span.end(end_time=end_ns)
+        # Arm the next call: provisionally starts now; each tool_result pushes it.
+        if call is not None:
+            call["start_ns"] = end_ns
+            call.pop("first_token_ns", None)
 
     # ── handlers (one per event kind) --------------------------------------
 
@@ -875,12 +945,12 @@ class OtelSink:
 
     def _on_turn_started(self, event: TelemetryEvent) -> None:
         sid = event.session_id
-        # Close the prior turn's tree, stamping its usage delta on the root.
+        # Close the prior turn's tree, stamping its cumulative cost on the root.
         if self._spans.get_invoke_agent(sid) is not None:
             self._flush_turn_content(sid)
             root = self._spans.get_invoke_agent(sid)
-            if root is not None:
-                root.set_attributes(self._usage.turn_span_attributes(sid))
+            self._stamp_turn_root(sid, root)
+            self._call_timing.pop(sid, None)
             self._spans.end_chat_and_tools(sid, _EndOptions(status="ok"))
             self._spans.end_invoke_agent(sid, _EndOptions(status="ok"))
         # Each turn is a distinct operation with its own content set.
@@ -901,20 +971,10 @@ class OtelSink:
 
     def _on_assistant_message(self, event: TelemetryEvent) -> None:
         sid = event.session_id
-        model = event.payload.get("model")
-        if model:
-            self._remember(self._session_model, sid, str(model))
-        self._ensure_chat_span(sid)
-        chat = self._spans.get_current_chat(sid)
-        if chat is not None:
-            if model:
-                chat.set_attribute(GEN_AI_REQUEST_MODEL, str(model))
-                chat.set_attribute(GEN_AI_RESPONSE_MODEL, str(model))
-            finish_reason = map_finish_reason(
-                event.payload.get("stop_reason"),
-                bool(event.payload.get("has_tool_use")),
-            )
-            chat.set_attribute(GEN_AI_RESPONSE_FINISH_REASONS, [finish_reason])
+        self._ensure_invoke_agent(sid)
+        # One chat span PER LLM call. Each AssistantMessage = one model
+        # round-trip, with its own usage / finish_reason / TTFT.
+        self._emit_call_chat_span(sid, event.payload)
         text = event.payload.get("text")
         if self._capture_content and isinstance(text, str) and text:
             self._content.record_assistant_text(
@@ -928,10 +988,12 @@ class OtelSink:
         sid = event.session_id
         tool_name = str(event.payload.get("tool_name") or "tool")
         call_id = str(event.payload.get("tool_use_id") or "")
-        self._ensure_chat_span(sid)
+        self._ensure_invoke_agent(sid)
         if call_id and self._spans.get_tool(sid, call_id) is not None:
             return  # idempotent — don't double-open
-        parent = self._spans.get_current_chat(sid) or self._spans.get_invoke_agent(sid)
+        # Tools are siblings of the per-call chat spans (children of the turn
+        # root), since each chat span closes when its call completes.
+        parent = self._spans.get_invoke_agent(sid)
         attrs: dict[str, Any] = {
             GEN_AI_OPERATION_NAME: "execute_tool",
             GEN_AI_TOOL_NAME: tool_name,
@@ -985,6 +1047,11 @@ class OtelSink:
                 error_type="tool_execution_error" if is_error else None,
             ),
         )
+        # The model is re-invoked after its tools return, so the NEXT chat span
+        # starts now — keeps tool execution time out of per-call LLM latency.
+        call = self._call_timing.get(sid)
+        if call is not None:
+            call["start_ns"] = time.time_ns()
 
     def _on_usage_snapshot(self, event: TelemetryEvent) -> None:
         sid = event.session_id
@@ -1006,10 +1073,10 @@ class OtelSink:
             if is_error
             else None
         )
-        # Stamp the final turn's usage delta on the root, flush content, close.
+        # Stamp the final turn's cumulative cost on the root, flush content, close.
         root = self._spans.get_invoke_agent(sid)
-        if root is not None:
-            root.set_attributes(self._usage.turn_span_attributes(sid))
+        self._stamp_turn_root(sid, root)
+        self._call_timing.pop(sid, None)
         self._flush_turn_content(sid)
         self._spans.end_all_for_session(
             sid,
@@ -1029,6 +1096,30 @@ class OtelSink:
         # Drop per-session content; retain identity (FIFO-bounded) so later
         # turns of a still-live session keep their agent name/provider.
         self._content.clear_session(sid)
+
+    def _on_response_first_token(self, event: TelemetryEvent) -> None:
+        # First streamed token of the CURRENT LLM call arrived (coordinator-
+        # detected from the first content StreamEvent, re-armed per call). Record
+        # its arrival; the per-call delta lands on that call's chat span.
+        sid = event.session_id
+        self._ensure_invoke_agent(sid)  # ensure the root + call clock exist
+        call = self._call_timing.get(sid)
+        if call is not None and "first_token_ns" not in call:
+            call["first_token_ns"] = time.time_ns()
+
+    def _stamp_turn_root(self, sid: str, root: Any) -> None:
+        """Stamp the turn's CUMULATIVE COST on the invoke_agent root. Tokens are
+        carried per-call on the chat spans, so the root holds cost only — summing
+        tokens across a trace's spans then can't double-count. Fallback: if NO
+        per-call usage was captured this turn (older SDK without per-message
+        usage), keep the cumulative token totals on the root so totals survive."""
+        if root is None:
+            return
+        attrs = self._usage.turn_span_attributes(sid)  # tokens + cost
+        call = self._call_timing.get(sid)
+        if call is not None and call.get("usage_seen"):
+            attrs = {k: v for k, v in attrs.items() if k == COMPUTERAGENT_USAGE_COST_USD}
+        root.set_attributes(attrs)
 
     def _on_user_message(self, _event: TelemetryEvent) -> None:
         # OtelSink ignores user_message; turn_started is the authoritative
@@ -1084,6 +1175,7 @@ _DISPATCH: dict[str, Any] = {
     "tool_result": OtelSink._on_tool_result,
     "usage_snapshot": OtelSink._on_usage_snapshot,
     "session_ended": OtelSink._on_session_ended,
+    "response_first_token": OtelSink._on_response_first_token,
     "user_message": OtelSink._on_user_message,
     "system_message": OtelSink._on_system_message,
     "policy_decision": OtelSink._on_policy_decision,
@@ -1245,6 +1337,10 @@ def _genai_views() -> list[View]:
         ),
         View(
             instrument_name=METRIC_OPERATION_DURATION,
+            aggregation=ExplicitBucketHistogramAggregation(list(OPERATION_DURATION_BUCKETS)),
+        ),
+        View(
+            instrument_name=METRIC_TIME_TO_FIRST_CHUNK,
             aggregation=ExplicitBucketHistogramAggregation(list(OPERATION_DURATION_BUCKETS)),
         ),
         View(
