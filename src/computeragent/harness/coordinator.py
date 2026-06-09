@@ -345,6 +345,9 @@ class HarnessCoordinator:
         """Iterate the engine, translate each event, push telemetry."""
         last_assistant_text = ""
         result_payload: Any = None
+        # Fired once per turn when the first streamed content chunk arrives →
+        # time-to-first-token. Only the OtelSink consumes it.
+        first_token_emitted = False
         try:
             async for ev in self._engine.start_session(ctx):
                 if ev.kind == "usage_snapshot":
@@ -391,6 +394,11 @@ class HarnessCoordinator:
                             if state.agent_description is not None:
                                 tev.agent_description = state.agent_description
                             await self._emit(tev)
+                            # An assistant_message marks the end of one LLM call;
+                            # re-arm so the NEXT call's first streamed token fires
+                            # its own response_first_token (per-call TTFT).
+                            if tev.kind == "assistant_message":
+                                first_token_emitted = False
                     elif upstream_events is None:
                         # from_message returned None → unrecognized type, not a
                         # claude-agent-sdk message (e.g. Anthropic raw response,
@@ -404,7 +412,20 @@ class HarnessCoordinator:
                         ):
                             await self._emit(tev)
                     # upstream_events == [] → recognised SDK type with nothing to
-                    # emit (StreamEvent, RateLimitEvent, …) — skip silently.
+                    # emit (StreamEvent, RateLimitEvent, …). Use the first
+                    # content-bearing StreamEvent of the turn as the
+                    # time-to-first-token signal (OtelSink-only).
+                    elif not first_token_emitted and _is_first_token_stream_event(ev.payload):
+                        first_token_emitted = True
+                        with suppress(Exception):
+                            ft_ev = TelemetryEvent(
+                                kind="response_first_token",
+                                session_id=state.session_id,
+                                agent_name=state.agent_name,
+                            )
+                            if state.agent_description is not None:
+                                ft_ev.agent_description = state.agent_description
+                            await self._emit(ft_ev)
                 elif ev.kind == "permission_request":
                     # Engines ask the harness; the harness routes to user
                     # callbacks / policy decider. The Future returned by
@@ -479,13 +500,19 @@ class HarnessCoordinator:
             ev.payload["agent_version"] = manifest.version
         if getattr(manifest, "sha", None):
             ev.payload["agent_sha"] = manifest.sha
-        # Signal harness-mode to the AgentOS server's ingest projection.
-        # The server writes ``source.type = "library"`` for harness-mode
-        # docs, which fails AgentOS's ``hasResolvableSource`` check so
-        # the UI hides the chat-sandbox button (there's no Python HTTP
-        # harness on :8787 to proxy to). Drop-in proxy callers don't set
-        # this flag → existing ``type: "inline"`` shape is preserved.
-        ev.payload["harness_mode"] = True
+        # Signal harness-mode to the AgentOS server's ingest projection, which
+        # then writes ``source.type = "library"`` (no server-runnable source →
+        # the UI hides live chat). We set it for sources the AgentOS harness
+        # can't reconstruct on its own (a git URL or a local path that only
+        # exists on this machine). We deliberately do NOT set it for an INLINE
+        # source: the server's ``inlineSourceFor`` rebuilds a runnable
+        # ``agent.yaml`` + ``CLAUDE.md`` from this event's payload
+        # (system_prompt / allowed_tools / max_turns / permission_mode / model),
+        # so an inline agent stays live-chattable in the AgentOS UI via the TS
+        # harness's inline loader. (Drop-in proxy callers never reach here.)
+        is_inline = isinstance(self._source, dict) and self._source.get("type") == "inline"
+        if not is_inline:
+            ev.payload["harness_mode"] = True
         await self._emit(ev)
 
     async def _emit(self, ev: TelemetryEvent) -> None:
@@ -614,6 +641,19 @@ def _maybe_assistant_text(payload: Any, current: str) -> str:
         if isinstance(text, str):
             parts.append(text)
     return "".join(parts) if parts else current
+
+
+def _is_first_token_stream_event(payload: Any) -> bool:
+    """True for a claude-agent-sdk ``StreamEvent`` carrying the first model
+    output of a turn — a ``content_block_start`` / ``content_block_delta`` raw
+    Anthropic stream event. Duck-typed (no hard import) so non-streaming engines
+    (gitagent) never trip it. ``message_start`` is excluded: it opens the stream
+    before any content, so it would understate time-to-first-token."""
+    if type(payload).__name__ != "StreamEvent":
+        return False
+    event = getattr(payload, "event", None)
+    etype = event.get("type") if isinstance(event, dict) else getattr(event, "type", None)
+    return etype in ("content_block_start", "content_block_delta")
 
 
 def _maybe_result_payload(payload: Any, current: Any) -> Any:

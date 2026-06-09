@@ -32,11 +32,35 @@ EventKind = Literal[
     "usage_snapshot",
     "session_ended",
     "policy_decision",
+    # OTel-trace-only signal: the first streamed token of a turn arrived. Drives
+    # the time-to-first-token span attribute in OtelSink; the AgentOS HTTP sink
+    # skips it (no audit value), so it never reaches Mongo ingest.
+    "response_first_token",
 ]
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _msg_usage(usage: Any) -> dict[str, int] | None:
+    """Normalise an Anthropic per-message ``usage`` dict to plain ints for
+    per-LLM-call token attribution. Returns ``None`` when usage is absent so the
+    sink can fall back to the cumulative total. Keys mirror the SDK's snake_case.
+    """
+    if not isinstance(usage, dict):
+        return None
+    out: dict[str, int] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ):
+        v = usage.get(key)
+        if isinstance(v, (int, float)):
+            out[key] = int(v)
+    return out or None
 
 
 @dataclass
@@ -290,6 +314,9 @@ class TelemetryEvent:
                         # on the chat span (OtelSink._map_finish_reason).
                         "stop_reason": getattr(msg, "stop_reason", None),
                         "has_tool_use": has_tool_use,
+                        # Per-call usage (Anthropic message.usage) → per-LLM-call token
+                        # attribution on the chat span. None when the SDK omits it.
+                        "usage": _msg_usage(getattr(msg, "usage", None)),
                     },
                     raw=msg,
                 )
