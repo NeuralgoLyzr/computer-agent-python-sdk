@@ -179,6 +179,42 @@ def fetch_policy_binding(
     }
 
 
+def bind_policy(
+    agent_id: str, policy_id: str | None, *, token: str | None = None, timeout: float = 10.0
+) -> dict[str, str] | None:
+    """Attach (or detach) an SRS policy to an agent — same write the AgentOS UI's
+    Policy tab performs (``PUT /agents/{id}/policy``).
+
+    ``agent_id`` is the registry id from the dashboard URL; ``policy_id`` is the
+    policy ``_id`` from the Policies page (``None`` detaches). Persistent: future
+    runs of the agent (UI and SDK alike) pick the binding up automatically.
+    Returns the resulting binding (``{"policyId": …}``) or ``None`` when detached.
+    Raises ``RuntimeError`` when AgentOS is unreachable/unconfigured — a silent
+    no-op here would masquerade as an attached policy.
+    """
+    base = api_url()
+    key = token or cak()
+    if not base or not key:
+        raise RuntimeError(
+            "bind_policy needs AgentOS — set AGENTOS_DISCOVERY_URL (or AGENTOS_API_URL) "
+            "and a cak_ key (COMPUTERAGENT_HARNESS_TOKEN)."
+        )
+    import httpx
+    from urllib.parse import quote
+
+    resp = httpx.put(
+        f"{base}/agents/{quote(agent_id, safe='')}/policy",
+        headers={"authorization": f"Bearer {key}", "content-type": "application/json"},
+        json={"policy_id": policy_id},
+        timeout=timeout,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"bind_policy: AgentOS returned {resp.status_code}: {resp.text[:200]}")
+    doc = resp.json()
+    binding = doc.get("binding") if isinstance(doc, dict) else None
+    return binding if isinstance(binding, dict) else None
+
+
 def _reset_cache_for_tests() -> None:
     """Clear the memoized discovery result (test-only)."""
     global _endpoints

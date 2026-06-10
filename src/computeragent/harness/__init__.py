@@ -199,6 +199,11 @@ class ComputerAgent:
         # API key for the remote server, sent as `Authorization: Bearer`.
         # Falls back to the COMPUTERAGENT_HARNESS_TOKEN env var when omitted.
         harness_token: str | None = None,
+        # SRS policy id (the `_id` shown in the AgentOS Policies UI). When set,
+        # it is used directly — no AgentOS binding lookup — so you can copy the
+        # id from the UI and paste it here. When omitted, the policy bound to
+        # `agent_name` in AgentOS (the UI's Policy tab) is fetched and used.
+        policy_id: str | None = None,
     ) -> None:
         from .. import agentos as _agentos
 
@@ -280,14 +285,22 @@ class ComputerAgent:
             remote_pipeline = telemetry_pipeline if telemetry_pipeline is not None else Pipeline(sinks=[])
             # SRS policy parity with the AgentOS UI: the UI's chat-sandbox route
             # looks up the agent's bound policy and attaches it; talking to the CAS
-            # directly skips that. So resolve the binding here (by agent name) from
-            # AgentOS and forward only {policyId, principalId} — the CAS fills the
-            # SRS endpoint/key from its own env. None → no bound policy → no change.
-            remote_policy = (
-                _agentos.fetch_policy_binding(agent_name, token=harness_token)
-                if agent_name
-                else None
-            )
+            # directly skips that. An explicit `policy_id=` kwarg wins (copy the id
+            # from the Policies UI); otherwise resolve the binding (by agent name)
+            # from AgentOS. Either way only {policyId, principalId} is forwarded —
+            # the CAS fills the SRS endpoint/key from its own env.
+            if policy_id:
+                remote_policy: dict[str, str] | None = {
+                    "kind": "srs",
+                    "policyId": policy_id,
+                    "principalId": agent_name or "agent",
+                }
+            else:
+                remote_policy = (
+                    _agentos.fetch_policy_binding(agent_name, token=harness_token)
+                    if agent_name
+                    else None
+                )
             self._coordinator: _CoordinatorLike = _build_remote_coordinator_from_kwargs(
                 harness_url=harness_url,
                 harness_kind=harness_kind,
