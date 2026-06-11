@@ -32,11 +32,35 @@ EventKind = Literal[
     "usage_snapshot",
     "session_ended",
     "policy_decision",
+    # OTel-trace-only signal: the first streamed token of a turn arrived. Drives
+    # the time-to-first-token span attribute in OtelSink; the AgentOS HTTP sink
+    # skips it (no audit value), so it never reaches Mongo ingest.
+    "response_first_token",
 ]
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _msg_usage(usage: Any) -> dict[str, int] | None:
+    """Normalise an Anthropic per-message ``usage`` dict to plain ints for
+    per-LLM-call token attribution. Returns ``None`` when usage is absent so the
+    sink can fall back to the cumulative total. Keys mirror the SDK's snake_case.
+    """
+    if not isinstance(usage, dict):
+        return None
+    out: dict[str, int] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ):
+        v = usage.get(key)
+        if isinstance(v, (int, float)):
+            out[key] = int(v)
+    return out or None
 
 
 @dataclass
@@ -196,29 +220,48 @@ class TelemetryEvent:
         error: BaseException | None,
         latency_ms: float,
         engine_name: str,
+        session_id: str = "",
+        call_id: str = "",
     ) -> TelemetryEvent:
         """Emitted by ``PolicyToolAuthorizer`` after each authorization check.
 
         ``input`` is a :class:`computeragent.policy.PolicyInput` and ``result``
         a :class:`PolicyResult` (or ``None`` if the engine raised). Sinks pick
         this up via the standard pipeline; ``OtelSink`` annotates the active
-        ``execute_tool`` span with the decision and reason.
+        ``execute_tool`` span with the decision and reason. ``session_id`` /
+        ``call_id`` are the correlation ids the authorizer read off the
+        upstream permission context — without them the event can't be matched
+        to the live span tree (resolver-supplied values are the fallback).
         """
         principal = getattr(input, "principal", None)
         action = getattr(input, "action", None)
         resource = getattr(input, "resource", None)
+        context = getattr(input, "context", {}) or {}
         decision_value = getattr(getattr(result, "decision", None), "value", None)
+        # Trace-facing mode/outcome (mirror the TS PolicyDecision) so the
+        # OtelSink can emit a first-class `policy` span. Fall back to deriving
+        # the outcome from the decision when the engine didn't set one.
+        mode = getattr(result, "mode", None) if result is not None else None
+        outcome = getattr(result, "outcome", None) if result is not None else None
+        if outcome is None:
+            outcome = "error" if error else (decision_value if decision_value in ("allow",) else None)
+            outcome = "blocked" if decision_value == "deny" else ("allowed" if decision_value == "allow" else outcome)
         payload: dict[str, Any] = {
             "engine": engine_name,
             "decision": decision_value or ("error" if error else "unknown"),
             "reason": getattr(result, "reason", "") if result is not None else "",
             "latency_ms": latency_ms,
+            "mode": mode,
+            "outcome": outcome,
+            "policy_id": getattr(result, "policy_id", None) if result is not None else None,
             "principal_id": getattr(principal, "id", ""),
             "principal_groups": list(getattr(principal, "groups", []) or []),
             "tool_name": getattr(action, "tool_name", ""),
+            "call_id": call_id or str(context.get("call_id", "") or ""),
             "agent_name": getattr(resource, "agent_name", ""),
-            "session_id": getattr(resource, "session_id", "")
-            or getattr(input, "context", {}).get("session_id", ""),
+            "session_id": session_id
+            or getattr(resource, "session_id", "")
+            or str(context.get("session_id", "") or ""),
         }
         if error is not None:
             payload["error_type"] = type(error).__name__
@@ -290,6 +333,9 @@ class TelemetryEvent:
                         # on the chat span (OtelSink._map_finish_reason).
                         "stop_reason": getattr(msg, "stop_reason", None),
                         "has_tool_use": has_tool_use,
+                        # Per-call usage (Anthropic message.usage) → per-LLM-call token
+                        # attribution on the chat span. None when the SDK omits it.
+                        "usage": _msg_usage(getattr(msg, "usage", None)),
                     },
                     raw=msg,
                 )
@@ -361,6 +407,10 @@ class TelemetryEvent:
                     raw=msg,
                 )
             )
+        # Translation produced events → the message was recognised (covers
+        # spec'd test doubles whose type module isn't claude_agent_sdk).
+        if events:
+            return events
         # Any remaining claude_agent_sdk type (StreamEvent, HookEventMessage,
         # RateLimitEvent, TaskStartedMessage, …) — return [] so the coordinator
         # skips synthesis. Non-SDK payloads (gitagent dicts, OpenAI messages)

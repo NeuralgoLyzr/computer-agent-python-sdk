@@ -93,12 +93,22 @@ class PolicyResult:
 
     Obligations are advisory in v0.2 (not enforced); kept on the result so
     sinks / audit logs can surface them.
+
+    ``mode``/``outcome`` mirror the TS ``PolicyDecision`` so the OtelSink can
+    emit the same first-class ``policy`` span. ``mode`` is the guardrail's
+    enforcement mode (``enforce``/``audit``); ``outcome`` is the trace-facing
+    label (``allowed``/``blocked``/``audit_violation``/``audit_clean``/``error``).
+    Both optional — engines that don't distinguish modes leave them ``None`` and
+    the sink falls back to deriving the outcome from ``decision``.
     """
 
     decision: PolicyDecision
     reason: str = ""
     obligations: list[dict[str, Any]] = field(default_factory=list)
     engine: str = ""  # populated by the concrete engine ("opa" | "cedar")
+    mode: str | None = None  # "enforce" | "audit"
+    outcome: str | None = None  # allowed | blocked | audit_violation | audit_clean | error
+    policy_id: str | None = None
 
 
 class PolicyEngine(Protocol):

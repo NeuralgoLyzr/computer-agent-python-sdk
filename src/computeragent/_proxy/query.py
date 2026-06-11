@@ -91,7 +91,7 @@ async def query(  # noqa: PLR0912 - mirror upstream's tolerant param surface
 
             for ev in TelemetryEvent.from_message(
                 msg, session_id=session_id, agent_name=agent_name
-            ):
+            ) or []:  # None → non-SDK payload; the proxy only wraps claude_agent_sdk
                 # Carry the description forward on every event so sinks that
                 # group by description (or want to surface it on per-message
                 # telemetry) don't have to back-reference session_started.

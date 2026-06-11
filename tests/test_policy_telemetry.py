@@ -85,3 +85,49 @@ async def test_deny_emits_policy_decision_event(stub_sink):
     payload = events[-1].payload
     assert payload["decision"] == "deny"
     assert "not allowed" in payload["reason"]
+
+
+@pytest.mark.asyncio
+async def test_dict_context_carries_session_and_call_id(stub_sink):
+    """The harness coordinator passes a plain dict context — session_id and
+    call_id must still reach the event so the OTel sink can find the live
+    execute_tool span (previously they were lost → session 'unknown')."""
+    import asyncio
+
+    configure(sinks=[stub_sink])
+    auth = PolicyToolAuthorizer(
+        engine=_StubEngine(PolicyDecision.DENY, reason="nope"),
+        principal_resolver=lambda c: PolicyPrincipal(id="svc"),
+    )
+    await auth("Bash", {}, {"session_id": "ca_123", "call_id": "tu_7"})
+    await asyncio.sleep(0)
+
+    events = [e for e in stub_sink.events if e.kind == "policy_decision"]
+    assert events
+    ev = events[-1]
+    assert ev.session_id == "ca_123"
+    assert ev.payload["session_id"] == "ca_123"
+    assert ev.payload["call_id"] == "tu_7"
+
+
+@pytest.mark.asyncio
+async def test_tool_permission_context_tool_use_id_becomes_call_id(stub_sink):
+    """claude-agent-sdk's ToolPermissionContext carries tool_use_id (and the
+    engine stamps session_id onto it) — both must ride the event."""
+    import asyncio
+
+    configure(sinks=[stub_sink])
+    auth = PolicyToolAuthorizer(
+        engine=_StubEngine(PolicyDecision.DENY, reason="blocked"),
+        principal_resolver=lambda c: PolicyPrincipal(id="svc"),
+    )
+    ctx = _ctx("sess_live")
+    ctx.tool_use_id = "toolu_abc"
+    await auth("Write", {"path": "/etc/passwd"}, ctx)
+    await asyncio.sleep(0)
+
+    events = [e for e in stub_sink.events if e.kind == "policy_decision"]
+    assert events
+    ev = events[-1]
+    assert ev.session_id == "sess_live"
+    assert ev.payload["call_id"] == "toolu_abc"
