@@ -552,7 +552,42 @@ class HarnessCoordinator:
                         }
             if self._on_permission_request_user is not None:
                 with suppress(Exception):
-                    return await self._on_permission_request_user(req)
+                    started_at = time.monotonic()
+                    decision = await self._on_permission_request_user(req)
+                    # Mirror PolicyToolAuthorizer: every gate decision emits a
+                    # policy_decision event so the OTel sink can stamp the
+                    # decision + reason onto the live execute_tool span.
+                    # (The policy_decider path above emits its own.)
+                    with suppress(Exception):
+                        await self._emit(
+                            TelemetryEvent(
+                                kind="policy_decision",
+                                session_id=state.session_id,
+                                agent_name=state.agent_name,
+                                payload={
+                                    "engine": "on_tool_call",
+                                    "decision": (
+                                        "deny"
+                                        if isinstance(decision, dict)
+                                        and decision.get("behavior") == "deny"
+                                        else "allow"
+                                    ),
+                                    "reason": (
+                                        str(decision.get("message") or "")
+                                        if isinstance(decision, dict)
+                                        else ""
+                                    ),
+                                    "latency_ms": (time.monotonic() - started_at) * 1000.0,
+                                    "principal_id": "",
+                                    "principal_groups": [],
+                                    "tool_name": req.tool_name,
+                                    "call_id": req.call_id,
+                                    "agent_name": state.agent_name or "",
+                                    "session_id": state.session_id,
+                                },
+                            )
+                        )
+                    return decision
             # Default — allow with original input.
             return {"behavior": "allow", "updated_input": dict(req.input or {})}
 

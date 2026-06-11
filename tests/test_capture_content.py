@@ -299,3 +299,87 @@ async def test_garbage_mode_falls_back_to_events(monkeypatch):
 
     # events is the fallback default → one inference-details log record.
     assert len(_details_logs(log_exp)) == 1
+
+
+# ── per-LLM-call content on chat spans ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_per_call_chat_spans_carry_own_content(monkeypatch):
+    """Each per-call chat span carries its OWN gen_ai.input/output.messages:
+    input = the transcript the model saw for that call (user prompt, prior
+    assistant messages, tool responses); output = that call's assistant text.
+    Previously content landed only on the invoke_agent root, leaving every
+    chat span content-less in the trace view."""
+    monkeypatch.setenv("COMPUTERAGENT_CAPTURE_CONTENT", "1")
+    monkeypatch.setenv("COMPUTERAGENT_CAPTURE_CONTENT_MODE", "attributes")
+    sink, exp, _log_exp = _build_inmemory()
+
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    await sink.emit(_ev("turn_started", {"prompt": "Write a haiku to haiku.txt", "model": "m"}))
+    # Call 1 — decides to use the Write tool. (Real ordering: from_message
+    # yields the tool_use event before the assistant_message of the same call.)
+    await sink.emit(
+        _ev("tool_use", {"tool_use_id": "tu_1", "tool_name": "Write", "tool_input": {"path": "haiku.txt"}})
+    )
+    await sink.emit(
+        _ev(
+            "assistant_message",
+            {"model": "m", "text": "On it.", "stop_reason": "tool_use", "has_tool_use": True},
+        )
+    )
+    await sink.emit(_ev("tool_result", {"tool_use_id": "tu_1", "is_error": False, "content": "ok"}))
+    # Call 2 — summarises.
+    await sink.emit(
+        _ev("assistant_message", {"model": "m", "text": "Wrote the haiku.", "stop_reason": "end_turn"})
+    )
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
+
+    chats = sorted(
+        (s for s in exp.get_finished_spans() if s.name.startswith("chat ")),
+        key=lambda s: s.start_time,
+    )
+    assert len(chats) == 2
+
+    # Call 1: input = the user prompt; output = its own text, finish tool_call.
+    a1 = dict(chats[0].attributes or {})
+    assert json.loads(a1["gen_ai.input.messages"]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "Write a haiku to haiku.txt"}]}
+    ]
+    assert json.loads(a1["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": "On it."}],
+            "finish_reason": "tool_call",
+        }
+    ]
+
+    # Call 2: input = user + call 1's message + the tool response the model
+    # re-read; output = the final text.
+    a2 = dict(chats[1].attributes or {})
+    in2 = json.loads(a2["gen_ai.input.messages"])
+    assert [m["role"] for m in in2] == ["user", "assistant", "tool"]
+    assert in2[2]["parts"] == [{"type": "tool_call_response", "response": "ok", "id": "tu_1"}]
+    assert json.loads(a2["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": "Wrote the haiku."}],
+            "finish_reason": "stop",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_per_call_content_absent_when_capture_off():
+    sink, exp, _log_exp = _build_inmemory()
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    await sink.emit(_ev("turn_started", {"prompt": "hi", "model": "m"}))
+    await sink.emit(_ev("assistant_message", {"model": "m", "text": "hello"}))
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 5.0}))
+
+    chats = [s for s in exp.get_finished_spans() if s.name.startswith("chat ")]
+    assert chats
+    for chat in chats:
+        attrs = dict(chat.attributes or {})
+        assert "gen_ai.input.messages" not in attrs
+        assert "gen_ai.output.messages" not in attrs

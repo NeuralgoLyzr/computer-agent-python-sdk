@@ -135,6 +135,11 @@ class _SessionContent:
     input: list[dict[str, Any]] = field(default_factory=list)
     output: list[dict[str, Any]] = field(default_factory=list)
     system: list[dict[str, Any]] = field(default_factory=list)
+    # Chronological per-turn transcript: user messages, completed assistant
+    # messages (input-shaped, no finish_reason), and tool responses, in
+    # arrival order. A snapshot taken just before LLM call N completes IS that
+    # call's input — what the model saw. Cleared with input/output on reset.
+    transcript: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ContentAccumulator:
@@ -163,7 +168,10 @@ class ContentAccumulator:
     def record_user_text(self, session_id: str, text: str) -> None:
         if not text:
             return
-        self._get(session_id).input.append({"role": "user", "parts": [_text_part(text)]})
+        sc = self._get(session_id)
+        msg = {"role": "user", "parts": [_text_part(text)]}
+        sc.input.append(msg)
+        sc.transcript.append(msg)
 
     def record_user_blocks(self, session_id: str, blocks: list[dict[str, Any]]) -> None:
         # tool_result blocks are model plumbing, not a user prompt.
@@ -173,7 +181,10 @@ class ContentAccumulator:
         parts = blocks_to_parts(non_result)
         if not parts:
             return
-        self._get(session_id).input.append({"role": "user", "parts": parts})
+        sc = self._get(session_id)
+        msg = {"role": "user", "parts": parts}
+        sc.input.append(msg)
+        sc.transcript.append(msg)
 
     # output ------------------------------------------------------------------
 
@@ -187,13 +198,18 @@ class ContentAccumulator:
     ) -> None:
         if not text:
             return
-        self._get(session_id).output.append(
+        sc = self._get(session_id)
+        parts = [_text_part(text)]
+        sc.output.append(
             {
                 "role": "assistant",
-                "parts": [_text_part(text)],
+                "parts": parts,
                 "finish_reason": map_finish_reason(stop_reason, has_tool_use),
             }
         )
+        # Once a call completes, its message becomes part of the NEXT call's
+        # input — record it (input-shaped, no finish_reason) on the transcript.
+        sc.transcript.append({"role": "assistant", "parts": parts})
 
     def record_assistant_blocks(
         self,
@@ -206,13 +222,15 @@ class ContentAccumulator:
         if not parts:
             return
         has_tool_use = any(p["type"] == "tool_call" for p in parts)
-        self._get(session_id).output.append(
+        sc = self._get(session_id)
+        sc.output.append(
             {
                 "role": "assistant",
                 "parts": parts,
                 "finish_reason": map_finish_reason(stop_reason, has_tool_use),
             }
         )
+        sc.transcript.append({"role": "assistant", "parts": parts})
 
     # system ------------------------------------------------------------------
 
@@ -228,6 +246,19 @@ class ContentAccumulator:
 
     def record_tool_result(self, call_id: str, result: Any) -> None:
         self._tool_results[call_id] = result
+
+    def record_transcript_tool_response(
+        self, session_id: str, call_id: str | None, response: Any
+    ) -> None:
+        """Record a tool response on the per-turn TRANSCRIPT (role "tool").
+
+        The call_id-keyed stash above feeds the execute_tool span; this entry
+        is what makes the response show up in the NEXT LLM call's
+        ``gen_ai.input.messages`` — the model literally re-reads it.
+        """
+        self._get(session_id).transcript.append(
+            {"role": "tool", "parts": [_tool_call_response_part(response, call_id)]}
+        )
 
     def take_tool_args(self, call_id: str) -> Any:
         return self._tool_args.pop(call_id, None)
@@ -249,6 +280,11 @@ class ContentAccumulator:
         sc = self._per_session.get(session_id)
         return list(sc.system) if sc else []
 
+    def transcript_for(self, session_id: str) -> list[dict[str, Any]]:
+        """Chronological per-turn transcript snapshot (copy, non-destructive)."""
+        sc = self._per_session.get(session_id)
+        return list(sc.transcript) if sc else []
+
     # lifecycle ---------------------------------------------------------------
 
     def reset(self, session_id: str) -> None:
@@ -262,6 +298,7 @@ class ContentAccumulator:
         if sc is not None:
             sc.input = []
             sc.output = []
+            sc.transcript = []
 
     def clear_session(self, session_id: str) -> None:
         """Full purge incl. system + any unconsumed tool args/results. Call on

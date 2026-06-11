@@ -423,3 +423,131 @@ def test_no_gateway_leaves_direct_endpoint_unauthed(monkeypatch):
     sink = OtelSink(tracer_provider=TracerProvider(), meter_provider=MeterProvider())
     assert sink._endpoint == "https://otlp.nr-data.net"
     assert "Authorization" not in sink._headers
+
+
+# ── policy_decision → dedicated `policy <tool>` span (block/allow/audit) ─────
+
+
+def _policy_span(exp, name):
+    matches = [s for s in exp.get_finished_spans() if s.name == name]
+    assert len(matches) == 1, f"expected exactly one {name} span; got {len(matches)}"
+    return matches[0]
+
+
+@pytest.mark.asyncio
+async def test_policy_block_emits_dedicated_span_and_blocks_tool():
+    """A block emits a dedicated `policy <tool>` span (ERROR, outcome=blocked,
+    full detail) AND closes the execute_tool span with error.type=policy_denied
+    + a lightweight policy.outcome marker."""
+    from opentelemetry.trace import StatusCode
+
+    sink, exp, _ = _build_inmemory_otel()
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    await sink.emit(
+        _ev("tool_use", {"tool_use_id": "tu_1", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}})
+    )
+    await sink.emit(
+        _ev(
+            "policy_decision",
+            {
+                "engine": "srs",
+                "decision": "deny",
+                "outcome": "blocked",
+                "mode": "enforce",
+                "policy_id": "6a292352",
+                "reason": "Bash is blocked by RAI policy p-42",
+                "latency_ms": 3.5,
+                "tool_name": "Bash",
+                "call_id": "tu_1",
+            },
+        )
+    )
+    await sink.emit(_ev("tool_result", {"tool_use_id": "tu_1", "is_error": True, "content": "denied"}))
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
+
+    # Dedicated policy span carries the full decision.
+    p = dict(_policy_span(exp, "policy Bash").attributes or {})
+    assert p["computeragent.operation"] == "policy_decision"
+    assert p["policy.outcome"] == "blocked"
+    assert p["policy.mode"] == "enforce"
+    assert p["policy.engine"] == "srs"
+    assert p["policy.policy_id"] == "6a292352"
+    assert p["policy.reason"] == "Bash is blocked by RAI policy p-42"
+    pol = _policy_span(exp, "policy Bash")
+    assert pol.status.status_code == StatusCode.ERROR
+
+    # Tool span shows enforcement effect + marker.
+    [tool] = [s for s in exp.get_finished_spans() if s.name == "execute_tool Bash"]
+    tattrs = dict(tool.attributes or {})
+    assert tattrs["error.type"] == "policy_denied"
+    assert tattrs["policy.outcome"] == "blocked"
+    assert tool.status.status_code == StatusCode.ERROR
+    assert tool.status.description == "Bash is blocked by RAI policy p-42"
+
+
+@pytest.mark.asyncio
+async def test_policy_audit_violation_span_ok_tool_runs():
+    """An audit-mode violation emits a `policy` span flagged audit_violation
+    (OK-status, the tool RAN) — unmistakable but not a tool error."""
+    from opentelemetry.trace import StatusCode
+
+    sink, exp, _ = _build_inmemory_otel()
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    await sink.emit(_ev("tool_use", {"tool_use_id": "tu_2", "tool_name": "Write", "tool_input": {}}))
+    await sink.emit(
+        _ev(
+            "policy_decision",
+            {
+                "engine": "srs",
+                "decision": "allow",  # audit never blocks → tool runs
+                "outcome": "audit_violation",
+                "mode": "audit",
+                "reason": "Write would be blocked (audit)",
+                "tool_name": "Write",
+                "call_id": "tu_2",
+            },
+        )
+    )
+    await sink.emit(_ev("tool_result", {"tool_use_id": "tu_2", "is_error": False, "content": "ok"}))
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 5.0}))
+
+    pol = _policy_span(exp, "policy Write")
+    pattrs = dict(pol.attributes or {})
+    assert pattrs["policy.outcome"] == "audit_violation"
+    assert pattrs["policy.mode"] == "audit"
+    assert pol.status.status_code == StatusCode.OK  # NOT an error — the tool ran
+    assert any(e.name == "policy.audit_violation" for e in pol.events)
+
+    [tool] = [s for s in exp.get_finished_spans() if s.name == "execute_tool Write"]
+    tattrs = dict(tool.attributes or {})
+    assert "error.type" not in tattrs
+    assert tattrs["policy.outcome"] == "audit_violation"
+    assert tool.status.status_code == StatusCode.OK
+
+
+@pytest.mark.asyncio
+async def test_policy_block_before_tool_use_still_blocks():
+    """Ordering race: the decision arrives before the tool_use. The policy span
+    is emitted and the stashed block closes the tool span as policy_denied."""
+    from opentelemetry.trace import StatusCode
+
+    sink, exp, _ = _build_inmemory_otel()
+    await sink.emit(_ev("session_started", {"model": "m"}))
+    await sink.emit(
+        _ev(
+            "policy_decision",
+            {"engine": "opa", "decision": "deny", "outcome": "blocked", "mode": "enforce",
+             "reason": "writes are not allowed", "tool_name": "Write", "call_id": "tu_9"},
+        )
+    )
+    await sink.emit(_ev("tool_use", {"tool_use_id": "tu_9", "tool_name": "Write", "tool_input": {}}))
+    await sink.emit(_ev("tool_result", {"tool_use_id": "tu_9", "is_error": False, "content": "denied by policy"}))
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 5.0}))
+
+    pol = _policy_span(exp, "policy Write")
+    assert dict(pol.attributes or {})["policy.outcome"] == "blocked"
+    assert pol.status.status_code == StatusCode.ERROR
+    [tool] = [s for s in exp.get_finished_spans() if s.name == "execute_tool Write"]
+    tattrs = dict(tool.attributes or {})
+    assert tattrs["error.type"] == "policy_denied"
+    assert tool.status.status_code == StatusCode.ERROR

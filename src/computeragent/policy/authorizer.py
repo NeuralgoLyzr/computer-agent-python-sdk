@@ -70,6 +70,14 @@ class PolicyToolAuthorizer:
         context: ToolPermissionContext,
     ) -> PermissionResultAllow | PermissionResultDeny:
         started_at = time.monotonic()
+        # Correlation ids for the telemetry event. The upstream context is
+        # either a ToolPermissionContext (claude-agent-sdk — carries
+        # ``tool_use_id``; ``session_id`` is stamped on by the harness engine)
+        # or the coordinator's plain dict (``{"session_id", "call_id"}``).
+        # Without these the policy_decision event lands on session "unknown"
+        # and the OTel sink can't annotate the live execute_tool span.
+        session_id = str(_ctx_value(context, "session_id") or "")
+        call_id = str(_ctx_value(context, "tool_use_id", "call_id") or "")
         input_obj = await self._build_input(tool_name, tool_input, context)
         try:
             result = await self._engine.evaluate(input_obj)
@@ -85,10 +93,14 @@ class PolicyToolAuthorizer:
                 message=f"policy engine error: {exc}",
                 interrupt=self._on_deny == "interrupt",
             )
-            await self._emit_telemetry(input_obj, None, exc, started_at)
+            await self._emit_telemetry(
+                input_obj, None, exc, started_at, session_id=session_id, call_id=call_id
+            )
             return permission
 
-        await self._emit_telemetry(input_obj, result, None, started_at)
+        await self._emit_telemetry(
+            input_obj, result, None, started_at, session_id=session_id, call_id=call_id
+        )
 
         if result.decision == PolicyDecision.ALLOW:
             return PermissionResultAllow(updated_input=tool_input)
@@ -114,13 +126,13 @@ class PolicyToolAuthorizer:
         else:
             resource = PolicyResource(
                 type="agent",
-                session_id=getattr(context, "session_id", "") or "",
+                session_id=str(_ctx_value(context, "session_id") or ""),
             )
         ctx: dict[str, Any]
         if self._context_resolver is not None:
             ctx = await _maybe_await(self._context_resolver(context))
         else:
-            ctx = {"session_id": getattr(context, "session_id", "") or ""}
+            ctx = {"session_id": str(_ctx_value(context, "session_id") or "")}
 
         return PolicyInput(
             principal=principal,
@@ -139,6 +151,9 @@ class PolicyToolAuthorizer:
         result: Any,
         error: BaseException | None,
         started_at: float,
+        *,
+        session_id: str = "",
+        call_id: str = "",
     ) -> None:
         latency_ms = (time.monotonic() - started_at) * 1000.0
         try:
@@ -148,6 +163,8 @@ class PolicyToolAuthorizer:
                 error=error,
                 latency_ms=latency_ms,
                 engine_name=getattr(self._engine, "name", type(self._engine).__name__),
+                session_id=session_id,
+                call_id=call_id,
             )
             await get_pipeline().emit(event)
         except Exception:  # noqa: BLE001
@@ -159,3 +176,16 @@ async def _maybe_await(value: Any) -> Any:
     if hasattr(value, "__await__"):
         return await value
     return value
+
+
+def _ctx_value(context: Any, *names: str) -> Any:
+    """Read a correlation field off whatever shape the upstream context has —
+    attribute access for ToolPermissionContext-style objects, key access for
+    the coordinator's plain-dict context. First non-empty wins."""
+    for name in names:
+        value = getattr(context, name, None)
+        if value is None and isinstance(context, dict):
+            value = context.get(name)
+        if value:
+            return value
+    return None
