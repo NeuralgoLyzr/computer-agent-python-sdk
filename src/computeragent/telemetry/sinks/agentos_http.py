@@ -99,6 +99,11 @@ class AgentOSHttpSink:
     # ── lifecycle ----------------------------------------------------------
 
     async def emit(self, event: TelemetryEvent) -> None:
+        # response_first_token is an OTel-trace-only signal (it drives the TTFT
+        # span attribute in OtelSink). It carries no audit value, so it must NOT
+        # be projected into Mongo via the ingest endpoint.
+        if event.kind == "response_first_token":
+            return
         dto = self._serialize(event)
         # Append synchronously (no await before this) so the buffer preserves
         # the order in which the pipeline scheduled the emit tasks.

@@ -143,7 +143,7 @@ class ClaudeSDKClient:
                 self._upstream_session_id = real_sid
             for ev in TelemetryEvent.from_message(
                 msg, session_id=self._session_id, agent_name=self._agent_name
-            ):
+            ) or []:  # None → non-SDK payload; the proxy only wraps claude_agent_sdk
                 if self._agent_description is not None:
                     ev.agent_description = self._agent_description
                 await pipeline.emit(ev)
@@ -168,7 +168,7 @@ class ClaudeSDKClient:
                 self._upstream_session_id = real_sid
             for ev in TelemetryEvent.from_message(
                 msg, session_id=self._session_id, agent_name=self._agent_name
-            ):
+            ) or []:  # None → non-SDK payload; the proxy only wraps claude_agent_sdk
                 if self._agent_description is not None:
                     ev.agent_description = self._agent_description
                 await pipeline.emit(ev)

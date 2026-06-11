@@ -35,6 +35,10 @@ htmlcov/
 .idea/
 *.swp
 *.swo
+*.code-workspace
+
+# Local / scratch (not part of the package)
+/scripts/
 
 # OS
 .DS_Store
