@@ -100,9 +100,12 @@ def _build_options(ctx: EngineContext) -> Any:
     # Always stream partials so the harness sees mid-turn assistant text.
     payload.setdefault("include_partial_messages", True)
     # Wire policy decider into the can_use_tool slot. ``PolicyToolAuthorizer``
-    # already matches the CanUseTool signature, so no glue.
+    # already matches the CanUseTool signature; the wrapper only stamps the
+    # harness session id onto the SDK's ToolPermissionContext (which doesn't
+    # carry one) so the resulting policy_decision telemetry correlates with
+    # this session's open OTel spans instead of landing on "unknown".
     if ctx.policy_decider is not None:
-        payload["can_use_tool"] = ctx.policy_decider
+        payload["can_use_tool"] = _bind_session_id(ctx.policy_decider, ctx.session_id)
 
     options = ClaudeAgentOptions(**payload)
     # Surface harness-supplied agent identity to the proxy's
@@ -114,6 +117,20 @@ def _build_options(ctx: EngineContext) -> Any:
         if ctx.manifest.name:
             options.agent_name = ctx.manifest.name  # type: ignore[attr-defined]
     return options
+
+
+def _bind_session_id(decider: Any, session_id: str) -> Any:
+    """Wrap a ``can_use_tool`` decider so the permission context carries the
+    harness session id. ``ToolPermissionContext`` is a plain dataclass, so the
+    extra attribute attaches cleanly; if upstream ever forbids it the stamp is
+    skipped and the decider still runs."""
+
+    async def _can_use_tool(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+        with suppress(Exception):
+            context.session_id = session_id
+        return await decider(tool_name, tool_input, context)
+
+    return _can_use_tool
 
 
 def _is_result_message(msg: Any) -> bool:

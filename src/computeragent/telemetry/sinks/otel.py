@@ -151,6 +151,7 @@ METRIC_TOKEN_USAGE = "gen_ai.client.token.usage"
 METRIC_OPERATION_DURATION = "gen_ai.client.operation.duration"
 METRIC_TIME_TO_FIRST_CHUNK = "gen_ai.client.operation.time_to_first_chunk"
 METRIC_COST_USD = "computeragent.usage.cost_usd"
+METRIC_POLICY_DECISIONS = "computeragent.policy.decisions"
 
 # Tracer + meter + logger instrumentation scope. Matches the TS
 # INSTRUMENTATION_SCOPE_NAME so spans/metrics/logs filter identically by scope.
@@ -286,9 +287,12 @@ class _SpanMap:
         self._get(sid).tools[call_id] = _ToolRec(span, tool_name, time.monotonic())
 
     def get_tool(self, sid: str, call_id: str) -> Any | None:
-        e = self._per.get(sid)
-        rec = e.tools.get(call_id) if e else None
+        rec = self.get_tool_rec(sid, call_id)
         return rec.span if rec else None
+
+    def get_tool_rec(self, sid: str, call_id: str) -> _ToolRec | None:
+        e = self._per.get(sid)
+        return e.tools.get(call_id) if e else None
 
     def open_tool_recs(self, sid: str) -> list[_ToolRec]:
         e = self._per.get(sid)
@@ -656,6 +660,11 @@ class OtelSink:
             unit="s",
             description="Streaming time-to-first-token, measured per agent turn.",
         )
+        self._policy_counter = self._meter.create_counter(
+            METRIC_POLICY_DECISIONS,
+            unit="{decision}",
+            description="Policy/guardrail decisions by engine, mode, and outcome.",
+        )
         # Per-session identity, retained across turns (NOT cleared on
         # session_ended) and FIFO-bounded via _remember.
         self._session_meta: dict[str, _SessionMeta] = {}
@@ -667,6 +676,15 @@ class OtelSink:
         # call from these. `usage_seen` records whether any per-call usage was
         # captured this turn (drives the cumulative-on-root fallback).
         self._call_timing: dict[str, dict[str, Any]] = {}
+        # Pending policy DENIALS: (sid, call_id-or-tool_name) → {"reason",
+        # "attrs"}. A deny means the tool never runs — the upstream synthesizes
+        # an error tool_result whose content is the only place the reason
+        # appears. Stashing the decision here lets the execute_tool span close
+        # with error.type="policy_denied" and the human reason as the span
+        # status description + policy.* attributes, regardless of event
+        # ordering. Consumed by tool_result; purged on session_ended; FIFO-
+        # bounded via _remember.
+        self._policy_denials: dict[tuple[str, str], dict[str, Any]] = {}
 
     # ── lifecycle ----------------------------------------------------------
 
@@ -859,11 +877,19 @@ class OtelSink:
             if isinstance(v, (int, float)):
                 attrs[key] = int(v)
 
-    def _emit_call_chat_span(self, sid: str, payload: dict[str, Any]) -> None:
+    def _emit_call_chat_span(
+        self, sid: str, payload: dict[str, Any], call_input: list[dict[str, Any]] | None = None
+    ) -> None:
         """Emit ONE chat span per LLM call, created retroactively spanning
         [call start, now]. Carries per-call tokens, finish_reason, model, and
         per-call TTFT. Tools are siblings (children of invoke_agent), so the chat
-        span is opened and ended here in one shot rather than kept open."""
+        span is opened and ended here in one shot rather than kept open.
+
+        Content (capture on, attributes mode): ``gen_ai.input.messages`` is the
+        caller's pre-message transcript snapshot — what the model saw for THIS
+        call — and ``gen_ai.output.messages`` is this call's own assistant text.
+        Per the GenAI semconv these belong on the inference span; the turn-level
+        aggregate on the invoke_agent root stays for whole-turn reads."""
         end_ns = time.time_ns()
         call = self._call_timing.get(sid)
         start_ns = int(call["start_ns"]) if call and "start_ns" in call else end_ns
@@ -909,6 +935,31 @@ class OtelSink:
             context=ctx,
             start_time=start_ns,
         )
+        # Per-call content — must land BEFORE end() (attributes set after end
+        # are dropped). Output is THIS call's assistant text (the payload is
+        # already middleware-redacted); input is the pre-message transcript
+        # snapshot. Span-attribute only — the turn-level inference-details log
+        # event already covers events mode.
+        if self._capture_content:
+            text = payload.get("text")
+            call_output: list[dict[str, Any]] | None = None
+            if isinstance(text, str) and text:
+                call_output = [
+                    {
+                        "role": "assistant",
+                        "parts": [{"type": "text", "content": text}],
+                        "finish_reason": finish_reason,
+                    }
+                ]
+            write_inference_content(
+                input_msgs=call_input,
+                output_msgs=call_output,
+                system_parts=None,
+                capture_content=self._capture_content,
+                capture_mode=self._capture_mode,
+                max_attr_length=self._max_attr_length,
+                span=span,
+            )
         span.set_status(Status(StatusCode.OK))
         span.end(end_time=end_ns)
         # Arm the next call: provisionally starts now; each tool_result pushes it.
@@ -972,9 +1023,13 @@ class OtelSink:
     def _on_assistant_message(self, event: TelemetryEvent) -> None:
         sid = event.session_id
         self._ensure_invoke_agent(sid)
+        # Snapshot the transcript BEFORE this message is recorded — the
+        # snapshot IS this call's input (what the model saw); the message
+        # itself is its output. Both land on the per-call chat span.
+        call_input = self._content.transcript_for(sid) if self._capture_content else None
         # One chat span PER LLM call. Each AssistantMessage = one model
         # round-trip, with its own usage / finish_reason / TTFT.
-        self._emit_call_chat_span(sid, event.payload)
+        self._emit_call_chat_span(sid, event.payload, call_input=call_input)
         text = event.payload.get("text")
         if self._capture_content and isinstance(text, str) and text:
             self._content.record_assistant_text(
@@ -1010,6 +1065,18 @@ class OtelSink:
             context=ctx,
         )
         self._spans.open_tool(sid, call_id, tool_name, span)
+        # If the policy gate already denied this call (the can_use_tool
+        # round-trip can beat the assistant_message translation), stamp the
+        # stashed decision attributes now; the stash itself stays put so the
+        # closing tool_result still sets the error status + reason.
+        denial = self._policy_denials.get((sid, call_id)) or self._policy_denials.get(
+            (sid, tool_name)
+        )
+        if denial is not None:
+            try:
+                span.set_attributes(denial["attrs"])
+            except Exception:  # noqa: BLE001
+                logger.debug("policy denial attrs on tool open failed", exc_info=True)
         # Tool arguments — JSON-encoded so multi-key inputs survive the
         # attribute-string projection.
         tool_input = event.payload.get("tool_input")
@@ -1039,14 +1106,31 @@ class OtelSink:
             self._write_tool_content(span, GEN_AI_TOOL_CALL_RESULT, serialised)
             if self._capture_content:
                 self._content.record_tool_result(call_id, content)
-        self._spans.end_tool(
-            sid,
-            call_id,
-            _EndOptions(
+        # The response also lands on the per-turn transcript so the NEXT LLM
+        # call's chat span shows it in gen_ai.input.messages (the model
+        # re-reads it on the following call).
+        if self._capture_content and content:
+            self._content.record_transcript_tool_response(sid, call_id or None, content)
+        # Policy-denied call: the tool never ran. Close the span with the
+        # specific error type and the human-readable block reason as the span
+        # STATUS DESCRIPTION (+ policy.* attributes) — not the generic
+        # tool_execution_error — so the trace shows WHY it was blocked.
+        # Forces error status even when the engine didn't flag is_error
+        # (gitagent's deny results don't).
+        denial = self._pop_policy_denial(sid, call_id)
+        if denial is not None:
+            end_opts = _EndOptions(
+                status="error",
+                error_type="policy_denied",
+                error_message=str(denial.get("reason") or "denied by policy"),
+                attributes=denial.get("attrs"),
+            )
+        else:
+            end_opts = _EndOptions(
                 status="error" if is_error else "ok",
                 error_type="tool_execution_error" if is_error else None,
-            ),
-        )
+            )
+        self._spans.end_tool(sid, call_id, end_opts)
         # The model is re-invoked after its tools return, so the NEXT chat span
         # starts now — keeps tool execution time out of per-call LLM latency.
         call = self._call_timing.get(sid)
@@ -1096,6 +1180,8 @@ class OtelSink:
         # Drop per-session content; retain identity (FIFO-bounded) so later
         # turns of a still-live session keep their agent name/provider.
         self._content.clear_session(sid)
+        for key in [k for k in self._policy_denials if k[0] == sid]:
+            self._policy_denials.pop(key, None)
 
     def _on_response_first_token(self, event: TelemetryEvent) -> None:
         # First streamed token of the CURRENT LLM call arrived (coordinator-
@@ -1130,40 +1216,119 @@ class OtelSink:
         return
 
     def _on_policy_decision(self, event: TelemetryEvent) -> None:
+        """ALWAYS emit a dedicated ``policy <tool>`` span — the first-class,
+        unmistakable representation of every guardrail evaluation (block /
+        allow / audit-violation). Mirrors the TS OtelAuditSink. The execute_tool
+        span keeps only the enforcement effect (error.type/status on a block)
+        plus a lightweight ``policy.outcome`` marker."""
         sid = event.session_id
-        attrs: dict[str, Any] = {
-            "policy.engine": event.payload.get("engine", ""),
-            "policy.decision": event.payload.get("decision", ""),
-            "policy.reason": event.payload.get("reason", ""),
-            "policy.latency_ms": float(event.payload.get("latency_ms", 0.0) or 0.0),
-            "policy.tool_name": event.payload.get("tool_name", ""),
-        }
-        tool_name = str(event.payload.get("tool_name") or "")
-        # Prefer an open execute_tool span with a matching name; else annotate
-        # the invoke_agent root.
-        target_span = None
-        if tool_name:
+        p = event.payload
+        decision = str(p.get("decision") or "")
+        reason = str(p.get("reason") or "")
+        tool_name = str(p.get("tool_name") or "tool")
+        call_id = str(p.get("call_id") or "")
+        outcome = str(p.get("outcome") or ("blocked" if decision == "deny" else "allowed"))
+        is_block = outcome == "blocked"
+
+        # 1) The dedicated policy span — emitted for EVERY decision.
+        self._emit_policy_span(sid, event, outcome)
+
+        # 2) Lightweight marker on the execute_tool span + enforcement on block.
+        marker = {"policy.outcome": outcome, "policy.decision": decision}
+        target_span = self._spans.get_tool(sid, call_id) if call_id else None
+        if target_span is None and tool_name:
             for rec in self._spans.open_tool_recs(sid):
                 if rec.tool_name == tool_name:
                     target_span = rec.span
                     break
-        if target_span is None:
-            target_span = self._spans.get_invoke_agent(sid)
         if target_span is not None:
             try:
-                target_span.add_event("policy_decision", attributes=attrs)
+                target_span.set_attributes(marker)
             except Exception:  # noqa: BLE001
-                logger.debug("policy_decision span event failed", exc_info=True)
-            return
-        # No active span — emit a standalone span so the decision is captured.
+                logger.debug("policy marker on tool span failed", exc_info=True)
+        # A block is remembered until the synthesized error tool_result closes
+        # the execute_tool span — that close carries the reason as the span's
+        # status description + error.type="policy_denied" (see _on_tool_result).
+        # allow / audit_violation / audit_clean → the tool RUNS; no stash.
+        if is_block:
+            self._remember(
+                self._policy_denials,
+                (sid, call_id or tool_name),
+                {"reason": reason or "denied by policy", "attrs": marker},
+            )
+
+    def _emit_policy_span(self, sid: str, event: TelemetryEvent, outcome: str) -> None:
+        p = event.payload
+        tool_name = str(p.get("tool_name") or "tool")
+        call_id = str(p.get("call_id") or "")
+        reason = str(p.get("reason") or "")
+        engine = str(p.get("engine") or "")
+        mode = p.get("mode")
+        policy_id = p.get("policy_id")
+        latency_ms = float(p.get("latency_ms", 0.0) or 0.0)
+        attrs: dict[str, Any] = {
+            "computeragent.operation": "policy_decision",
+            "policy.engine": engine,
+            "policy.decision": str(p.get("decision") or ""),
+            "policy.outcome": outcome,
+            GEN_AI_TOOL_NAME: tool_name,
+            GEN_AI_CONVERSATION_ID: sid,
+            **self._agent_identity_attrs(sid),
+        }
+        if mode:
+            attrs["policy.mode"] = str(mode)
+        if policy_id:
+            attrs["policy.policy_id"] = str(policy_id)
+        if reason:
+            attrs["policy.reason"] = reason
+        if latency_ms:
+            attrs["policy.latency_ms"] = latency_ms
+        if call_id:
+            attrs[GEN_AI_TOOL_CALL_ID] = call_id
+        # Parent = open execute_tool span if present, else the invoke_agent root.
+        parent = (self._spans.get_tool(sid, call_id) if call_id else None) or self._spans.get_invoke_agent(sid)
+        ctx = trace.set_span_in_context(parent) if parent is not None else None
+        end_ns = time.time_ns()
+        start_ns = end_ns - int(latency_ms * 1e6) if latency_ms else end_ns
         try:
-            span = self._tracer.start_span(name=f"policy_decision {tool_name or 'tool'}")
-            for k, v in attrs.items():
-                span.set_attribute(k, v)
-            span.set_attribute(GEN_AI_CONVERSATION_ID, sid)
-            span.end()
+            span = self._tracer.start_span(
+                name=f"policy {tool_name}",
+                kind=SpanKind.INTERNAL,
+                attributes=attrs,
+                context=ctx,
+                start_time=start_ns,
+            )
+            if outcome == "audit_violation":
+                span.add_event("policy.audit_violation", attributes={"policy.reason": reason})
+            if outcome == "blocked":
+                span.set_status(Status(StatusCode.ERROR, reason or "blocked by policy"))
+            else:
+                span.set_status(Status(StatusCode.OK))
+            span.end(end_time=end_ns)
         except Exception:  # noqa: BLE001
-            logger.debug("policy_decision standalone span failed", exc_info=True)
+            logger.debug("policy span emit failed", exc_info=True)
+        # Counter — one per decision, dimensioned for dashboard rollups.
+        try:
+            dims: dict[str, Any] = {
+                "policy.engine": engine,
+                "policy.outcome": outcome,
+                GEN_AI_TOOL_NAME: tool_name,
+            }
+            if mode:
+                dims["policy.mode"] = str(mode)
+            self._policy_counter.add(1, attributes=dims)
+        except Exception:  # noqa: BLE001
+            logger.debug("policy counter add failed", exc_info=True)
+
+    def _pop_policy_denial(self, sid: str, call_id: str) -> dict[str, Any] | None:
+        """Take the pending denial for this tool call — exact call_id key
+        first, then the tool-name key (engines without stable call ids)."""
+        denial = self._policy_denials.pop((sid, call_id), None) if call_id else None
+        if denial is None:
+            rec = self._spans.get_tool_rec(sid, call_id)
+            if rec is not None:
+                denial = self._policy_denials.pop((sid, rec.tool_name), None)
+        return denial
 
 
 # Map kind → instance method. Resolved at module import; no per-event isinstance.

@@ -161,12 +161,29 @@ class SrsPolicyEngine:
             "opa_guardrail": doc.get("opa_guardrail"),
         }
 
+    def _mode(self) -> str:
+        """Guardrail enforcement mode (``enforce``/``audit``) from the fetched
+        config — OPA's ``mode`` preferred, then Cedar's, default ``enforce``.
+        Mirrors the TS SrsPolicyDecider.mode()."""
+        if not self._guardrails:
+            return "enforce"
+        for key in ("opa_guardrail", "cedar_guardrail"):
+            g = self._guardrails.get(key)
+            if isinstance(g, dict) and g.get("enabled") is not False:
+                m = g.get("mode")
+                if isinstance(m, str):
+                    return "audit" if m == "audit" else "enforce"
+        return "enforce"
+
     async def evaluate(self, input: PolicyInput) -> PolicyResult:
         try:
             await self._load_policy()
             if self._inert:
-                return PolicyResult(decision=PolicyDecision.ALLOW, engine="srs")
+                return PolicyResult(
+                    decision=PolicyDecision.ALLOW, engine="srs", outcome="allowed"
+                )
             assert self._guardrails is not None
+            mode = self._mode()
             body = {
                 "cedar_guardrail": self._guardrails.get("cedar_guardrail"),
                 "opa_guardrail": self._guardrails.get("opa_guardrail"),
@@ -183,20 +200,36 @@ class SrsPolicyEngine:
             )
             resp.raise_for_status()
             out = resp.json()
+            # SRS enforces the mode in `allowed` (audit ⇒ always true). Derive
+            # the trace-facing outcome; a violation is a real deny OR an
+            # audit-mode finding SRS surfaced via denied_by/reason.
             allowed = bool(out.get("allowed"))
+            reason = out.get("reason", "") or ""
+            violation = (not allowed) or bool(out.get("denied_by")) or bool(reason)
+            if mode == "audit":
+                outcome = "audit_violation" if violation else "audit_clean"
+            else:
+                outcome = "allowed" if allowed else "blocked"
             return PolicyResult(
                 decision=PolicyDecision.ALLOW if allowed else PolicyDecision.DENY,
-                reason=out.get("reason", "") or "",
+                reason=reason,
                 engine="srs",
+                mode=mode,
+                outcome=outcome,
+                policy_id=self._policy_id,
             )
         except Exception as exc:  # noqa: BLE001 - SRS errors fail per mode (default closed)
             logger.warning("SRS policy evaluation failed (%s mode): %s", self._fail_mode, exc)
             if self._fail_mode == "allow":
-                return PolicyResult(decision=PolicyDecision.ALLOW, engine="srs")
+                return PolicyResult(
+                    decision=PolicyDecision.ALLOW, engine="srs", outcome="error"
+                )
             return PolicyResult(
                 decision=PolicyDecision.DENY,
                 reason=f"SRS error (fail-closed): {exc}",
                 engine="srs",
+                outcome="error",
+                policy_id=self._policy_id,
             )
 
     async def aclose(self) -> None:
