@@ -34,13 +34,11 @@ async def main():
         harness_url=os.environ["COMPUTERAGENT_HARNESS_URL"],
         harness_kind="server",
         harness_token=os.environ["COMPUTERAGENT_HARNESS_TOKEN"],
-        agent_id="6a2542c99cd2a68df3671a1c",
-        # Pass name + source explicitly: /agents/resolve is broken for this id
-        # (matches the agentId field of a different doc → "claude-agent-sdk").
-        # "g2" is the real registry name this id's policy is bound under.
-        agent_name="g2",
+        agent_id="6a293d739cd2a68df3e55f88",
+        agent_name="dev1",
         source="https://github.com/shreyas-lyzr/general-agent",
         model="claude-sonnet-4-5",
+        policy_id="6a26a4861845e0b8cbd98fdb",
     ) as agent:
         result = await agent.chat(
             "List the files in your current working directory, then read README.md."

@@ -5,6 +5,25 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] — 2026-06-26
+
+### Added
+
+- **`ComputerAgent(..., policy_id=...)`** — attach an SRS RAI policy to a run by
+  its `_id` (copyable from the AgentOS Policies UI). When set it is used
+  directly, skipping the AgentOS binding lookup; when omitted, the policy bound
+  to `agent_name` in AgentOS is fetched and used. Only `{policyId, principalId}`
+  is forwarded — the SRS endpoint/key stay server-side (the CAS fills them).
+- **`computeragent.agentos.bind_policy(agent_id, policy_id)`** — attach/detach a
+  policy to an agent from the SDK (same write as the UI's Policy tab,
+  `PUT /agents/{id}/policy`); pass `None` to detach.
+
+### Changed
+
+- Per-LLM-call OpenTelemetry spans with cache-aware token accounting and
+  per-call TTFT; session/call-id correlation threaded through the policy
+  pipeline.
+
 ## [0.2.1] — 2026-06-08
 
 ### Added — single AgentOS config via a discovery document (no endpoint paths in the SDK)
