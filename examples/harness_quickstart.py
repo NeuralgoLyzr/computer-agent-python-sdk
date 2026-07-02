@@ -9,7 +9,7 @@ session); the substrate uses the current working directory as the
 agent's workspace.
 
 The 0.1.x ``query()`` / ``ClaudeSDKClient`` drop-in surface is untouched
-— see ``pdf_drop_in.py`` for that flow.
+— see ``drop_in.py`` for that flow.
 """
 
 from __future__ import annotations

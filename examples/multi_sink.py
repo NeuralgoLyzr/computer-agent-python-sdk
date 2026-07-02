@@ -1,6 +1,6 @@
 """Both OTel and AgentOS sinks active, with PII redaction + guardrails in front.
 
-AcmeAssist's plausible prod config: every run emits an OTel trace to New Relic
+A plausible prod config: every run emits an OTel trace to New Relic
 (or ClickHouse, or wherever), and AgentOS shows the agent + logs in the
 frontend. PII is masked at the package boundary so neither sink ever sees
 plaintext emails / phone numbers / etc.

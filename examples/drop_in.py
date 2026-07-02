@@ -1,6 +1,6 @@
-"""AcmeAssist QA worker — verbatim from the architecture PDF, page 4-5.
+"""Drop-in QA worker — the same code you'd write against the upstream SDK.
 
-The only difference between this file and the production AcmeAssist activity
+The only difference between this file and an existing production worker
 is the two import lines. Everything else — the ``ClaudeAgentOptions``
 construction, the ``async for message in query(...)`` loop, the
 ``isinstance(message, ResultMessage)`` check, the field reads — is unchanged.
@@ -9,7 +9,7 @@ Run:
     pip install 'computer-agent-py[otel,agentos]'
     # ensure the `claude` CLI is on PATH and Bedrock creds are set
     export ANTHROPIC_API_KEY=sk-ant-...   # or AWS_* for Bedrock
-    python examples/pdf_drop_in.py
+    python examples/drop_in.py
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import asyncio
 import os
 import tempfile
 
-# ── the two imports a AcmeAssist engineer changes ─────────────────────────
+# ── the two imports an engineer changes ───────────────────────────────────
 from computeragent import ClaudeAgentOptions, query
 from computeragent.types import ResultMessage
 # ──────────────────────────────────────────────────────────────────────────
@@ -28,7 +28,7 @@ async def main() -> None:
     question = "Summarize how a Temporal workflow routes a question via BM25."
 
     with tempfile.TemporaryDirectory() as session_dir:
-        # AcmeAssist writes CLAUDE.md + .index/ here in prod. For a minimal
+        # A production worker writes CLAUDE.md + .index/ here. For a minimal
         # demo we just give the agent a hint via the system prompt.
         os.makedirs(os.path.join(session_dir, ".index"), exist_ok=True)
 
@@ -40,7 +40,7 @@ async def main() -> None:
                 "Answer concisely."
             ),
             allowed_tools=["Read", "Glob", "Grep"],
-            mcp_servers={},  # AcmeAssist passes its in-process MCP here
+            mcp_servers={},  # an in-process MCP server would go here
             permission_mode="bypassPermissions",
             add_dirs=[],
             env={

@@ -1,4 +1,4 @@
-"""Verbatim AcmeAssist PDF page 4-5 snippet with only the import line swapped.
+"""A verbatim upstream-SDK snippet with only the import line swapped.
 
 If this passes, the drop-in promise is real.
 """
@@ -9,15 +9,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# The two import-line swaps — every other line below is identical to the PDF.
+# The two import-line swaps — every other line below is unchanged user code.
 from computeragent import ClaudeAgentOptions, query
 from computeragent.types import ResultMessage
 
 
 @pytest.mark.asyncio
-async def test_acme-assist_snippet_drop_in(upstream_query_factory):
+async def test_snippet_drop_in(upstream_query_factory):
     # Build a canned ResultMessage matching the upstream shape. The fields
-    # AcmeAssist reads are `.result`, `.num_turns`, `.total_cost_usd`.
+    # the worker reads are `.result`, `.num_turns`, `.total_cost_usd`.
     canned_result = MagicMock(spec=ResultMessage)
     canned_result.result = "Answer: routing happens in route_question (BM25)."
     canned_result.num_turns = 3
@@ -33,7 +33,7 @@ async def test_acme-assist_snippet_drop_in(upstream_query_factory):
 
     upstream_query_factory([canned_result])
 
-    # ── verbatim PDF page-4 / page-5 snippet ──────────────────────────────
+    # ── verbatim user-code snippet ────────────────────────────────────────
     options = ClaudeAgentOptions(
         model="us.anthropic.claude-sonnet-4-6",
         cwd="/tmp/session-fake",

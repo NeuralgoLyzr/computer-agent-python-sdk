@@ -21,7 +21,7 @@ def test_text_block_identity():
 
 def test_isinstance_check_works_across_import_paths():
     """The whole reason for identity preservation: ``isinstance`` is the
-    contract AcmeAssist relies on, and it must agree no matter which import
+    contract downstream code relies on, and it must agree no matter which import
     name space the user picked.
     """
     # Build a real upstream object (don't construct ResultMessage directly —

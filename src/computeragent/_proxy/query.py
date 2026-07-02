@@ -169,8 +169,8 @@ def _derive_agent_name(options: Any) -> str | None:
     Strategy:
       1. Explicit ``agent_name`` attribute (not in upstream today but cheap to
          honour if a fork adds it).
-      2. First non-empty line of ``system_prompt`` (AcmeAssist's prod prompt
-         starts with "You are AcmeAssist..." — that line is the natural label).
+      2. First non-empty line of ``system_prompt`` (prod prompts typically
+         start with "You are <Name>..." — that line is the natural label).
       3. ``None`` — the sinks fall back to an anonymous hash.
     """
     if options is None:

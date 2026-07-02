@@ -593,7 +593,7 @@ The proxy is a pure tap — messages are never modified or reordered. Sinks run 
 
 | File | Demonstrates |
 |---|---|
-| [`examples/pdf_drop_in.py`](examples/pdf_drop_in.py) | The minimum drop-in change |
+| [`examples/drop_in.py`](examples/drop_in.py) | The minimum drop-in change |
 | [`examples/with_otel.py`](examples/with_otel.py) | OTel pointed at a local collector |
 | [`examples/with_new_relic.py`](examples/with_new_relic.py) | OTel pointed at New Relic (just env vars) |
 | [`examples/with_datadog.py`](examples/with_datadog.py) | OTel pointed at Datadog |

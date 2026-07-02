@@ -561,7 +561,7 @@ pipeline, policy-based tool authorization, and full AgentOS integration.
 
 ### Added — examples
 
-- `pdf_drop_in.py` — the verbatim AcmeAssist PDF snippet, only the
+- `drop_in.py` — a verbatim upstream-SDK snippet, only the
   imports changed.
 - `with_otel.py` / `with_new_relic.py` / `with_datadog.py` —
   vendor-neutral OTel destination examples.
