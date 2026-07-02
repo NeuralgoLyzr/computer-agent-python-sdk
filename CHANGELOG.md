@@ -5,6 +5,20 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] — 2026-07-02
+
+### Changed
+
+- Examples, tests, and docstrings now use a generic placeholder agent name.
+  Renamed `examples/pdf_drop_in.py` → `examples/drop_in.py` and
+  `tests/test_pdf_snippet.py` → `tests/test_drop_in.py`; the drop-in narrative
+  is now told against the upstream SDK rather than a specific deployment.
+
+### Fixed
+
+- `computeragent.__version__` was stuck at `0.2.1` (missed in the 0.2.2 bump);
+  it now tracks the packaged version.
+
 ## [0.2.2] — 2026-06-26
 
 ### Added

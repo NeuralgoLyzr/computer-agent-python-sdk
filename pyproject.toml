@@ -1,6 +1,6 @@
 [project]
 name = "computer-agent-py"
-version = "0.2.2"
+version = "0.2.3"
 description = "Drop-in replacement for claude-agent-sdk that adds a proxied telemetry pipeline (PII redaction + guardrails) with OpenTelemetry and AgentOS sinks."
 authors = [
     { name = "Abhi Bhat", email = "abhishek.bhat@lyzr.ai" },
