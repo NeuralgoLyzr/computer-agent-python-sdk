@@ -93,6 +93,32 @@ async def test_invoke_agent_span_attributes():
 
 
 @pytest.mark.asyncio
+async def test_stable_agent_id_stamped_as_computeragent_agent_id():
+    # The stable, caller-supplied agent_id (registry key) must land on every span
+    # as `computeragent.agent.id` — distinct from gen_ai.agent.id (the git SHA) —
+    # so the obs read side can identify/scope library-mode traces by agent id.
+    sink, exp, _ = _build_inmemory_otel()
+    started = TelemetryEvent(
+        kind="session_started",
+        session_id="sess_X",
+        agent_name="NordAssist",
+        payload={"model": "m", "agent_sha": "deadbeef"},
+    )
+    started.agent_id = "665f00000000000000000abc"  # stamped by the emit chokepoint
+    await sink.emit(started)
+    await sink.emit(_ev("assistant_message", {"model": "m", "text": "hi", "stop_reason": "end_turn"}))
+    await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
+
+    spans = exp.get_finished_spans()
+    assert len(spans) >= 2  # invoke_agent + chat
+    for s in spans:
+        attrs = dict(s.attributes or {})
+        # stable id on every span; git SHA stays on gen_ai.agent.id.
+        assert attrs["computeragent.agent.id"] == "665f00000000000000000abc"
+        assert attrs["gen_ai.agent.id"] == "deadbeef"
+
+
+@pytest.mark.asyncio
 async def test_chat_span_per_assistant_message():
     sink, exp, _ = _build_inmemory_otel()
     await sink.emit(_ev("session_started", {"model": "m"}))

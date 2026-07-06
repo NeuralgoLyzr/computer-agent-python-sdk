@@ -146,6 +146,10 @@ ERROR_TYPE = "error.type"
 # ComputerAgent-specific extensions (computeragent.* prefix — never gen_ai.*).
 COMPUTERAGENT_ENGINE_NAME = "computeragent.engine.name"
 COMPUTERAGENT_USAGE_COST_USD = "computeragent.usage.cost_usd"
+# The stable, caller-supplied agent id (registry key). Distinct from
+# gen_ai.agent.id (the GAP source SHA). Mirrors the TS OtelAuditSink so the obs
+# read side can identify/scope by agent id on library-mode spans too.
+COMPUTERAGENT_AGENT_ID = "computeragent.agent.id"
 
 METRIC_TOKEN_USAGE = "gen_ai.client.token.usage"
 METRIC_OPERATION_DURATION = "gen_ai.client.operation.duration"
@@ -494,6 +498,7 @@ class _SessionMeta:
     agent_description: str | None
     agent_version: str | None
     agent_sha: str | None
+    agent_id: str | None
 
 
 def _normalize_usage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -818,6 +823,8 @@ class OtelSink:
             attrs[GEN_AI_AGENT_VERSION] = meta.agent_version
         if meta.agent_sha:
             attrs[GEN_AI_AGENT_ID] = meta.agent_sha
+        if meta.agent_id:
+            attrs[COMPUTERAGENT_AGENT_ID] = meta.agent_id
         if meta.agent_description:
             attrs[GEN_AI_AGENT_DESCRIPTION] = meta.agent_description
         return attrs
@@ -981,6 +988,7 @@ class OtelSink:
             agent_description=event.agent_description,
             agent_version=str(agent_version) if agent_version else None,
             agent_sha=str(agent_sha) if agent_sha else None,
+            agent_id=event.agent_id,
         )
         self._remember(self._session_meta, sid, meta)
         model = event.payload.get("model")

@@ -120,6 +120,9 @@ class HarnessCoordinator:
         self._workspace_path: Path | None = None
         self._manifest: Any = None
         self._disposed = False
+        # Fire the "no agent_name/agent_id → repo-dir fallback" warning at most
+        # once per instance (else it repeats every turn + on dispose).
+        self._warned_manifest_name_fallback = False
         # ── lifecycle state ─────────────────────────────────────────────
         # One ``ComputerAgent`` instance == one logical session. The
         # coordinator fires ``session_started`` exactly once (on the
@@ -192,15 +195,38 @@ class HarnessCoordinator:
         with suppress(Exception):
             await self._pipeline.flush()
 
+    def _resolve_agent_name(self) -> str | None:
+        """Resolve the agent identity for telemetry (``gen_ai.agent.name``).
+
+        Precedence: explicit ``agent_name`` → stable ``agent_id`` → manifest
+        ``name``. The manifest name is last because the GAP/passthrough loaders
+        fall back to the *cloned repo directory name* when ``agent.yaml`` has no
+        ``name`` — surfacing the git repo in the obs UI instead of the agent.
+        Preferring ``agent_id`` means a stable-id'd agent shows its id, never the
+        repo; the manifest/dir name only wins when neither is supplied (warned).
+        """
+        if self._agent_name:
+            return self._agent_name
+        if self._agent_id:
+            return self._agent_id
+        manifest_name = self._manifest.name if self._manifest is not None else None
+        if manifest_name and not self._warned_manifest_name_fallback:
+            self._warned_manifest_name_fallback = True
+            logger.warning(
+                "no agent_name/agent_id supplied; falling back to manifest name %r "
+                "for telemetry — pass agent_name (and agent_id) to ComputerAgent so "
+                "observability shows the agent, not the cloned repo directory",
+                manifest_name,
+            )
+        return manifest_name
+
     async def _emit_lifecycle_session_ended(self) -> None:
         """Emit the single session_ended that closes this ComputerAgent's
         logical session. Carries cumulative usage and last assistant text
         so the AgentOS ``agent_logs`` row reflects the full conversation."""
         assert self._lifecycle_session_id is not None
         duration_ms = (time.monotonic() - self._lifecycle_started_at) * 1000.0
-        agent_name = self._agent_name or (
-            self._manifest.name if self._manifest is not None else None
-        )
+        agent_name = self._resolve_agent_name()
         if self._lifecycle_last_result_payload is not None:
             ev = TelemetryEvent.session_ended_ok(
                 session_id=self._lifecycle_session_id,
@@ -261,7 +287,7 @@ class HarnessCoordinator:
         session_id = self._lifecycle_session_id
         state = _SessionState(
             session_id=session_id,
-            agent_name=self._agent_name or self._manifest.name,
+            agent_name=self._resolve_agent_name(),
             agent_description=self._agent_description,
             pipeline=self._pipeline,
         )
