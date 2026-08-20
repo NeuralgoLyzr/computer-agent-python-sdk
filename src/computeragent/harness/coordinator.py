@@ -174,6 +174,17 @@ class HarnessCoordinator:
             from dataclasses import replace
 
             loaded = replace(loaded, options=merged_options)
+        # Loader-declared compliance hardening (e.g. GAP human-in-the-loop →
+        # permission mode) runs AFTER the caller overlay, so strictest-wins
+        # constraints hold even against caller-supplied options.
+        harden = getattr(loaded, "harden", None)
+        if callable(harden):
+            from dataclasses import replace
+
+            with suppress(Exception):
+                hardened = harden(dict(loaded.options or {}))
+                if isinstance(hardened, dict):
+                    loaded = replace(loaded, options=hardened)
         self._manifest = loaded
 
     async def dispose(self) -> None:

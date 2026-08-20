@@ -46,6 +46,13 @@ class AgentManifest:
     version: str = "0.0.0"
     options: Mapping[str, Any] = field(default_factory=dict)
     sha: str | None = None
+    # Post-merge hardening hook (optional). Applied by the coordinator AFTER
+    # caller options are overlaid, so loader-declared compliance constraints
+    # (e.g. GAP human-in-the-loop → permission mode) win over caller intent.
+    # Excluded from equality — callables compare by identity only.
+    harden: Callable[[dict[str, Any]], dict[str, Any]] | None = field(
+        default=None, compare=False
+    )
 
 
 @dataclass(frozen=True)
