@@ -5,6 +5,29 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-08-21
+
+### Added
+
+- **Process-level agent forking** (opt-in; off by default). A running
+  `ComputerAgent` can spawn **child `ComputerAgent` processes** — each its own
+  Claude CLI subprocess, isolated workspace, and `ca_…` session — instead of
+  (or alongside) the native in-process Task sub-agent, via a new
+  `mcp__fork__spawn` MCP tool (`computeragent.harness.fork`). Children get their
+  own `agent_id`/`agent_name`/`session_id`, linked to the parent through new
+  `parent_session_id`/`parent_agent_id` fields on `TelemetryEvent` and the
+  AgentOS ingest DTO.
+  - `ComputerAgent(fork_mode="manual")` exposes the tool; `"auto"` disables
+    native sub-agents and routes all delegation to forks; `"off"` (default) is a
+    no-op.
+  - Children may be **dynamic** (`name`+`role`+`model`+`tools` at call time) or a
+    **preset** (`agent=<name>` materialized from the repo's `agents/<name>`).
+  - `ForkConfig` safety caps: `max_depth`, `max_children`, `max_concurrency`,
+    per-child `child_timeout_s`, plus guaranteed temp-dir + subprocess teardown.
+  - New public export `ForkConfig`.
+- **Documentation:** `docs/ARCHITECTURE.md` (end-to-end package reference) and
+  `user-documentation.md` (user guide: console connection URLs, usage, forking).
+
 ## [0.2.3] — 2026-07-02
 
 ### Changed
