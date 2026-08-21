@@ -92,6 +92,12 @@ class HarnessCoordinator:
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
+        # ── process-fork (opt-in; see harness/fork.py) ──────────────────────
+        parent_session_id: str | None = None,
+        parent_agent_id: str | None = None,
+        fork_mode: str = "off",
+        fork_config: Any = None,
+        fork_depth: int = 0,
     ) -> None:
         self._engine = engine
         self._substrate = substrate
@@ -105,6 +111,16 @@ class HarnessCoordinator:
         # Stable agent identifier (telemetry/registry only — never affects
         # execution). Stamped onto every emitted event via ``_emit``.
         self._agent_id = agent_id
+        # Process-fork linkage + config. ``parent_*`` are stamped onto every
+        # emitted event (like ``agent_id``) so a forked child links to its
+        # parent. The fork server (mcp__fork__spawn) is injected into the run
+        # options in ``_ensure_booted`` when ``fork_mode != "off"``.
+        self._parent_session_id = parent_session_id
+        self._parent_agent_id = parent_agent_id
+        self._fork_mode = fork_mode
+        self._fork_config = fork_config
+        self._fork_depth = fork_depth
+        self._fork_context: Any = None
         self._policy_decider = policy_decider
         self._on_permission_request_user = on_permission_request
         self._budget_max_usd = budget_max_usd
@@ -174,6 +190,54 @@ class HarnessCoordinator:
             from dataclasses import replace
 
             loaded = replace(loaded, options=merged_options)
+        # Loader-declared compliance hardening (e.g. GAP human-in-the-loop →
+        # permission mode) runs AFTER the caller overlay, so strictest-wins
+        # constraints hold even against caller-supplied options.
+        harden = getattr(loaded, "harden", None)
+        if callable(harden):
+            from dataclasses import replace
+
+            with suppress(Exception):
+                hardened = harden(dict(loaded.options or {}))
+                if isinstance(hardened, dict):
+                    loaded = replace(loaded, options=hardened)
+        # ── process-fork tool injection (opt-in) ─────────────────────────────
+        # Injected HERE (loader-agnostic, after overlay+harden) rather than via
+        # the caller overlay — the overlay is a shallow ``dict.update`` and would
+        # CLOBBER the loader's ``mcp_servers`` (e.g. gap_tools). We deep-merge so
+        # the fork server coexists with gap_tools + agents. A child only gets the
+        # tool while under the depth cap.
+        if (
+            self._fork_mode != "off"
+            and self._fork_config is not None
+            and self._fork_depth < getattr(self._fork_config, "max_depth", 0)
+        ):
+            from dataclasses import replace
+
+            from .fork import ForkContext, append_steer, build_fork_mcp_server
+
+            self._fork_context = ForkContext(
+                self, self._fork_config, self._fork_depth, self._fork_mode
+            )
+            server, tool_names = build_fork_mcp_server(self._fork_context)
+            opts = dict(loaded.options or {})
+            mcp = dict(opts.get("mcp_servers") or {})
+            mcp["fork"] = server
+            opts["mcp_servers"] = mcp
+            # Only extend an EXISTING allowlist — introducing one where there was
+            # none would restrict the agent to just the fork tool. When no
+            # allowlist is set, all tools (incl. the fork MCP tool) are available.
+            if opts.get("allowed_tools"):
+                opts["allowed_tools"] = list(opts["allowed_tools"]) + list(tool_names)
+            if self._fork_mode == "auto":
+                # Disable native in-process sub-agents; steer delegation to fork.
+                opts["agents"] = {}
+                dis = list(opts.get("disallowed_tools") or [])
+                if "Task" not in dis:
+                    dis.append("Task")
+                opts["disallowed_tools"] = dis
+                opts["system_prompt"] = append_steer(opts.get("system_prompt"))
+            loaded = replace(loaded, options=opts)
         self._manifest = loaded
 
     async def dispose(self) -> None:
@@ -186,6 +250,12 @@ class HarnessCoordinator:
         if self._lifecycle_started and self._lifecycle_session_id:
             with suppress(Exception):
                 await self._emit_lifecycle_session_ended()
+        # Tear down any still-running forked children first — the SDK's atexit
+        # net kills orphaned CLI processes but NOT the children's temp
+        # workspaces, so an explicit dispose here prevents leaks.
+        if self._fork_context is not None:
+            with suppress(Exception):
+                await self._fork_context.teardown()
         if self._substrate_handle is not None:
             with suppress(Exception):
                 await self._substrate_handle.close()
@@ -521,6 +591,12 @@ class HarnessCoordinator:
         hands off to the pipeline. ``TelemetryEvent`` is mutable by design."""
         if self._agent_id is not None:
             ev.agent_id = self._agent_id
+        # Fork linkage — stamp the parent ids so a child's events nest under
+        # the parent (None for a top-level agent → field stays None).
+        if self._parent_session_id is not None:
+            ev.parent_session_id = self._parent_session_id
+        if self._parent_agent_id is not None:
+            ev.parent_agent_id = self._parent_agent_id
         await self._pipeline.emit(ev)
 
     def _build_permission_resolver(

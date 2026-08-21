@@ -105,7 +105,29 @@ def _build_options(ctx: EngineContext) -> Any:
     # carry one) so the resulting policy_decision telemetry correlates with
     # this session's open OTel spans instead of landing on "unknown".
     if ctx.policy_decider is not None:
-        payload["can_use_tool"] = _bind_session_id(ctx.policy_decider, ctx.session_id)
+        bound = _bind_session_id(ctx.policy_decider, ctx.session_id)
+        payload["can_use_tool"] = bound
+        # Policy enforcement that survives prompt-skipping permission modes.
+        # ``can_use_tool`` only fires when the CLI's permission rules evaluate
+        # to "ask" — under bypassPermissions / dontAsk / auto (and for edits
+        # under acceptEdits) it is skipped entirely, which would leave a
+        # console-bound policy unenforced. A PreToolUse hook fires for EVERY
+        # tool call regardless of permission mode (SDK-documented), so route
+        # the same bound decider through one and translate a deny into the
+        # hook's deny decision — mirroring the TS engine. Registered only for
+        # the skipping modes so default-mode behavior (and telemetry volume)
+        # is unchanged. MERGED with GAP/caller-supplied hooks, never replacing.
+        if payload.get("permission_mode") in (
+            "bypassPermissions",
+            "dontAsk",
+            "auto",
+            "acceptEdits",
+        ):
+            hooks = dict(payload.get("hooks") or {})
+            pre = list(hooks.get("PreToolUse") or [])
+            pre.append(_policy_pretooluse_matcher(bound))
+            hooks["PreToolUse"] = pre
+            payload["hooks"] = hooks
 
     options = ClaudeAgentOptions(**payload)
     # Surface harness-supplied agent identity to the proxy's
@@ -117,6 +139,68 @@ def _build_options(ctx: EngineContext) -> Any:
         if ctx.manifest.name:
             options.agent_name = ctx.manifest.name  # type: ignore[attr-defined]
     return options
+
+
+def _policy_pretooluse_matcher(decider: Any) -> Any:
+    """Wrap the bound ``can_use_tool`` decider as a PreToolUse ``HookMatcher``.
+
+    The hook receives the SDK's PreToolUse input (``tool_name`` /
+    ``tool_input`` / ``tool_use_id``), runs the SAME decider that backs
+    ``can_use_tool``, and maps a deny onto the hook's
+    ``permissionDecision: "deny"`` — the only gate that fires under
+    prompt-skipping permission modes. An allow returns ``{}`` (no opinion).
+    An unexpected decider exception fails CLOSED (the authorizer's own
+    fail-open handling lives inside it; anything escaping is a bug).
+    """
+    from claude_agent_sdk.types import HookMatcher
+
+    async def _hook(hook_input: Any, _tool_use_id: str | None, _context: Any) -> dict[str, Any]:
+        data = hook_input if isinstance(hook_input, dict) else {}
+        tool_name = str(data.get("tool_name") or "")
+        tool_input = data.get("tool_input") or {}
+        try:
+            result = await decider(tool_name, tool_input, _permission_context())
+        except Exception as exc:  # noqa: BLE001 — fail closed on decider bugs
+            logger.exception("policy PreToolUse hook: decider raised")
+            return _hook_deny(f"policy evaluation failed: {exc}")
+        behavior = getattr(result, "behavior", None)
+        if behavior is None and isinstance(result, dict):
+            behavior = result.get("behavior")
+        if behavior == "deny":
+            message = getattr(result, "message", None)
+            if message is None and isinstance(result, dict):
+                message = result.get("message")
+            return _hook_deny(str(message or "blocked by policy"))
+        return {}
+
+    return HookMatcher(hooks=[_hook])
+
+
+def _permission_context() -> Any:
+    """A best-effort ``ToolPermissionContext`` for hook-originated decisions.
+
+    The hook path has no real permission context (the CLI never built one —
+    the call skipped the prompt), so hand the decider an empty one; the
+    ``_bind_session_id`` wrapper still stamps the session id onto it.
+    """
+    try:
+        from claude_agent_sdk.types import ToolPermissionContext
+
+        return ToolPermissionContext()
+    except Exception:  # noqa: BLE001 — required fields / import drift
+        from types import SimpleNamespace
+
+        return SimpleNamespace()
+
+
+def _hook_deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
 def _bind_session_id(decider: Any, session_id: str) -> Any:

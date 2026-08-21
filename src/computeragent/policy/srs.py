@@ -38,9 +38,18 @@ logger = logging.getLogger(__name__)
 
 
 def _ingest_base() -> str | None:
-    """Derive the agentos ingest base (``.../agentos/api/ingest``) from
-    ``AGENTOS_INGEST_URL`` (which points at the ``/events`` endpoint)."""
+    """Derive the agentos ingest base (``.../agentos/api/ingest``) from the
+    resolved ingest endpoint: the explicit ``AGENTOS_INGEST_URL`` override wins,
+    else the AgentOS discovery document (``AGENTOS_DISCOVERY_URL``) — the same
+    resolution the telemetry sink uses. Without this discovery fallback, a
+    deployment configured ONLY via discovery (the documented one-config setup)
+    silently ran with no SRS policy wiring at all — console-bound guardrails
+    were never enforced."""
     url = os.environ.get("AGENTOS_INGEST_URL")
+    if not url:
+        from .. import agentos
+
+        url = agentos.ingest_url()
     if not url:
         return None
     base = url.rstrip("/")
