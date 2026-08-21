@@ -77,6 +77,13 @@ class TelemetryEvent:
     # so the server can key the registry + per-agent joins on it. ``None`` →
     # the server falls back to keying on ``agent_name`` (legacy behavior).
     agent_id: str | None = None
+    # Process-fork linkage (opt-in ``ComputerAgent(fork_mode=...)``). When this
+    # agent is a *child* spawned via ``mcp__fork__spawn``, these carry the
+    # parent's session/agent ids so the console can nest the child under its
+    # parent. ``None`` for a top-level (non-forked) agent. Stamped by the
+    # coordinator at emit time, exactly like ``agent_id``.
+    parent_session_id: str | None = None
+    parent_agent_id: str | None = None
     # Human-readable description of the agent. Mirrors `agent_name`'s
     # opt-in shape: derived from ``options.agent_description`` (set via
     # setattr by the caller) and propagated through the same event path.

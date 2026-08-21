@@ -143,6 +143,11 @@ class AgentOSHttpSink:
             "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(ts),
             "agent_name": event.agent_name,
             "agent_description": event.agent_description,
+            # Process-fork linkage — present only for children spawned via
+            # mcp__fork__spawn; None otherwise. Lets the server nest child
+            # sessions under the parent (rendering is a follow-up).
+            "parent_session_id": event.parent_session_id,
+            "parent_agent_id": event.parent_agent_id,
             "host": self._host,
             "payload": event.payload or {},
         }

@@ -204,6 +204,18 @@ class ComputerAgent:
         # id from the UI and paste it here. When omitted, the policy bound to
         # `agent_name` in AgentOS (the UI's Policy tab) is fetched and used.
         policy_id: str | None = None,
+        # ── process-fork (opt-in; OFF by default) ───────────────────────────
+        # ``fork_mode="manual"`` exposes the ``mcp__fork__spawn`` tool so the
+        # agent can spawn SEPARATE child ComputerAgent processes (each its own
+        # session/agent id). ``"auto"`` additionally disables the native
+        # in-process Task sub-agent and steers all delegation to the fork tool.
+        # ``"off"`` (default) = today's behavior, untouched.
+        fork_mode: str = "off",
+        fork_config: Any = None,
+        # Internal — set by the fork tool when THIS agent is itself a child.
+        parent_session_id: str | None = None,
+        parent_agent_id: str | None = None,
+        _fork_depth: int = 0,
     ) -> None:
         from .. import agentos as _agentos
 
@@ -366,6 +378,12 @@ class ComputerAgent:
 
             policy_decider = srs_authorizer_from_env(agent_name or "")
 
+        # Fork config: default one in when a mode is on but none supplied.
+        if fork_mode != "off" and fork_config is None:
+            from .fork import ForkConfig
+
+            fork_config = ForkConfig()
+
         self._coordinator = HarnessCoordinator(
             engine=resolved_engine,
             substrate=resolved_substrate,
@@ -386,6 +404,12 @@ class ComputerAgent:
             # layers these on top of whatever the identity loader resolves
             # so explicit caller kwargs always win.
             options_overlay=merged_options,
+            # Process-fork wiring (opt-in).
+            parent_session_id=parent_session_id,
+            parent_agent_id=parent_agent_id,
+            fork_mode=fork_mode,
+            fork_config=fork_config,
+            fork_depth=_fork_depth,
         )
 
     async def __aenter__(self) -> ComputerAgent:
@@ -517,11 +541,14 @@ async def run_task(
         return await agent.chat(message)
 
 
+from .fork import ForkConfig  # noqa: E402  (re-exported for callers)
+
 __all__ = [
     "ChatHandle",
     "ChatInput",
     "ChatResult",
     "ComputerAgent",
+    "ForkConfig",
     "HarnessError",
     "HarnessProtocolError",
     "UnknownEngineError",
