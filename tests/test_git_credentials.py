@@ -187,6 +187,10 @@ def _seed_bare_repo(tmp_path: Path) -> Path:
     run("git", "-C", str(work), "branch", "-M", "main")
     run("git", "-C", str(work), "remote", "add", "origin", str(origin))
     run("git", "-C", str(work), "push", "-q", "origin", "main")
+    # Point the bare repo's HEAD at main. Without this the bare repo's default
+    # HEAD (master, per init.defaultBranch) doesn't match the pushed branch, so
+    # `git clone` checks out nothing and the working tree is empty.
+    run("git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/main")
     return origin
 
 
