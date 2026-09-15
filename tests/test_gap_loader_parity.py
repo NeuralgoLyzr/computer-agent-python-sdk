@@ -35,24 +35,18 @@ def _write_full_gap_repo(root: Path) -> None:
 
     agents = root / "agents"
     agents.mkdir()
-    (agents / "helper.yaml").write_text(
-        "description: Helper\nprompt: You help.\n"
-    )
+    (agents / "helper.yaml").write_text("description: Helper\nprompt: You help.\n")
 
     tools = root / "tools"
     tools.mkdir()
-    (tools / "reader.yaml").write_text(
-        "name: reader\nimplementation:\n  builtin: Read\n"
-    )
+    (tools / "reader.yaml").write_text("name: reader\nimplementation:\n  builtin: Read\n")
     (tools / "runner.yaml").write_text(
         "name: runner\nimplementation:\n  script:\n    command: echo\n"
     )
 
     hooks = root / "hooks"
     hooks.mkdir()
-    (hooks / "hooks.yaml").write_text(
-        "PreToolUse:\n  - command: './check.sh'\n"
-    )
+    (hooks / "hooks.yaml").write_text("PreToolUse:\n  - command: './check.sh'\n")
 
     skills = root / "skills"
     (skills / "web-design").mkdir(parents=True)
@@ -114,7 +108,7 @@ async def test_full_claude_options_wiring(tmp_path: Path, monkeypatch):
     assert manifest.harden({"permission_mode": "bypassPermissions"})["permission_mode"] == "default"
     assert manifest.harden({"permission_mode": "dontAsk"})["permission_mode"] == "default"
     assert manifest.harden({"permission_mode": "plan"})["permission_mode"] == "plan"
-    assert manifest.harden({})== {}
+    assert manifest.harden({}) == {}
 
 
 @pytest.mark.asyncio

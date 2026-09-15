@@ -102,7 +102,8 @@ class SrsPolicyEngine:
             api_key=overrides.pop("api_key", None) or os.environ.get("SRS_API_KEY", ""),
             policy_id=overrides.pop("policy_id", None) or os.environ.get("SRS_POLICY_ID"),
             agentos_base=overrides.pop("agentos_base", None) or _ingest_base(),
-            agentos_token=overrides.pop("agentos_token", None) or os.environ.get("AGENTOS_INGEST_TOKEN"),
+            agentos_token=overrides.pop("agentos_token", None)
+            or os.environ.get("AGENTOS_INGEST_TOKEN"),
             agent_name=agent_name,
             **overrides,
         )
@@ -188,9 +189,7 @@ class SrsPolicyEngine:
         try:
             await self._load_policy()
             if self._inert:
-                return PolicyResult(
-                    decision=PolicyDecision.ALLOW, engine="srs", outcome="allowed"
-                )
+                return PolicyResult(decision=PolicyDecision.ALLOW, engine="srs", outcome="allowed")
             assert self._guardrails is not None
             mode = self._mode()
             body = {
@@ -230,9 +229,7 @@ class SrsPolicyEngine:
         except Exception as exc:  # noqa: BLE001 - SRS errors fail per mode (default closed)
             logger.warning("SRS policy evaluation failed (%s mode): %s", self._fail_mode, exc)
             if self._fail_mode == "allow":
-                return PolicyResult(
-                    decision=PolicyDecision.ALLOW, engine="srs", outcome="error"
-                )
+                return PolicyResult(decision=PolicyDecision.ALLOW, engine="srs", outcome="error")
             return PolicyResult(
                 decision=PolicyDecision.DENY,
                 reason=f"SRS error (fail-closed): {exc}",

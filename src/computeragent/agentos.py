@@ -199,8 +199,9 @@ def bind_policy(
             "bind_policy needs AgentOS — set AGENTOS_DISCOVERY_URL (or AGENTOS_API_URL) "
             "and a cak_ key (COMPUTERAGENT_HARNESS_TOKEN)."
         )
-    import httpx
     from urllib.parse import quote
+
+    import httpx
 
     resp = httpx.put(
         f"{base}/agents/{quote(agent_id, safe='')}/policy",

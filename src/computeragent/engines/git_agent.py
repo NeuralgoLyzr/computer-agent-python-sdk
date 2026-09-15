@@ -68,9 +68,7 @@ class GitAgentEngine:
     name = "gitagent"
     capabilities = _CAPABILITIES
 
-    async def start_session(
-        self, ctx: EngineContext
-    ) -> AsyncIterator[EngineEvent]:
+    async def start_session(self, ctx: EngineContext) -> AsyncIterator[EngineEvent]:
         manifest_options = dict(ctx.manifest.options or {})
         raw_model: str | None = manifest_options.get("model")
         if not raw_model:
@@ -90,9 +88,7 @@ class GitAgentEngine:
                 ctx, manifest_options=manifest_options, model=bare_model
             )
         else:
-            iterator = _run_openai_session(
-                ctx, manifest_options=manifest_options, model=bare_model
-            )
+            iterator = _run_openai_session(ctx, manifest_options=manifest_options, model=bare_model)
         async for ev in iterator:
             yield ev
 
@@ -170,9 +166,7 @@ async def _run_anthropic_session(
         full_system = system_prompt
         if system_suffix:
             full_system = (
-                f"{system_prompt}\n\n{system_suffix}".strip()
-                if system_prompt
-                else system_suffix
+                f"{system_prompt}\n\n{system_suffix}".strip() if system_prompt else system_suffix
             )
 
         # Build the messages list — just the current turn (prior turns
@@ -180,9 +174,7 @@ async def _run_anthropic_session(
         user_content = user_msg.get("content")
         if not isinstance(user_content, (str, list)):
             user_content = str(user_content)
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": user_content}
-        ]
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_content}]
         final_assistant_text = ""
 
         for _turn_idx in range(max_turns):
@@ -207,12 +199,8 @@ async def _run_anthropic_session(
                 cost_semantic="delta",
                 input_tokens=getattr(usage, "input_tokens", None),
                 output_tokens=getattr(usage, "output_tokens", None),
-                cache_creation_input_tokens=getattr(
-                    usage, "cache_creation_input_tokens", None
-                ),
-                cache_read_input_tokens=getattr(
-                    usage, "cache_read_input_tokens", None
-                ),
+                cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", None),
+                cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", None),
             )
             yield EngineEvent(kind="sdk_message", payload=resp)
 
@@ -250,10 +238,7 @@ async def _run_anthropic_session(
                 )
                 decision = await ctx.on_permission_request(permission_req)
                 if decision.get("behavior") == "deny":
-                    output = (
-                        f"denied by policy: "
-                        f"{decision.get('message', 'no reason supplied')}"
-                    )
+                    output = f"denied by policy: {decision.get('message', 'no reason supplied')}"
                 else:
                     output = (
                         "tool execution is not built into GitAgentEngine "
@@ -290,8 +275,7 @@ def _build_anthropic_client() -> Any:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "GitAgentEngine (Anthropic backend) requires "
-            "ANTHROPIC_API_KEY in the environment."
+            "GitAgentEngine (Anthropic backend) requires ANTHROPIC_API_KEY in the environment."
         )
     base_url = os.environ.get("ANTHROPIC_BASE_URL")
     kwargs: dict[str, Any] = {"api_key": api_key}
@@ -315,9 +299,7 @@ async def _run_openai_session(
     max_turns: int = int(manifest_options.get("max_turns", _DEFAULT_MAX_TURNS))
     tools_spec: list[dict[str, Any]] = list(manifest_options.get("tools") or [])
     constraints = manifest_options.get("constraints") or {}
-    temperature = (
-        constraints.get("temperature") if isinstance(constraints, dict) else None
-    )
+    temperature = constraints.get("temperature") if isinstance(constraints, dict) else None
 
     prior_turns: list[dict[str, Any]] = []
     async for user_msg in ctx.user_message_queue:
@@ -359,9 +341,7 @@ async def _run_openai_session(
                 {
                     "role": "assistant",
                     "content": msg.content,
-                    "tool_calls": [
-                        _serialise_openai_tool_call(tc) for tc in tool_calls
-                    ],
+                    "tool_calls": [_serialise_openai_tool_call(tc) for tc in tool_calls],
                 }
             )
 
@@ -375,8 +355,7 @@ async def _run_openai_session(
                 decision = await ctx.on_permission_request(permission_req)
                 if decision.get("behavior") == "deny":
                     tool_output = (
-                        f"denied by policy: "
-                        f"{decision.get('message', 'no reason supplied')}"
+                        f"denied by policy: {decision.get('message', 'no reason supplied')}"
                     )
                 else:
                     tool_output = (
@@ -399,9 +378,7 @@ async def _run_openai_session(
                     }
                 )
 
-        prior_turns.append(
-            {"user": user_msg, "assistant": final_assistant_text}
-        )
+        prior_turns.append({"user": user_msg, "assistant": final_assistant_text})
 
 
 def _build_openai_client() -> Any:
@@ -414,13 +391,11 @@ def _build_openai_client() -> Any:
     api_key = os.environ.get("OPENAI_API_KEY")
     if not base_url:
         raise RuntimeError(
-            "GitAgentEngine (OpenAI backend) requires "
-            "GITCLAW_MODEL_BASE_URL in the environment."
+            "GitAgentEngine (OpenAI backend) requires GITCLAW_MODEL_BASE_URL in the environment."
         )
     if not api_key:
         raise RuntimeError(
-            "GitAgentEngine (OpenAI backend) requires "
-            "OPENAI_API_KEY in the environment."
+            "GitAgentEngine (OpenAI backend) requires OPENAI_API_KEY in the environment."
         )
     return openai.AsyncOpenAI(base_url=base_url, api_key=api_key)
 

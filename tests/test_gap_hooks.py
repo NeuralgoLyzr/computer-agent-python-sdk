@@ -100,9 +100,7 @@ async def test_callback_empty_or_bad_stdout_is_empty_dict(tmp_path: Path):
 async def test_callback_timeout_kills_and_reports_124(tmp_path: Path):
     _write_hooks(
         tmp_path,
-        "PreToolUse:\n"
-        "  - command: 'sleep 10'\n"
-        "    timeout_ms: 300\n",
+        "PreToolUse:\n  - command: 'sleep 10'\n    timeout_ms: 300\n",
     )
     cb = load_gap_hooks(tmp_path)["PreToolUse"][0].hooks[0]
     result = await cb({}, None, None)

@@ -69,7 +69,9 @@ async def resolve_git_credential(
                 json={"repoUrl": repo_url},
             )
     except Exception as exc:  # network / DNS / TLS — never fatal
-        logger.debug("git credential resolve failed (%s); cloning unauthenticated", type(exc).__name__)
+        logger.debug(
+            "git credential resolve failed (%s); cloning unauthenticated", type(exc).__name__
+        )
         return None
 
     if resp.status_code == 200:

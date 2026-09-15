@@ -28,7 +28,9 @@ KEY = "ags_testkey_do_not_use"
 
 
 def _resolve(**kw):
-    return resolve_agent(AGENT_ID, base_url=kw.pop("base_url", BASE), api_key=kw.pop("api_key", KEY), **kw)
+    return resolve_agent(
+        AGENT_ID, base_url=kw.pop("base_url", BASE), api_key=kw.pop("api_key", KEY), **kw
+    )
 
 
 # ── URL normalisation ────────────────────────────────────────────────────────

@@ -152,9 +152,7 @@ def _auto_sinks() -> list[TelemetrySink]:
 
             sinks.append(AgentOSHttpSink(url=ingest_url))
         except ImportError:
-            logger.debug(
-                "AgentOSHttpSink not attached (computer-agent-py[agentos] not installed)"
-            )
+            logger.debug("AgentOSHttpSink not attached (computer-agent-py[agentos] not installed)")
 
     return sinks
 

@@ -24,9 +24,7 @@ def test_missing_tools_dir(tmp_path: Path):
 def test_builtin_alias_lands_on_allowed_tools(tmp_path: Path):
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "reader.yaml").write_text(
-        "name: reader\nimplementation:\n  builtin: Read\n"
-    )
+    (tools / "reader.yaml").write_text("name: reader\nimplementation:\n  builtin: Read\n")
     result = load_gap_tools(tmp_path)
     assert result.allowed_tools == ["Read"]
     assert result.mcp_server is None  # no script tools → no server
@@ -59,9 +57,7 @@ def test_invalid_manifests_silently_skipped(tmp_path: Path):
     tools.mkdir()
     (tools / "no-name.yaml").write_text("implementation:\n  builtin: Read\n")
     (tools / "no-impl.yaml").write_text("name: x\n")
-    (tools / "no-command.yaml").write_text(
-        "name: y\nimplementation:\n  script: {args: [a]}\n"
-    )
+    (tools / "no-command.yaml").write_text("name: y\nimplementation:\n  script: {args: [a]}\n")
     (tools / "broken.yaml").write_text("{not yaml: [")
     (tools / "notes.md").write_text("ignored — not yaml")
     result = load_gap_tools(tmp_path)
@@ -116,9 +112,7 @@ async def test_script_timeout_returns_124(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_script_missing_binary_returns_127(tmp_path: Path):
-    sdk_tool = _build_script_tool(
-        _script_manifest("/definitely/not/a/binary", []), tmp_path
-    )
+    sdk_tool = _build_script_tool(_script_manifest("/definitely/not/a/binary", []), tmp_path)
     out = await sdk_tool.handler({})
     assert out["is_error"] is True
     assert out["content"][0]["text"].startswith("exit 127:")

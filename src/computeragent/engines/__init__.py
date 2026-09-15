@@ -27,8 +27,7 @@ _REGISTRY: dict[str, EngineDriver] = {}
 def register_engine(name: str, engine: EngineDriver) -> None:
     if not isinstance(engine, EngineDriver):
         raise TypeError(
-            f"register_engine({name!r}): instance does not satisfy "
-            "the EngineDriver Protocol"
+            f"register_engine({name!r}): instance does not satisfy the EngineDriver Protocol"
         )
     _REGISTRY[name] = engine
     logger.debug("registered engine %r", name)

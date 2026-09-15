@@ -52,10 +52,10 @@ def _write_gap_workspace(
     # Hand-roll YAML to avoid coupling the test to a yaml-dump library.
     yaml_lines: list[str] = [
         f"name: {manifest['name']}",
-        f"version: \"{manifest['version']}\"",
+        f'version: "{manifest["version"]}"',
         f"description: |\n  {manifest['description']}",
         "model:",
-        f"  preferred: \"{model_preferred}\"",
+        f'  preferred: "{model_preferred}"',
     ]
     if constraints:
         yaml_lines.append("  constraints:")

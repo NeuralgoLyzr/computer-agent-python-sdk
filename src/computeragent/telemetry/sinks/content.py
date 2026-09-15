@@ -37,9 +37,7 @@ logger = logging.getLogger("computeragent.telemetry")
 GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
 GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
 GEN_AI_SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
-EVENT_GEN_AI_CLIENT_INFERENCE_OPERATION_DETAILS = (
-    "gen_ai.client.inference.operation.details"
-)
+EVENT_GEN_AI_CLIENT_INFERENCE_OPERATION_DETAILS = "gen_ai.client.inference.operation.details"
 
 
 # ── finish-reason mapping ----------------------------------------------------
@@ -366,9 +364,7 @@ def write_inference_content(
         if out is not None:
             span.set_attribute(GEN_AI_OUTPUT_MESSAGES, serialize_bounded(out, max_attr_length))
         if sysp is not None:
-            span.set_attribute(
-                GEN_AI_SYSTEM_INSTRUCTIONS, serialize_bounded(sysp, max_attr_length)
-            )
+            span.set_attribute(GEN_AI_SYSTEM_INSTRUCTIONS, serialize_bounded(sysp, max_attr_length))
 
     if capture_mode in ("events", "both") and logger_ is not None:
         body: dict[str, Any] = {}

@@ -39,9 +39,7 @@ class ClaudeAgentEngine:
     name = "claude-agent-sdk"
     capabilities = _CAPABILITIES
 
-    async def start_session(
-        self, ctx: EngineContext
-    ) -> AsyncIterator[EngineEvent]:
+    async def start_session(self, ctx: EngineContext) -> AsyncIterator[EngineEvent]:
         options = _build_options(ctx)
 
         # claude-agent-sdk wants prompts as an AsyncIterable of

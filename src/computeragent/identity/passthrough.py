@@ -58,9 +58,7 @@ def _coerce_options(value: Any) -> Mapping[str, Any]:
         return {}
     if isinstance(value, Mapping):
         return dict(value)
-    raise TypeError(
-        f"AgentManifest.options must be a Mapping; got {type(value).__name__}"
-    )
+    raise TypeError(f"AgentManifest.options must be a Mapping; got {type(value).__name__}")
 
 
 __all__ = ["PassthroughLoader"]

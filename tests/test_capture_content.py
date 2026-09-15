@@ -69,7 +69,9 @@ async def _run_one_turn_with_tool(sink: OtelSink) -> None:
             {"model": "claude-sonnet-4-5", "system_prompt": "You are AcmeAssist."},
         )
     )
-    await sink.emit(_ev("turn_started", {"prompt": "What's in CLAUDE.md?", "model": "claude-sonnet-4-5"}))
+    await sink.emit(
+        _ev("turn_started", {"prompt": "What's in CLAUDE.md?", "model": "claude-sonnet-4-5"})
+    )
     await sink.emit(
         _ev("assistant_message", {"model": "claude-sonnet-4-5", "text": "Let me read it."})
     )
@@ -232,9 +234,10 @@ async def test_capture_content_both_mode(monkeypatch):
     # Event path populated too.
     logs = _details_logs(log_exp)
     assert len(logs) == 1
-    assert dict(logs[0].log_record.body or {})["gen_ai.input.messages"][0]["parts"][0][
-        "content"
-    ] == "What's in CLAUDE.md?"
+    assert (
+        dict(logs[0].log_record.body or {})["gen_ai.input.messages"][0]["parts"][0]["content"]
+        == "What's in CLAUDE.md?"
+    )
 
 
 # ── truncation ───────────────────────────────────────────────────────────
@@ -320,7 +323,10 @@ async def test_per_call_chat_spans_carry_own_content(monkeypatch):
     # Call 1 — decides to use the Write tool. (Real ordering: from_message
     # yields the tool_use event before the assistant_message of the same call.)
     await sink.emit(
-        _ev("tool_use", {"tool_use_id": "tu_1", "tool_name": "Write", "tool_input": {"path": "haiku.txt"}})
+        _ev(
+            "tool_use",
+            {"tool_use_id": "tu_1", "tool_name": "Write", "tool_input": {"path": "haiku.txt"}},
+        )
     )
     await sink.emit(
         _ev(
@@ -331,7 +337,10 @@ async def test_per_call_chat_spans_carry_own_content(monkeypatch):
     await sink.emit(_ev("tool_result", {"tool_use_id": "tu_1", "is_error": False, "content": "ok"}))
     # Call 2 — summarises.
     await sink.emit(
-        _ev("assistant_message", {"model": "m", "text": "Wrote the haiku.", "stop_reason": "end_turn"})
+        _ev(
+            "assistant_message",
+            {"model": "m", "text": "Wrote the haiku.", "stop_reason": "end_turn"},
+        )
     )
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
 

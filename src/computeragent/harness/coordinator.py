@@ -92,6 +92,14 @@ class HarnessCoordinator:
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
+        # ── cloning a private source ────────────────────────────────────────
+        # An explicit token wins outright. Without one the AgentOS GitHub-App
+        # route is tried, using these two — which come from the caller's own
+        # config rather than process env, so one process can drive two
+        # deployments without them fighting over a global.
+        git_token: str | None = None,
+        git_credential_api_base: str | None = None,
+        git_credential_token: str | None = None,
         # ── process-fork (opt-in; see harness/fork.py) ──────────────────────
         parent_session_id: str | None = None,
         parent_agent_id: str | None = None,
@@ -130,6 +138,9 @@ class HarnessCoordinator:
         # / ``model=...``. Layered on top of whatever the identity loader
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
+        self._git_token = git_token
+        self._git_credential_api_base = git_credential_api_base
+        self._git_credential_token = git_credential_token
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -154,18 +165,47 @@ class HarnessCoordinator:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
+    async def _resolve_git_credential(self) -> dict[str, str] | None:
+        """Auth for cloning the source, or ``None`` for an anonymous clone.
+
+        An explicit ``git_token`` wins and is used directly. Otherwise AgentOS's
+        GitHub-App route is asked, best-effort: a miss, a misconfiguration, or a
+        deployment without the App installed all leave this ``None``, and a
+        public repo then clones exactly as before.
+
+        The token is handed to the substrate as a credential mapping, not spliced
+        into the clone URL — the substrate injects it as an
+        ``http.<host>.extraHeader``, so it reaches neither argv nor the remote
+        recorded in ``.git/config``. (The TS server splices it into the URL
+        instead, because its envs are dropped by some substrates; locally they
+        never are, so the safer shape is available to us.)
+        """
+        if not isinstance(self._source, str):
+            return None
+        if self._git_token:
+            from ..substrates.local import _host_of
+
+            return {
+                "host": _host_of(self._source),
+                "username": "x-access-token",
+                "token": self._git_token,
+            }
+        if not (self._git_credential_api_base and self._git_credential_token):
+            return None
+        from .git_credential_client import resolve_git_credential
+
+        with suppress(Exception):
+            return await resolve_git_credential(
+                self._source,
+                api_base=self._git_credential_api_base,
+                token=self._git_credential_token,
+            )
+        return None
+
     async def _ensure_booted(self) -> None:
         if self._substrate_handle is not None:
             return
-        # Private GAP repos: ask AgentOS (with our API key) for a group-scoped
-        # PAT for this repo's host. Best-effort — a miss/!config leaves it None
-        # and the substrate clones unauthenticated (public-repo behavior).
-        git_credential = None
-        if isinstance(self._source, str):
-            from .git_credential_client import resolve_git_credential
-
-            with suppress(Exception):
-                git_credential = await resolve_git_credential(self._source)
+        git_credential = await self._resolve_git_credential()
         self._substrate_handle = await self._substrate.boot(
             source=self._source, envs=self._envs, git_credential=git_credential
         )
@@ -446,9 +486,7 @@ class HarnessCoordinator:
                     )
                 elif ev.kind == "sdk_message":
                     state.messages.append(ev.payload)
-                    last_assistant_text = _maybe_assistant_text(
-                        ev.payload, last_assistant_text
-                    )
+                    last_assistant_text = _maybe_assistant_text(ev.payload, last_assistant_text)
                     result_payload = _maybe_result_payload(ev.payload, result_payload)
                     # First, try the claude-agent-sdk-shape translator —
                     # for the Claude engine this yields tool_use /
@@ -726,16 +764,12 @@ async def _enqueue_user_message(
             if isinstance(entry, str):
                 await queue.put({"role": "user", "content": entry})
             elif isinstance(entry, dict):
-                await queue.put(
-                    entry if "role" in entry else {"role": "user", "content": entry}
-                )
+                await queue.put(entry if "role" in entry else {"role": "user", "content": entry})
     elif isinstance(message, AsyncIterable):
         async for entry in message:
             await _enqueue_user_message(queue, entry)
     else:
-        raise TypeError(
-            f"unsupported chat message type: {type(message).__name__}"
-        )
+        raise TypeError(f"unsupported chat message type: {type(message).__name__}")
     # Single-shot mode — close the queue after one ChatInput is drained.
     # ``ComputerAgent.chat`` reopens for each call.
     await queue.put(None)
@@ -824,9 +858,8 @@ def _synthesise_telemetry(
                 _ev(
                     "tool_result",
                     {
-                        "tool_use_id": payload.get("tool_call_id") or payload.get(
-                            "tool_use_id", ""
-                        ),
+                        "tool_use_id": payload.get("tool_call_id")
+                        or payload.get("tool_use_id", ""),
                         "is_error": bool(payload.get("is_error", False)),
                         "content": str(payload.get("content", "")),
                     },
@@ -904,8 +937,7 @@ def _synthesise_telemetry(
                     "tool_use",
                     {
                         "tool_use_id": getattr(tc, "id", "") or "",
-                        "tool_name": (getattr(fn, "name", "") if fn is not None else "")
-                        or "",
+                        "tool_name": (getattr(fn, "name", "") if fn is not None else "") or "",
                         "tool_input": tool_input,
                     },
                 )

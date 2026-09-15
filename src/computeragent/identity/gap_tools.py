@@ -190,7 +190,9 @@ async def _run_script(
     argv: list[str] = [a for a in (script.get("args") or []) if isinstance(a, str)]
     cwd = workdir / script["cwd"] if isinstance(script.get("cwd"), str) else workdir
     timeout_ms = script.get("timeout_ms")
-    timeout_s = (timeout_ms if isinstance(timeout_ms, int) and timeout_ms > 0 else _DEFAULT_TIMEOUT_MS) / 1000
+    timeout_s = (
+        timeout_ms if isinstance(timeout_ms, int) and timeout_ms > 0 else _DEFAULT_TIMEOUT_MS
+    ) / 1000
 
     env = dict(os.environ)
     extra_env = script.get("env")
@@ -229,7 +231,11 @@ async def _run_script(
         await proc.wait()
         return proc.returncode or 0, "", ""
 
-    return proc.returncode or 0, stdout_b.decode("utf-8", "replace"), stderr_b.decode("utf-8", "replace")
+    return (
+        proc.returncode or 0,
+        stdout_b.decode("utf-8", "replace"),
+        stderr_b.decode("utf-8", "replace"),
+    )
 
 
 def _stringify(value: Any) -> str:

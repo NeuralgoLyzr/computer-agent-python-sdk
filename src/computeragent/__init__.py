@@ -56,19 +56,20 @@ from ._proxy.query import query  # noqa: E402
 # loader as a side effect — that's intentional so string-label
 # resolution works without an explicit ``register_*`` call.
 from .harness import (  # noqa: E402
+    AgentResolveError,
     ChatHandle,
     ChatInput,
     ChatResult,
     ComputerAgent,
-    ForkConfig,
+    GatewayConfigError,
     HarnessError,
-    HarnessProtocolError,
+    ResolvedAgent,
     UnknownEngineError,
     UnknownIdentityLoaderError,
     UnknownSessionStoreError,
     UnknownSubstrateError,
+    UnsupportedAgentError,
     UsageRollup,
-    run_task,
 )
 
 # Policy surface (v0.2 — tool-use authorization). Engines themselves
@@ -128,7 +129,6 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "PolicyResource",
     "PolicyResult",
     "PolicyToolAuthorizer",
-    "ForkConfig",
     "TelemetryEvent",
     "TelemetryMiddleware",
     "TelemetrySink",
@@ -141,15 +141,15 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "ChatInput",
     "ChatResult",
     "ComputerAgent",
-    # remote-harness clients (0.3.0; lazy — require the [remote] extra)
-    "ComputerAgentServerClient",
-    "HarnessClient",
+    "AgentResolveError",
+    "GatewayConfigError",
+    "ResolvedAgent",
+    "UnsupportedAgentError",
     "EngineCapabilities",
     "EngineContext",
     "EngineDriver",
     "EngineEvent",
     "HarnessError",
-    "HarnessProtocolError",
     "IdentityLoader",
     "IdentitySource",
     "PermissionDecision",
@@ -164,20 +164,4 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "UnknownSessionStoreError",
     "UnknownSubstrateError",
     "UsageRollup",
-    "run_task",
 ]
-
-
-def __getattr__(name: str):  # type: ignore[no-untyped-def]
-    """Lazy exports for the optional ``[remote]`` extra — so a local-only
-    install never imports ``httpx`` at package import time. Raises a clean
-    ImportError (with an install hint) only when actually accessed."""
-    if name == "HarnessClient":
-        from .harness.protocol import HarnessClient
-
-        return HarnessClient
-    if name == "ComputerAgentServerClient":
-        from .harness.cas_client import ComputerAgentServerClient
-
-        return ComputerAgentServerClient
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

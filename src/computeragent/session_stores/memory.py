@@ -24,9 +24,7 @@ class InMemorySessionStore:
         async with self._lock:
             self._slots.setdefault((project_key, session_id), [])
 
-    async def load(
-        self, *, project_key: str, session_id: str
-    ) -> list[SessionStoreEntry]:
+    async def load(self, *, project_key: str, session_id: str) -> list[SessionStoreEntry]:
         async with self._lock:
             return list(self._slots.get((project_key, session_id), []))
 

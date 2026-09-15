@@ -332,9 +332,7 @@ async def test_per_call_chat_spans_carry_their_own_usage_root_has_cost_only():
         )
     )
     # Cumulative cost arrives once at the end.
-    await sink.emit(
-        _ev("usage_snapshot", {"model": "m", "total_cost_usd": 0.21, "usage": {}})
-    )
+    await sink.emit(_ev("usage_snapshot", {"model": "m", "total_cost_usd": 0.21, "usage": {}}))
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
 
     spans = exp.get_finished_spans()
@@ -444,7 +442,10 @@ async def test_policy_block_emits_dedicated_span_and_blocks_tool():
     sink, exp, _ = _build_inmemory_otel()
     await sink.emit(_ev("session_started", {"model": "m"}))
     await sink.emit(
-        _ev("tool_use", {"tool_use_id": "tu_1", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}})
+        _ev(
+            "tool_use",
+            {"tool_use_id": "tu_1", "tool_name": "Bash", "tool_input": {"command": "rm -rf /"}},
+        )
     )
     await sink.emit(
         _ev(
@@ -462,7 +463,9 @@ async def test_policy_block_emits_dedicated_span_and_blocks_tool():
             },
         )
     )
-    await sink.emit(_ev("tool_result", {"tool_use_id": "tu_1", "is_error": True, "content": "denied"}))
+    await sink.emit(
+        _ev("tool_result", {"tool_use_id": "tu_1", "is_error": True, "content": "denied"})
+    )
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 10.0}))
 
     # Dedicated policy span carries the full decision.
@@ -493,7 +496,9 @@ async def test_policy_audit_violation_span_ok_tool_runs():
 
     sink, exp, _ = _build_inmemory_otel()
     await sink.emit(_ev("session_started", {"model": "m"}))
-    await sink.emit(_ev("tool_use", {"tool_use_id": "tu_2", "tool_name": "Write", "tool_input": {}}))
+    await sink.emit(
+        _ev("tool_use", {"tool_use_id": "tu_2", "tool_name": "Write", "tool_input": {}})
+    )
     await sink.emit(
         _ev(
             "policy_decision",
@@ -536,12 +541,25 @@ async def test_policy_block_before_tool_use_still_blocks():
     await sink.emit(
         _ev(
             "policy_decision",
-            {"engine": "opa", "decision": "deny", "outcome": "blocked", "mode": "enforce",
-             "reason": "writes are not allowed", "tool_name": "Write", "call_id": "tu_9"},
+            {
+                "engine": "opa",
+                "decision": "deny",
+                "outcome": "blocked",
+                "mode": "enforce",
+                "reason": "writes are not allowed",
+                "tool_name": "Write",
+                "call_id": "tu_9",
+            },
         )
     )
-    await sink.emit(_ev("tool_use", {"tool_use_id": "tu_9", "tool_name": "Write", "tool_input": {}}))
-    await sink.emit(_ev("tool_result", {"tool_use_id": "tu_9", "is_error": False, "content": "denied by policy"}))
+    await sink.emit(
+        _ev("tool_use", {"tool_use_id": "tu_9", "tool_name": "Write", "tool_input": {}})
+    )
+    await sink.emit(
+        _ev(
+            "tool_result", {"tool_use_id": "tu_9", "is_error": False, "content": "denied by policy"}
+        )
+    )
     await sink.emit(_ev("session_ended", {"is_error": False, "duration_ms": 5.0}))
 
     pol = _policy_span(exp, "policy Write")

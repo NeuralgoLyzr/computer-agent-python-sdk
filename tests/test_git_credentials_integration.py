@@ -67,7 +67,9 @@ async def test_local_clone_of_private_repo_with_resolved_pat():
     handle = await sub.boot(source=_REPO, envs={}, git_credential=cred)
     try:
         assert handle.workspace_path.exists()
-        assert any(handle.workspace_path.iterdir()), "private repo cloned empty — auth likely failed"
+        assert any(handle.workspace_path.iterdir()), (
+            "private repo cloned empty — auth likely failed"
+        )
         assert handle.revision and re.fullmatch(r"[0-9a-f]{40}", handle.revision)
     finally:
         await handle.close()

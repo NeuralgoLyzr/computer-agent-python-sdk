@@ -251,8 +251,14 @@ class TelemetryEvent:
         mode = getattr(result, "mode", None) if result is not None else None
         outcome = getattr(result, "outcome", None) if result is not None else None
         if outcome is None:
-            outcome = "error" if error else (decision_value if decision_value in ("allow",) else None)
-            outcome = "blocked" if decision_value == "deny" else ("allowed" if decision_value == "allow" else outcome)
+            outcome = (
+                "error" if error else (decision_value if decision_value in ("allow",) else None)
+            )
+            outcome = (
+                "blocked"
+                if decision_value == "deny"
+                else ("allowed" if decision_value == "allow" else outcome)
+            )
         payload: dict[str, Any] = {
             "engine": engine_name,
             "decision": decision_value or ("error" if error else "unknown"),

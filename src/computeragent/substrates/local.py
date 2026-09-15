@@ -63,9 +63,7 @@ class LocalSubstrate:
             # "run the agent here").
             return SubstrateHandle(workspace_path=Path.cwd(), close=_noop_close)
 
-        raise TypeError(
-            f"LocalSubstrate.boot: unsupported source type {type(source).__name__}"
-        )
+        raise TypeError(f"LocalSubstrate.boot: unsupported source type {type(source).__name__}")
 
 
 _KNOWN_GIT_HOSTS = (
@@ -136,7 +134,11 @@ async def _rev_parse(workspace: Path) -> str | None:
     """The cloned commit SHA, or None if it can't be read (best-effort)."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(workspace), "rev-parse", "HEAD",
+            "git",
+            "-C",
+            str(workspace),
+            "rev-parse",
+            "HEAD",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -148,7 +150,9 @@ async def _rev_parse(workspace: Path) -> str | None:
     return None
 
 
-async def _git_clone(url: str, credential: Mapping[str, str] | None = None) -> tuple[Path, str | None]:
+async def _git_clone(
+    url: str, credential: Mapping[str, str] | None = None
+) -> tuple[Path, str | None]:
     workspace = Path(tempfile.mkdtemp(prefix="computeragent-substrate-"))
     proc = await asyncio.create_subprocess_exec(
         "git",

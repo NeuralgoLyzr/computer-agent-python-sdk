@@ -156,7 +156,9 @@ def test_no_gateway_needs_no_proxy_for_either_engine():
 def test_a_native_gateway_with_no_base_url_is_refused():
     with pytest.raises(GatewayConfigError, match="no baseUrl"):
         build_gateway_envs(
-            agent(gateway_base_url=None), engine_name="claude-agent-sdk", api_key=KEY,
+            agent(gateway_base_url=None),
+            engine_name="claude-agent-sdk",
+            api_key=KEY,
             llm_proxy_url=PROXY,
         )
 
@@ -184,7 +186,9 @@ def test_provider_prefix_strip_matches_the_ts_engine(given, expected):
 def test_gitagent_gets_an_openai_prefix_so_it_finds_the_right_key():
     """gitclaw resolves its provider from the prefix; without one an
     OpenAI-shaped gateway model fails with 'No API key for provider'."""
-    assert dispatch_model(agent(harness="gitagent"), engine_name="gitagent") == f"openai:{STUDIO_ID}"
+    assert (
+        dispatch_model(agent(harness="gitagent"), engine_name="gitagent") == f"openai:{STUDIO_ID}"
+    )
 
 
 def test_gitagent_does_not_double_prefix_a_model_that_has_one():
@@ -207,7 +211,9 @@ def test_no_model_stays_none():
 def test_gateway_envs_beat_caller_envs():
     merged = merge_envs(
         {"ANTHROPIC_API_KEY": "caller-key", "MY_VAR": "kept"},
-        build_gateway_envs(agent(), engine_name="claude-agent-sdk", api_key=KEY, llm_proxy_url=PROXY),
+        build_gateway_envs(
+            agent(), engine_name="claude-agent-sdk", api_key=KEY, llm_proxy_url=PROXY
+        ),
     )
 
     assert merged["ANTHROPIC_API_KEY"] == KEY
@@ -220,7 +226,9 @@ def test_bedrock_flag_is_dropped_when_a_gateway_resolved():
     id to Bedrock and be rejected as an invalid Bedrock model."""
     merged = merge_envs(
         {"CLAUDE_CODE_USE_BEDROCK": "1"},
-        build_gateway_envs(agent(), engine_name="claude-agent-sdk", api_key=KEY, llm_proxy_url=PROXY),
+        build_gateway_envs(
+            agent(), engine_name="claude-agent-sdk", api_key=KEY, llm_proxy_url=PROXY
+        ),
     )
 
     assert "CLAUDE_CODE_USE_BEDROCK" not in merged

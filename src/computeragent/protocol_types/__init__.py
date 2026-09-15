@@ -18,11 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-IdentitySource = (
-    Path
-    | str
-    | dict[str, Any]
-)
+IdentitySource = Path | str | dict[str, Any]
 """Where the agent definition comes from.
 
 * ``Path`` — local directory, used as workspace ``cwd``.
@@ -50,9 +46,7 @@ class AgentManifest:
     # caller options are overlaid, so loader-declared compliance constraints
     # (e.g. GAP human-in-the-loop → permission mode) win over caller intent.
     # Excluded from equality — callables compare by identity only.
-    harden: Callable[[dict[str, Any]], dict[str, Any]] | None = field(
-        default=None, compare=False
-    )
+    harden: Callable[[dict[str, Any]], dict[str, Any]] | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -190,9 +184,7 @@ class EngineDriver(Protocol):
     name: str
     capabilities: EngineCapabilities
 
-    def start_session(
-        self, ctx: EngineContext
-    ) -> AsyncIterator[EngineEvent]: ...
+    def start_session(self, ctx: EngineContext) -> AsyncIterator[EngineEvent]: ...
 
 
 @runtime_checkable
@@ -226,9 +218,7 @@ class SessionStore(Protocol):
     kind: str
 
     async def create(self, *, project_key: str, session_id: str) -> None: ...
-    async def load(
-        self, *, project_key: str, session_id: str
-    ) -> list[SessionStoreEntry]: ...
+    async def load(self, *, project_key: str, session_id: str) -> list[SessionStoreEntry]: ...
     async def append(
         self,
         *,

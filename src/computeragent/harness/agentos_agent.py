@@ -98,7 +98,9 @@ def api_base(base_url: str) -> str:
     """
     base = base_url.rstrip("/")
     if not base:
-        raise AgentResolveError("base_url is empty — pass the AgentOS API base, e.g. http://host:8788/agentos/api")
+        raise AgentResolveError(
+            "base_url is empty — pass the AgentOS API base, e.g. http://host:8788/agentos/api"
+        )
     if base.endswith("/v1"):
         return base
     if base.endswith("/agentos/api"):
@@ -232,7 +234,9 @@ def resolve_agent(
     except Exception as exc:
         raise AgentResolveError(f"AgentOS returned a non-JSON body from {url}") from exc
     if not isinstance(doc, dict):
-        raise AgentResolveError(f"AgentOS returned {type(doc).__name__}, expected an object, from {url}")
+        raise AgentResolveError(
+            f"AgentOS returned {type(doc).__name__}, expected an object, from {url}"
+        )
 
     _require_supported(doc, agent_id)
     _require_consistent_gateway(doc, agent_id)
@@ -252,7 +256,11 @@ def resolve_agent(
     )
     logger.debug(
         "resolved agent %s name=%r harness=%s gateway=%s model=%s",
-        agent_id, resolved.name, resolved.harness, resolved.gateway_type, resolved.model,
+        agent_id,
+        resolved.name,
+        resolved.harness,
+        resolved.gateway_type,
+        resolved.model,
     )
     return resolved
 
