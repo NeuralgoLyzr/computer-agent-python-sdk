@@ -23,7 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "claude-agent-sdk>=0.2,<0.3",
+    "claude-agent-sdk>=0.2.152,<0.3",
     "typing-extensions>=4.12",
 ]
 
