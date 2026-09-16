@@ -256,8 +256,8 @@ class ComputerAgent:
         # Anthropic-shaped engine runs against a native (OpenAI-shaped)
         # gateway, and unused otherwise — see `gateway_envs`.
         llm_proxy_url: str | None = None,
-        # Only a PRIVATE source needs one. When omitted the SDK tries AgentOS's
-        # GitHub-App credential route, then clones anonymously.
+        # Only a PRIVATE source needs one. Without it the clone is
+        # unauthenticated, which fails for a private repo.
         git_token: str | None = None,
         # ── overrides for what the agent document already answers ────────
         # Use this workspace instead of cloning the agent's own source. A local
@@ -365,8 +365,6 @@ class ComputerAgent:
             telemetry_pipeline=telemetry_pipeline,
             options_overlay=merged_options,
             git_token=git_token,
-            git_credential_api_base=self._api_base,
-            git_credential_token=api_key,
         )
 
     async def __aenter__(self) -> ComputerAgent:

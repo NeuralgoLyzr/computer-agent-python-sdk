@@ -93,13 +93,8 @@ class HarnessCoordinator:
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
         # ── cloning a private source ────────────────────────────────────────
-        # An explicit token wins outright. Without one the AgentOS GitHub-App
-        # route is tried, using these two — which come from the caller's own
-        # config rather than process env, so one process can drive two
-        # deployments without them fighting over a global.
+        # The PAT used to clone a private source, when there is one.
         git_token: str | None = None,
-        git_credential_api_base: str | None = None,
-        git_credential_token: str | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
@@ -129,8 +124,6 @@ class HarnessCoordinator:
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
         self._git_token = git_token
-        self._git_credential_api_base = git_credential_api_base
-        self._git_credential_token = git_credential_token
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -165,42 +158,30 @@ class HarnessCoordinator:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
-    async def _resolve_git_credential(self) -> dict[str, str] | None:
+    def _git_credential(self) -> dict[str, str] | None:
         """Auth for cloning the source, or ``None`` for an anonymous clone.
 
-        An explicit ``git_token`` wins and is used directly. Otherwise AgentOS's
-        GitHub-App route is asked, best-effort: a miss, a misconfiguration, or a
-        deployment without the App installed all leave this ``None``, and a
-        public repo then clones exactly as before.
+        Just the explicit token now. There used to be a middle step that asked
+        AgentOS to mint a GitHub-App installation token, but that route is
+        App-only and these deployments authenticate with PATs — held either
+        directly on the agent or in the Lyzr credential vault behind its
+        `credential_id`, neither of which the App route can return. So the
+        fallback could not succeed, and all it did was turn a missing token
+        into a slower failure.
 
-        The token is handed to the substrate as a credential mapping, not spliced
-        into the clone URL — the substrate injects it as an
-        ``http.<host>.extraHeader``, so it reaches neither argv nor the remote
-        recorded in ``.git/config``. (The TS server splices it into the URL
-        instead, because its envs are dropped by some substrates; locally they
-        never are, so the safer shape is available to us.)
+        The token is handed to the substrate as a credential mapping, not
+        spliced into the clone URL, so it reaches neither argv nor the remote
+        recorded in ``.git/config``.
         """
-        if not isinstance(self._source, str):
+        if not (isinstance(self._source, str) and self._git_token):
             return None
-        if self._git_token:
-            from ..substrates.local import _host_of
+        from ..substrates.local import _host_of
 
-            return {
-                "host": _host_of(self._source),
-                "username": "x-access-token",
-                "token": self._git_token,
-            }
-        if not (self._git_credential_api_base and self._git_credential_token):
-            return None
-        from .git_credential_client import resolve_git_credential
-
-        with suppress(Exception):
-            return await resolve_git_credential(
-                self._source,
-                api_base=self._git_credential_api_base,
-                token=self._git_credential_token,
-            )
-        return None
+        return {
+            "host": _host_of(self._source),
+            "username": "x-access-token",
+            "token": self._git_token,
+        }
 
     async def _ensure_booted(self) -> None:
         if self._disposed:
@@ -216,7 +197,7 @@ class HarnessCoordinator:
             )
         if self._substrate_handle is not None:
             return
-        git_credential = await self._resolve_git_credential()
+        git_credential = self._git_credential()
         self._substrate_handle = await self._substrate.boot(
             source=self._source, envs=self._envs, git_credential=git_credential
         )

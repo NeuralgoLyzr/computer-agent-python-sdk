@@ -114,7 +114,7 @@ def ingest_url() -> str | None:
 
 
 def api_url() -> str | None:
-    """Dashboard v1 API base — agent resolve + git-credentials
+    """Dashboard v1 API base — agent resolve
     (``AGENTOS_API_URL`` override → discovery)."""
     return _resolve("api", "AGENTOS_API_URL")
 

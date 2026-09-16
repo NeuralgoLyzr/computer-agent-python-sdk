@@ -140,7 +140,7 @@ All parameters are **keyword-only**.
 | `base_url` | `str` | **yes** | — | AgentOS API base; three spellings (§3). |
 | `api_key` | `str` | **yes** | — | Lyzr workspace key, sent as `x-api-key`. |
 | `llm_proxy_url` | `str \| None` | conditional | `None` | Required for an Anthropic-shaped engine against a native gateway (§6); unused otherwise. |
-| `git_token` | `str \| None` | conditional | `None` | Only for a **private** source. Without one the SDK tries AgentOS's GitHub-App credential route, then clones anonymously. |
+| `git_token` | `str \| None` | conditional | `None` | Only for a **private** source. A PAT with read access to the repo. Without it the clone is unauthenticated and a private source fails. |
 | `source` | `Path \| str \| dict \| None` | no | agent document's `source` | Workspace override — see below. |
 | `engine` | `str \| EngineDriver \| None` | no | agent document's `harness` | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. An explicit value also selects which gateway-env branch is built. |
 | `options` | `Mapping[str, Any] \| None` | no | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
@@ -512,9 +512,10 @@ The stages, each of which is a thing that can independently be wrong:
   `EngineDriver` passed as `engine=`.
 - **A private source needs `git_token`.** The agent document's `credential_id` is echoed back so you know auth
   is needed, but the SDK **cannot resolve it client-side** — redeeming it requires an operator service token.
-  Without `git_token` the SDK tries AgentOS's GitHub-App credential route (best-effort; any miss,
-  misconfiguration, or deployment without the App installed falls through silently) and then clones
-  anonymously, which fails for a private repo. The failure surfaces as git's own "Authentication failed" stderr — it does not mention `credential_id`, so recognise it by the repo URL.
+  Without `git_token` the clone is unauthenticated and a private source fails. There is no
+  server-side fallback: the AgentOS route that mints clone tokens is GitHub-App-only, while these
+  deployments authenticate with PATs — held on the agent or in the Lyzr credential vault behind its
+  `credential_id` — neither of which that route can return. The failure surfaces as git's own "Authentication failed" stderr — it does not mention `credential_id`, so recognise it by the repo URL.
 - **`budget_max_usd` is not enforced** by either built-in engine; it is carried into `EngineContext` and no
   more. Use `options={"max_budget_usd": ...}` for a cap the Claude CLI actually applies.
 - **`project_key` is inert** in the current wiring — accepted and stored, but the session-store key is owned
