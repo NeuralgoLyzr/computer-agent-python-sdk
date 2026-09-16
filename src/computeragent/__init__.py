@@ -42,7 +42,7 @@ _upstream_all = [n for n in getattr(_cas, "__all__", []) if n != "__version__"]
 for _name in _upstream_all:
     globals()[_name] = getattr(_cas, _name)
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 upstream_version = getattr(_cas, "__version__", "unknown")
 
 # Override the two entry points with the proxied versions. Same signatures,
@@ -63,6 +63,9 @@ from .harness import (  # noqa: E402
     ComputerAgent,
     GatewayConfigError,
     HarnessError,
+    McpBinding,
+    McpBindingError,
+    McpModeUnsupportedError,
     ResolvedAgent,
     UnknownEngineError,
     UnknownIdentityLoaderError,
@@ -145,6 +148,9 @@ _own = [
     "ChatResult",
     "ComputerAgent",
     "AgentResolveError",
+    "McpBinding",
+    "McpBindingError",
+    "McpModeUnsupportedError",
     "GatewayConfigError",
     "ResolvedAgent",
     "UnsupportedAgentError",
