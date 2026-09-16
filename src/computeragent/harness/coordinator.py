@@ -323,14 +323,10 @@ class HarnessCoordinator:
             pipeline=self._pipeline,
         )
 
-        # Pre-load any prior turns from the session store so the engine
-        # can wire them into context. Stored verbatim — the engine
-        # interprets them on its own terms.
-        if self._session_store is not None:
-            with suppress(Exception):
-                await self._session_store.create(
-                    project_key=self._project_key, session_id=session_id
-                )
+        # The session store is threaded into the engine's own options rather
+        # than read here: the SDK mirrors transcript batches to it and
+        # materialises prior entries itself before spawning the subprocess.
+        # Replaying it from this side as well would duplicate the transcript.
 
         await _enqueue_user_message(state.user_queue, message)
 

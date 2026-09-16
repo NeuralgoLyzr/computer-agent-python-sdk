@@ -91,6 +91,20 @@ def _build_options(ctx: EngineContext) -> Any:
             payload[key] = value
 
     payload.setdefault("cwd", str(ctx.workspace_path))
+    # Hand the session store to the SDK itself. It mirrors each transcript
+    # batch to the store and, on a session id the store already knows,
+    # materialises the prior entries before spawning the subprocess — which is
+    # what makes resume work. The harness deliberately does NOT read or replay
+    # the store: doing both would double the transcript.
+    #
+    # The store's key is `(project_key, session_id)` and the SDK owns BOTH:
+    # project_key defaults to the sanitised cwd, and session_id is the CLI's
+    # own uuid unless the caller pins `options["session_id"]`. So resume within
+    # a process works out of the box, while resuming a *specific* past
+    # conversation means pinning that id — our `ca_…` lifecycle id is a
+    # telemetry identifier and deliberately is not forced on the CLI.
+    if ctx.session_store is not None:
+        payload.setdefault("session_store", ctx.session_store)
     if ctx.envs:
         env_existing = dict(payload.get("env") or {})
         env_existing.update(ctx.envs)

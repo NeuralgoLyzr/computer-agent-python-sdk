@@ -20,6 +20,7 @@ def _ctx(options: dict[str, Any], policy_decider: Any = None) -> Any:
         workspace_path="/tmp/ws",
         envs={},
         session_id="ca_test",
+        session_store=None,
         policy_decider=policy_decider,
     )
 

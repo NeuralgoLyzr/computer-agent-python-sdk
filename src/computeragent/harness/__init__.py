@@ -42,7 +42,7 @@ from ..protocol_types import (
     PolicyDecider,
     SessionStore,
 )
-from ..session_stores import resolve_session_store
+from ..session_stores import is_session_store, resolve_session_store
 from ..substrates import LocalSubstrate
 from ..telemetry.pipeline import Pipeline
 from .agentos_agent import (
@@ -272,7 +272,7 @@ class ComputerAgent:
         if session_store is not None:
             resolved_store = (
                 session_store
-                if isinstance(session_store, SessionStore)
+                if is_session_store(session_store)
                 else resolve_session_store(session_store)
             )
 

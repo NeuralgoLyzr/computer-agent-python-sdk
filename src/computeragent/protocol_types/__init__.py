@@ -18,6 +18,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
+# The session-store axis is the UPSTREAM contract, re-exported rather than
+# redefined. The TS stores implement `SessionStore` from
+# `@anthropic-ai/claude-agent-sdk`; its Python twin is what
+# `ClaudeAgentOptions.session_store` accepts, so any store written against it
+# is handed straight to the engine with no adapter in between. A local
+# lookalike would have to be translated at the boundary and would drift.
+#
+# Note it is deliberately NOT runtime-checkable upstream: only `append` and
+# `load` are required and call sites probe for the rest, so a store is
+# duck-typed, never isinstance-checked.
+from claude_agent_sdk.types import (  # noqa: F401
+    SessionKey,
+    SessionStore,
+    SessionStoreEntry,
+)
+
 IdentitySource = Path | str | dict[str, Any]
 """Where the agent definition comes from.
 
@@ -137,21 +153,6 @@ class EngineContext:
     budget_max_usd: float | None = None
 
 
-@dataclass(frozen=True)
-class SessionStoreEntry:
-    """One row written to a :class:`SessionStore`.
-
-    Stored verbatim — the harness does not redact ``content``. PII redaction
-    happens earlier in the telemetry pipeline; session stores are the
-    *resumability* layer, not the audit layer.
-    """
-
-    role: Literal["user", "assistant", "system", "tool"]
-    content: Any
-    timestamp: float
-    metadata: Mapping[str, Any] | None = None
-
-
 @dataclass
 class SubstrateHandle:
     """What a :class:`Substrate` returns from ``boot``.
@@ -205,28 +206,6 @@ class Substrate(Protocol):
         envs: Mapping[str, str],
         git_credential: Mapping[str, str] | None = None,
     ) -> SubstrateHandle: ...
-
-
-@runtime_checkable
-class SessionStore(Protocol):
-    """Append-only conversation log keyed by ``(project_key, session_id)``.
-
-    The harness uses this for resumability, NOT for telemetry. Telemetry
-    sinks (OTel, AgentOS) consume :class:`TelemetryEvent`s separately.
-    """
-
-    kind: str
-
-    async def create(self, *, project_key: str, session_id: str) -> None: ...
-    async def load(self, *, project_key: str, session_id: str) -> list[SessionStoreEntry]: ...
-    async def append(
-        self,
-        *,
-        project_key: str,
-        session_id: str,
-        entry: SessionStoreEntry,
-    ) -> None: ...
-    async def delete(self, *, project_key: str, session_id: str) -> None: ...
 
 
 @runtime_checkable

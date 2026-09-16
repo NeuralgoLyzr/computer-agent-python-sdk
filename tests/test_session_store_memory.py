@@ -1,96 +1,117 @@
-"""Coverage for the in-memory session store."""
+"""The in-process store, and the contract every store shares.
+
+These assertions are the contract, not implementation detail: the SDK
+distinguishes "never written" from "written and empty", and dedupes on ``uuid``
+only where one is present.
+"""
 
 from __future__ import annotations
 
-import asyncio
+from computeragent.session_stores import InMemorySessionStore
 
-import pytest
-
-from computeragent.protocol_types import SessionStoreEntry
-from computeragent.session_stores import (
-    InMemorySessionStore,
-    resolve_session_store,
-)
+KEY = {"project_key": "proj", "session_id": "sess-1"}
 
 
-@pytest.mark.asyncio
-async def test_append_load_preserves_order():
+def entry(uuid: str | None = None, **extra):
+    e = {"type": "user", **extra}
+    if uuid:
+        e["uuid"] = uuid
+    return e
+
+
+async def test_load_of_an_unwritten_key_is_none():
+    assert await InMemorySessionStore().load(KEY) is None
+
+
+async def test_round_trip():
     store = InMemorySessionStore()
-    await store.create(project_key="p", session_id="s")
-    for i in range(5):
-        await store.append(
-            project_key="p",
-            session_id="s",
-            entry=SessionStoreEntry(role="user", content=f"msg-{i}", timestamp=float(i)),
-        )
+    await store.append(KEY, [entry("a"), entry("b")])
 
-    entries = await store.load(project_key="p", session_id="s")
-    assert [e.content for e in entries] == [f"msg-{i}" for i in range(5)]
+    loaded = await store.load(KEY)
+
+    assert loaded is not None
+    assert [e["uuid"] for e in loaded] == ["a", "b"]
 
 
-@pytest.mark.asyncio
-async def test_delete_clears_slot():
+async def test_uuid_dedup_across_repeated_batches():
     store = InMemorySessionStore()
-    await store.create(project_key="p", session_id="s")
-    await store.append(
-        project_key="p",
-        session_id="s",
-        entry=SessionStoreEntry(role="user", content="x", timestamp=1.0),
-    )
-    await store.delete(project_key="p", session_id="s")
-    assert await store.load(project_key="p", session_id="s") == []
+    await store.append(KEY, [entry("a"), entry("b")])
+    await store.append(KEY, [entry("b"), entry("c")])
+
+    loaded = await store.load(KEY)
+
+    assert [e["uuid"] for e in loaded] == ["a", "b", "c"]
 
 
-@pytest.mark.asyncio
-async def test_session_isolation_by_key():
-    """Two sessions under the same project — appends to one do not bleed."""
+async def test_entries_without_a_uuid_always_append():
+    """Titles, tags and mode markers carry no uuid; deduping them would drop
+    content that is legitimately repeated."""
     store = InMemorySessionStore()
-    await store.append(
-        project_key="p",
-        session_id="s1",
-        entry=SessionStoreEntry(role="user", content="hello", timestamp=1.0),
-    )
-    await store.append(
-        project_key="p",
-        session_id="s2",
-        entry=SessionStoreEntry(role="user", content="world", timestamp=2.0),
-    )
-    assert len(await store.load(project_key="p", session_id="s1")) == 1
-    assert len(await store.load(project_key="p", session_id="s2")) == 1
+    await store.append(KEY, [entry(), entry()])
+
+    assert len(await store.load(KEY)) == 2
 
 
-@pytest.mark.asyncio
-async def test_concurrent_appends_preserve_all_entries():
-    """Async-Lock guard means even N concurrent producers all land."""
+async def test_an_empty_batch_is_a_no_op():
     store = InMemorySessionStore()
-    n = 50
+    await store.append(KEY, [])
 
-    async def _writer(i: int) -> None:
-        await store.append(
-            project_key="p",
-            session_id="s",
-            entry=SessionStoreEntry(role="user", content=f"x-{i}", timestamp=float(i)),
-        )
-
-    await asyncio.gather(*(_writer(i) for i in range(n)))
-    assert len(await store.load(project_key="p", session_id="s")) == n
+    assert await store.load(KEY) is None
 
 
-@pytest.mark.asyncio
-async def test_registry_resolves_memory():
-    store = resolve_session_store("memory")
-    assert store.kind == "memory"
-    # The registry returns a module-level singleton — separate calls
-    # see the same store. Verified by writing once and reading from
-    # a fresh resolve.
-    await store.append(
-        project_key="p",
-        session_id="registry-roundtrip",
-        entry=SessionStoreEntry(role="user", content="probe", timestamp=1.0),
-    )
-    again = resolve_session_store("memory")
-    assert again is store
-    entries = await again.load(project_key="p", session_id="registry-roundtrip")
-    assert len(entries) == 1
-    # Cleanup so this test is idempotent.
-    await store.delete(project_key="p", session_id="registry-roundtrip")
+async def test_subpath_is_a_separate_transcript():
+    """Sub-agent transcripts share the session id; folding them into the main
+    one would corrupt both."""
+    store = InMemorySessionStore()
+    sub = {**KEY, "subpath": "subagents/agent-1"}
+
+    await store.append(KEY, [entry("main")])
+    await store.append(sub, [entry("child")])
+
+    assert [e["uuid"] for e in await store.load(KEY)] == ["main"]
+    assert [e["uuid"] for e in await store.load(sub)] == ["child"]
+
+
+async def test_sessions_are_isolated_by_project():
+    store = InMemorySessionStore()
+    await store.append(KEY, [entry("a")])
+
+    assert await store.load({**KEY, "project_key": "other"}) is None
+
+
+async def test_delete_removes_the_transcript():
+    store = InMemorySessionStore()
+    await store.append(KEY, [entry("a")])
+
+    await store.delete(KEY)
+
+    assert await store.load(KEY) is None
+
+
+async def test_delete_clears_the_dedup_memory_too():
+    """Otherwise a re-appended entry would be silently swallowed after a
+    delete, leaving the transcript permanently short."""
+    store = InMemorySessionStore()
+    await store.append(KEY, [entry("a")])
+    await store.delete(KEY)
+
+    await store.append(KEY, [entry("a")])
+
+    assert len(await store.load(KEY)) == 1
+
+
+async def test_list_sessions_excludes_subagent_transcripts():
+    store = InMemorySessionStore()
+    await store.append(KEY, [entry("a")])
+    await store.append({**KEY, "subpath": "subagents/agent-1"}, [entry("b")])
+
+    listed = await store.list_sessions("proj")
+
+    assert [s["session_id"] for s in listed] == ["sess-1"]
+
+
+def test_satisfies_the_duck_typed_contract():
+    from computeragent.session_stores import is_session_store
+
+    assert is_session_store(InMemorySessionStore())
+    assert not is_session_store(object())
