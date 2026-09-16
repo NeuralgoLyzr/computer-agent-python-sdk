@@ -106,7 +106,7 @@ an unsupported agent shape raises before anything boots. The workspace is materi
 | `base_url` | The AgentOS deployment's API base, e.g. `http://localhost:8788/agentos/api` for the local docker stack, or your deployed AgentOS host. Three spellings accepted — see below. |
 | `api_key` | Your **Lyzr workspace key**, from the Lyzr Studio / AgentOS workspace settings ("API keys"). It travels as the `x-api-key` header. |
 | `llm_proxy_url` | The base URL of the Anthropic-to-OpenAI translating proxy you (or your platform team) run, e.g. `http://127.0.0.1:8786`. It has a `/health` endpoint you can curl. Required only in the case in §6. |
-| `git_token` | A git host PAT with read access to the agent's source repo (GitHub: Settings → Developer settings → personal access tokens; `repo`/`contents:read` scope). Only for a **private** source. |
+| `git_token` | A git host PAT with read access to the agent's source repo (GitHub → Settings → Developer settings → tokens; `contents:read`). **Required** for a private source — there is no server-side fallback, see §12. Or sidestep it with `source=Path(...)`. |
 
 ### `base_url` — three accepted spellings
 
@@ -147,12 +147,11 @@ All parameters are **keyword-only**.
 | `envs` | `Mapping[str, str] \| None` | no | `None` | Extra environment for the engine subprocess. Gateway envs are layered **over** yours. |
 | `session_store` | `str \| SessionStore \| Mapping \| None` | no | `None` (no store) | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
 | `session_id` | `str \| None` | no | generated `ca_…` | Pins the **telemetry** lifecycle session id. Does not pin the CLI's own session id — for that set `options={"session_id": ...}`. |
-| `project_key` | `str` | no | `"default"` | Accepted and carried, but the harness does not currently thread it into the session-store key — the Claude SDK derives its own project key from the workspace cwd. |
 | `agent_name` | `str \| None` | no | agent document's `name` | Telemetry label only. |
 | `agent_description` | `str \| None` | no | `None` | Telemetry label only. |
 | `policy_decider` | `PolicyDecider \| None` | no | `None` | Async `(tool_name, tool_input, context) -> decision`. E.g. `computeragent.PolicyToolAuthorizer` (§9). |
 | `on_tool_call` | `Callable[[PermissionRequest], Awaitable[dict]] \| None` | no | `None` | Per-tool gate callback. Consulted **after** `policy_decider`; default when neither is set is allow. |
-| `budget_max_usd` | `float \| None` | no | `None` | Carried into `EngineContext`. **No built-in engine enforces it today** — treat it as advisory metadata, or set `options={"max_budget_usd": ...}` which the Claude CLI does honour. |
+| `budget_max_usd` | `float \| None` | no | `None` | Maps to the `max_budget_usd` option the Claude CLI enforces. An explicit `options={"max_budget_usd": ...}` wins. |
 | `telemetry_pipeline` | `Pipeline \| None` | no | the module-level pipeline | Override the telemetry pipeline for this agent (§9). |
 
 ### `source` — how a value is interpreted
@@ -516,11 +515,12 @@ The stages, each of which is a thing that can independently be wrong:
   server-side fallback: the AgentOS route that mints clone tokens is GitHub-App-only, while these
   deployments authenticate with PATs — held on the agent or in the Lyzr credential vault behind its
   `credential_id` — neither of which that route can return. The failure surfaces as git's own "Authentication failed" stderr — it does not mention `credential_id`, so recognise it by the repo URL.
-- **`budget_max_usd` is not enforced** by either built-in engine; it is carried into `EngineContext` and no
-  more. Use `options={"max_budget_usd": ...}` for a cap the Claude CLI actually applies.
-- **`project_key` is inert** in the current wiring — accepted and stored, but the session-store key is owned
-  by the Claude SDK, which derives its project key from the workspace cwd.
-- **An inline `dict` source does not materialise files.** The workspace falls back to the process's cwd.
+- **An inline `dict` source carrying `files` is refused** — the files are not materialised and the
+  workspace would fall back to the process's cwd, running the agent against your current directory.
+- **Concurrent `chat()`s on one instance are refused.** One instance is one conversation with one
+  workspace and one engine session; run concurrent work as separate instances.
+- **A turn has no timeout and nothing retries.** Impose your own with `asyncio.wait_for`.
+- **Unknown `options` keys are dropped**, though now with a warning naming them.
 - **`cancel()` is cooperative**, not a kill — the engine stops at its next checkpoint.
 - **`gitagent` tool execution is MCP-only**; the engine does not run filesystem tools itself.
 
@@ -586,3 +586,31 @@ cooperative and cannot enforce a deadline on a wedged turn.
 `capture_content` defaults to **False**. To silence telemetry entirely for one agent, pass
 `telemetry_pipeline=Pipeline(sinks=[])` — `COMPUTERAGENT_OTEL=disabled` only stops the OTel sink. With
 the `otel` extra installed and no OTLP endpoint, the console exporter prints traces to stdout.
+
+
+---
+
+## 14. Cloning a private source
+
+The agent document's `credential_id` tells you a private source needs auth. **The SDK cannot redeem
+it** — resolving a vault credential requires an operator service token that no client should hold.
+
+So there is exactly one way, and no fallback:
+
+```python
+ComputerAgent(..., git_token="<PAT with read access>")
+```
+
+The token is handed to the substrate as a credential mapping and injected as an
+`http.<host>.extraHeader`, so it reaches neither `argv` nor the remote recorded in `.git/config`.
+
+Without it the clone is unauthenticated and a private source fails with git's own
+`Authentication failed` — which does **not** mention `credential_id`, so recognise it by the repo URL.
+
+If you would rather not hand-carry a PAT, pass `source=Path("/local/checkout")` and skip the clone
+entirely. That is the quickest way to work on a private agent while debugging.
+
+> Earlier versions tried AgentOS's `/git-credentials/resolve` as a middle step. That route is
+> GitHub-App-only, while these deployments authenticate with PATs — held on the agent or in the Lyzr
+> credential vault — so it could never return a usable token. It was removed in 0.4.3 rather than left
+> to turn a missing token into a slower, less legible failure.

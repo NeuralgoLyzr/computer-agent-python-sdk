@@ -5,6 +5,28 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-09-16
+
+### Removed
+
+- **The GitHub-App credential fallback.** The chain was `git_token=` →
+  AgentOS's `/git-credentials/resolve` → anonymous clone; the middle step is
+  gone. That route is App-only (`githubAppConfigured()` then
+  `mintInstallationToken()`), while these deployments authenticate with PATs —
+  held on the agent as `gitToken`, or in the Lyzr credential vault behind its
+  `credential_id`. The App route can return neither, so the fallback could not
+  succeed; it only turned a missing token into a slower, less legible failure,
+  since `resolve_git_credential` swallowed every outcome and a 403, a 404 and a
+  503 all surfaced as an anonymous clone failing on git auth.
+- `harness/git_credential_client.py`, the two coordinator parameters that
+  existed only to reach that route, and `test_git_credentials_integration.py` —
+  which had been failing continuously while exercising infrastructure these
+  deployments do not use. Integration is now green.
+
+The substrate's credential injection is unchanged: an explicit token is still
+handed over as a mapping and injected as an `http.<host>.extraHeader`, so it
+reaches neither argv nor `.git/config`.
+
 ## [0.4.2] — 2026-09-16
 
 ### Changed
