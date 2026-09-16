@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("computeragent.agentos_agent")
 
@@ -96,6 +97,11 @@ def api_base(base_url: str) -> str:
     so a trailing slash, or a base that already carries the version, never
     produces a doubled path.
     """
+    if not isinstance(base_url, str):
+        raise AgentResolveError(
+            f"base_url must be a string, got {type(base_url).__name__} — pass the AgentOS API "
+            "base, e.g. http://host:8788/agentos/api"
+        )
     base = base_url.rstrip("/")
     if not base:
         raise AgentResolveError(
@@ -105,6 +111,17 @@ def api_base(base_url: str) -> str:
         return base
     if base.endswith("/agentos/api"):
         return f"{base}/v1"
+    # Only a BARE ORIGIN gets the standard path appended. Appending to anything
+    # else turned one typo — `…/agentos/apiv1` — into
+    # `…/agentos/apiv1/agentos/api/v1`, and the 404 that came back blamed the
+    # caller's agent id, sending them to look in entirely the wrong place.
+    parsed = urlsplit(base)
+    if parsed.path:
+        raise AgentResolveError(
+            f"base_url {base_url!r} has a path this SDK does not recognise. Expected a bare origin "
+            "(http://host:8788), the API base (…/agentos/api), or the versioned base "
+            "(…/agentos/api/v1)."
+        )
     return f"{base}/agentos/api/v1"
 
 

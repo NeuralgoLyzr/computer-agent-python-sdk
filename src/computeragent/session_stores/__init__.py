@@ -70,8 +70,14 @@ def resolve_session_store(spec: str | Mapping[str, Any]) -> SessionStore:
             raise UnknownSessionStoreError(
                 f"session store descriptor needs a string 'kind'; got {spec!r}"
             )
-    else:
+    elif isinstance(spec, str):
         kind, options = spec, None
+    else:
+        raise UnknownSessionStoreError(
+            f"session_store must be a registered kind, a {{'kind': …}} descriptor, or a store "
+            f"instance, got {type(spec).__name__}. A store needs callable `append` and `load`; "
+            f"registered kinds: {sorted(_REGISTRY)!r}"
+        )
 
     try:
         builder = _REGISTRY[kind]

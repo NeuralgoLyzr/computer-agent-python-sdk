@@ -125,7 +125,14 @@ def build_gateway_envs(
                 "http://127.0.0.1:8786). Without it the engine would POST Anthropic Messages "
                 f"at {base}, which is an OpenAI endpoint, and get a 405."
             )
-        anthropic_base = f"{llm_proxy_url.rstrip('/')}/up/{b64url(base)}"
+        proxy = llm_proxy_url.rstrip("/")
+        if not proxy.startswith(("http://", "https://")):
+            raise GatewayConfigError(
+                f"llm_proxy_url must be an http(s) URL, got {llm_proxy_url!r}. It is concatenated "
+                "into ANTHROPIC_BASE_URL, so a malformed value would not fail until the engine "
+                "tried to reach it mid-run."
+            )
+        anthropic_base = f"{proxy}/up/{b64url(base)}"
     else:
         anthropic_base = gitclaw_base
 

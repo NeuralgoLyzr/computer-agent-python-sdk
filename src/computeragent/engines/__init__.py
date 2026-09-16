@@ -34,6 +34,12 @@ def register_engine(name: str, engine: EngineDriver) -> None:
 
 
 def resolve_engine(name: str) -> EngineDriver:
+    if not isinstance(name, str):
+        raise UnknownEngineError(
+            f"engine must be a registered name or an EngineDriver instance, got "
+            f"{type(name).__name__}. An EngineDriver needs a `name`, `capabilities` and "
+            f"`start_session`; registered names: {sorted(_REGISTRY)!r}"
+        )
     try:
         return _REGISTRY[name]
     except KeyError as exc:

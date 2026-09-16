@@ -115,7 +115,10 @@ from .telemetry import (  # noqa: E402
     shutdown,
 )
 
-__all__ = sorted({*_upstream_all, "__version__"}) + [
+# Our own additions, minus anything upstream already exports — `SessionStore`
+# and `SessionStoreEntry` are re-exported from `claude_agent_sdk.types`, so
+# listing them here too put them in `__all__` twice.
+_own = [
     # telemetry + policy add-ons (alphabetical at the tail so the public
     # symbol list stays scannable when grepped against `claude_agent_sdk.__all__`)
     "GuardrailFilter",
@@ -165,3 +168,4 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "UnknownSubstrateError",
     "UsageRollup",
 ]
+__all__ = sorted({*_upstream_all, "__version__"}) + [n for n in _own if n not in set(_upstream_all)]

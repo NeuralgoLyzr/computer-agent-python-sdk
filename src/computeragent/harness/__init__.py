@@ -104,13 +104,14 @@ class ChatHandle:
         self._state: _SessionState | None = None
         self._stream: AsyncIterator[Any] | None = None
         self._drained = False
+        self._cancelled = False
         self._result: ChatResult | None = None
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[Any]:
-        if self._drained:
+        if self._drained or self._cancelled:
             return
         if self._stream is None:
             self._state, self._stream = await self._coordinator.run_chat(self._message)
@@ -141,8 +142,15 @@ class ChatHandle:
         return self._state.usage
 
     async def cancel(self) -> None:
-        """Signal the engine to stop iterating at its next checkpoint."""
+        """Signal the engine to stop at its next checkpoint.
+
+        Cancelling before the first iteration marks the handle so the run never
+        starts — previously it was a silent no-op and the turn then ran to
+        completion, which is the opposite of what was asked.
+        """
+        self._cancelled = True
         if self._state is None:
+            self._drained = True
             return
         self._state.cancel_event.set()
         with suppress(asyncio.QueueFull):
@@ -157,6 +165,40 @@ class ChatHandle:
             usage=self._state.usage,
             duration_ms=duration_ms,
         )
+
+
+def _validate_source(source: IdentitySource) -> None:
+    """Reject a source that cannot possibly work, while we can still say why.
+
+    Only three argument shapes fail at construction otherwise; a bad `source`
+    used to sail through and surface much later from inside the engine, or —
+    worse — not at all. An empty string is the dangerous one: `Path("")` is
+    `Path(".")`, so a config value that read as blank quietly pointed a
+    bypassPermissions agent at whatever directory the process happened to be in.
+    """
+    if isinstance(source, dict):
+        return
+    if isinstance(source, str):
+        if not source.strip():
+            raise AgentResolveError(
+                "source is an empty string, which would resolve to the current working directory "
+                "and run the agent against it. Pass a real path, a git URL, or omit it to use the "
+                "agent's own source."
+            )
+        return
+    if isinstance(source, Path):
+        if not source.exists():
+            raise AgentResolveError(
+                f"source path does not exist: {source}. The workspace is materialised on the first "
+                "chat, so this would otherwise surface from inside the engine."
+            )
+        if not source.is_dir():
+            raise AgentResolveError(f"source path is not a directory: {source}")
+        return
+    raise AgentResolveError(
+        f"source must be a Path, a git URL/path string, or an inline dict — got "
+        f"{type(source).__name__}."
+    )
 
 
 class _AutoIdentityLoader:
@@ -272,6 +314,8 @@ class ComputerAgent:
                 "workspace with source=Path('...') or register a source on the agent."
             )
 
+        _validate_source(effective_source)
+
         resolved_store: SessionStore | None = None
         if session_store is not None:
             if is_session_store(session_store):
@@ -280,6 +324,17 @@ class ComputerAgent:
                 resolved_store = resolve_session_store(
                     cast("str | Mapping[str, Any]", session_store)
                 )
+
+        # `on_tool_call` is only consulted by engines that emit permission
+        # requests. On claude-agent-sdk gating runs through `policy_decider`,
+        # so a caller who passes only this believes they have a tool gate and
+        # has none — too dangerous to leave silent.
+        if on_tool_call is not None and engine_name == "claude-agent-sdk":
+            logger.warning(
+                "on_tool_call is set but the %r engine never emits permission requests, so it will "
+                "not be consulted. Use policy_decider= to gate tool calls on this engine.",
+                engine_name,
+            )
 
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
