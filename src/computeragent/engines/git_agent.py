@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from ..protocol_types import (
@@ -144,7 +144,7 @@ async def _run_anthropic_session(
     * ``constraints.max_tokens`` → ``max_tokens``
     * ``tools_hint`` → not wired in 0.2.0 (MCP-only)
     """
-    client = _build_anthropic_client()
+    client = _build_anthropic_client(ctx.envs)
 
     system_prompt: str = manifest_options.get("system_prompt", "") or ""
     max_turns: int = int(manifest_options.get("max_turns", _DEFAULT_MAX_TURNS))
@@ -267,17 +267,32 @@ async def _run_anthropic_session(
         prior_turns.append({"user": user_msg, "assistant": final_assistant_text})
 
 
-def _build_anthropic_client() -> Any:
+def _env(envs: Mapping[str, str] | None, name: str) -> str | None:
+    """The harness-supplied value first, the process environment second.
+
+    The harness hands an engine its environment on ``EngineContext.envs`` and
+    never exports it to ``os.environ`` — so reading only the process env made
+    every gateway-routed value the coordinator computed invisible here, and a
+    gateway-bound gitagent run failed claiming the variable was unset when the
+    harness had in fact supplied it. The process env stays as the fallback for
+    a standalone engine used outside the harness.
+    """
+    value = (envs or {}).get(name)
+    return value if value else os.environ.get(name)
+
+
+def _build_anthropic_client(envs: Mapping[str, str] | None = None) -> Any:
     try:
         import anthropic  # type: ignore
     except ImportError as exc:
         raise ImportError(_MISSING_ANTHROPIC_HINT) from exc
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = _env(envs, "ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "GitAgentEngine (Anthropic backend) requires ANTHROPIC_API_KEY in the environment."
+            "GitAgentEngine (Anthropic backend) requires ANTHROPIC_API_KEY — supply it via the "
+            "agent's model gateway, ComputerAgent(envs=...), or the process environment."
         )
-    base_url = os.environ.get("ANTHROPIC_BASE_URL")
+    base_url = _env(envs, "ANTHROPIC_BASE_URL")
     kwargs: dict[str, Any] = {"api_key": api_key}
     if base_url:
         kwargs["base_url"] = base_url
@@ -293,7 +308,7 @@ async def _run_openai_session(
     manifest_options: dict[str, Any],
     model: str,
 ) -> AsyncIterator[EngineEvent]:
-    client = _build_openai_client()
+    client = _build_openai_client(ctx.envs)
 
     system_prompt: str = manifest_options.get("system_prompt", "") or ""
     max_turns: int = int(manifest_options.get("max_turns", _DEFAULT_MAX_TURNS))
@@ -381,21 +396,23 @@ async def _run_openai_session(
         prior_turns.append({"user": user_msg, "assistant": final_assistant_text})
 
 
-def _build_openai_client() -> Any:
+def _build_openai_client(envs: Mapping[str, str] | None = None) -> Any:
     try:
         import openai  # type: ignore
     except ImportError as exc:
         raise ImportError(_MISSING_OPENAI_HINT) from exc
 
-    base_url = os.environ.get("GITCLAW_MODEL_BASE_URL")
-    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = _env(envs, "GITCLAW_MODEL_BASE_URL")
+    api_key = _env(envs, "OPENAI_API_KEY")
     if not base_url:
         raise RuntimeError(
-            "GitAgentEngine (OpenAI backend) requires GITCLAW_MODEL_BASE_URL in the environment."
+            "GitAgentEngine (OpenAI backend) requires GITCLAW_MODEL_BASE_URL — supply it via the "
+            "agent's model gateway, ComputerAgent(envs=...), or the process environment."
         )
     if not api_key:
         raise RuntimeError(
-            "GitAgentEngine (OpenAI backend) requires OPENAI_API_KEY in the environment."
+            "GitAgentEngine (OpenAI backend) requires OPENAI_API_KEY — supply it via the agent's "
+            "model gateway, ComputerAgent(envs=...), or the process environment."
         )
     return openai.AsyncOpenAI(base_url=base_url, api_key=api_key)
 

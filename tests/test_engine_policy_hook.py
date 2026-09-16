@@ -21,6 +21,7 @@ def _ctx(options: dict[str, Any], policy_decider: Any = None) -> Any:
         envs={},
         session_id="ca_test",
         session_store=None,
+        resume_session_id=None,
         policy_decider=policy_decider,
     )
 

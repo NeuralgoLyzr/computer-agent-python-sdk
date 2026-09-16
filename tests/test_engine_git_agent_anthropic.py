@@ -127,7 +127,7 @@ async def test_anthropic_backend_single_turn(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_anthropic_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -181,7 +181,7 @@ async def test_anthropic_backend_tool_use_routes_through_permission(monkeypatch)
     fake_client.messages.create = AsyncMock(side_effect=[first, second])
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_anthropic_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -246,7 +246,7 @@ async def test_anthropic_multi_turn_carries_context(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_anthropic_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()

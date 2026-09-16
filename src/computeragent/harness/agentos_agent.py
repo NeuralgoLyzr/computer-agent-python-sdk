@@ -128,6 +128,25 @@ def model_of(doc: dict[str, Any]) -> str | None:
     return None
 
 
+def require_runnable_harness(agent: ResolvedAgent, *, engine_given: bool) -> None:
+    """Refuse a harness with no Python implementation — unless the caller
+    brought their own engine.
+
+    Deliberately NOT part of document validation: whether a harness can run is a
+    property of (document, caller's engine), not of the document alone. Checking
+    it during resolution made the documented escape hatch a lie — the error told
+    you to pass ``engine=``, and passing it changed nothing because resolution
+    had already refused.
+    """
+    if engine_given or agent.harness in BUILTIN_HARNESSES:
+        return
+    raise UnsupportedAgentError(
+        f"agent {agent.agent_id}: harness={agent.harness!r} has no Python implementation in this "
+        f"SDK (built-ins: {', '.join(sorted(BUILTIN_HARNESSES))}). Pass engine= with your own "
+        "EngineDriver to run it anyway, or re-register the agent on a supported harness."
+    )
+
+
 def _require_supported(doc: dict[str, Any], agent_id: str) -> None:
     """Refuse agent shapes this run mode does not implement, naming the field.
 
@@ -135,14 +154,6 @@ def _require_supported(doc: dict[str, Any], agent_id: str) -> None:
     TS ``defaultEnvsFor`` produces when nothing resolves. Only a **generic**
     gateway is refused, because its upstream contract differs.
     """
-    harness = doc.get("harness")
-    if harness not in BUILTIN_HARNESSES:
-        raise UnsupportedAgentError(
-            f"agent {agent_id}: harness={harness!r} has no Python implementation in this SDK "
-            f"(built-ins: {', '.join(sorted(BUILTIN_HARNESSES))}). Pass engine= with a custom "
-            "EngineDriver to run it anyway."
-        )
-
     gateway = doc.get("model_gateway")
     if isinstance(gateway, dict):
         gateway_type = gateway.get("type")
@@ -312,6 +323,7 @@ def _raise_for_status(resp: Any, *, agent_id: str, url: str) -> None:
 
 __all__ = [
     "BUILTIN_HARNESSES",
+    "require_runnable_harness",
     "AgentResolveError",
     "ResolvedAgent",
     "UnsupportedAgentError",

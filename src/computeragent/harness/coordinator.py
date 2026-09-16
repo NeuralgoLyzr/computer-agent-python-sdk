@@ -32,7 +32,7 @@ from ..protocol_types import (
 )
 from ..telemetry import TelemetryEvent, get_pipeline, new_session_id
 from ..telemetry.pipeline import Pipeline
-from .errors import HarnessProtocolError
+from .errors import HarnessError, HarnessProtocolError
 from .usage import UsageRollup
 
 logger = logging.getLogger("computeragent.harness")
@@ -152,6 +152,10 @@ class HarnessCoordinator:
         self._lifecycle_usage: UsageRollup = UsageRollup()
         self._lifecycle_last_assistant_text: str = ""
         self._lifecycle_last_result_payload: Any = None
+        # The engine's own session id from the last turn. One ComputerAgent is
+        # one conversation, so each turn after the first resumes from this
+        # rather than starting a fresh engine session with no memory.
+        self._engine_session_id: str | None = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -193,6 +197,17 @@ class HarnessCoordinator:
         return None
 
     async def _ensure_booted(self) -> None:
+        if self._disposed:
+            # `dispose()` closes the substrate handle but leaves it set, so
+            # without this the short-circuit below would sail past and run the
+            # turn with `cwd` pointing at a temp directory that has been
+            # removed — and because `_disposed` is already True, the closing
+            # `dispose()` would be a no-op, so that turn would emit no
+            # `session_ended` and clean nothing up.
+            raise HarnessError(
+                "this ComputerAgent has been disposed — build a new one rather than reusing it. "
+                "Its workspace is gone and its session is closed."
+            )
         if self._substrate_handle is not None:
             return
         git_credential = await self._resolve_git_credential()
@@ -266,6 +281,17 @@ class HarnessCoordinator:
                 duration_ms=duration_ms,
                 last_assistant_text=self._lifecycle_last_assistant_text,
             )
+            # That payload is the LAST TURN's result message, so its usage
+            # describes one turn. This row describes the conversation, so the
+            # summed lifecycle totals replace it — otherwise every multi-turn
+            # run is billed as its final turn alone.
+            ev.payload["usage"] = {
+                "input_tokens": self._lifecycle_usage.input_tokens,
+                "output_tokens": self._lifecycle_usage.output_tokens,
+                "cache_creation_input_tokens": self._lifecycle_usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": self._lifecycle_usage.cache_read_input_tokens,
+            }
+            ev.payload["total_cost_usd"] = self._lifecycle_usage.cost_usd
         else:
             # Engine never yielded a ResultMessage (gitagent path) —
             # build a payload from the cumulative usage rollup instead.
@@ -341,6 +367,7 @@ class HarnessCoordinator:
             session_store=self._session_store,
             policy_decider=self._policy_decider,
             budget_max_usd=self._budget_max_usd,
+            resume_session_id=self._engine_session_id,
         )
 
         # session_started fires ONCE per ComputerAgent lifecycle so AgentOS
@@ -403,11 +430,20 @@ class HarnessCoordinator:
         first_token_emitted = False
         try:
             async for ev in self._engine.start_session(ctx):
+                if ev.kind == "sdk_message":
+                    # Remember the engine's own session id so the next turn can
+                    # resume this conversation. It appears on every message the
+                    # CLI emits; the first one we see is the one to keep.
+                    engine_sid = getattr(ev.payload, "session_id", None)
+                    if isinstance(engine_sid, str) and engine_sid:
+                        self._engine_session_id = engine_sid
                 if ev.kind == "usage_snapshot":
                     state.usage.absorb(ev)
-                    # Also roll into lifecycle totals for the eventual
-                    # session_ended row.
-                    self._lifecycle_usage.absorb(ev)
+                    # The LIFECYCLE total is summed from finished turns at the
+                    # bottom of this function, not from these snapshots: a
+                    # cumulative engine restarts its counters each turn, so
+                    # absorbing them here would leave the conversation billed
+                    # as its final turn alone.
                     # Forward as a synthetic ResultMessage-shaped telemetry
                     # event so the existing OTel sink picks it up.
                     await self._emit(
@@ -510,6 +546,9 @@ class HarnessCoordinator:
                 self._lifecycle_last_assistant_text = last_assistant_text
             if result_payload is not None:
                 self._lifecycle_last_result_payload = result_payload
+            # This turn is over and `state.usage` is final — fold it into the
+            # conversation total that `session_ended` reports.
+            self._lifecycle_usage.add(state.usage)
             # Drain pending sink tasks for THIS chat so the next chat's
             # user_message lands AFTER this chat's assistant_message in
             # ``sessions[].entries``. ``Pipeline.emit`` schedules sink

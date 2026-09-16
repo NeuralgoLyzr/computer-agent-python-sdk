@@ -50,6 +50,7 @@ from .agentos_agent import (
     ResolvedAgent,
     UnsupportedAgentError,
     api_base,
+    require_runnable_harness,
     resolve_agent,
 )
 from .coordinator import HarnessCoordinator, _SessionState
@@ -240,7 +241,10 @@ class ComputerAgent:
             agent_id, base_url=base_url, api_key=api_key, client=_resolve_client
         )
 
-        # 2. Engine: the agent's harness unless the caller names another.
+        # 2. Engine: the agent's harness unless the caller names another. The
+        #    harness check happens HERE, not during resolution, so bringing your
+        #    own engine genuinely rescues an unsupported harness.
+        require_runnable_harness(self.agent, engine_given=engine is not None)
         resolved_engine = (
             engine
             if isinstance(engine, EngineDriver)

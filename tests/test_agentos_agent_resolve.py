@@ -15,6 +15,7 @@ import respx
 
 from computeragent.harness.agentos_agent import (
     AgentResolveError,
+    ResolvedAgent,
     UnsupportedAgentError,
     api_base,
     model_of,
@@ -181,12 +182,53 @@ def test_refuses_orchestration(agent_doc):
 
 
 @respx.mock
-def test_refuses_unknown_harness(agent_doc):
+def test_an_unknown_harness_resolves_fine(agent_doc):
+    """Resolution validates the DOCUMENT. Whether a harness can run depends on
+    the caller's engine too, so that check lives at construction."""
     agent_doc["harness"] = "deepagents"
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
+    assert _resolve().harness == "deepagents"
+
+
+def test_unknown_harness_is_refused_when_no_engine_is_given(agent_doc):
+    from computeragent.harness.agentos_agent import require_runnable_harness
+
+    agent = ResolvedAgent(
+        agent_id="a",
+        name="a",
+        harness="deepagents",
+        source="x",
+        model=None,
+        gateway_type=None,
+        gateway_base_url=None,
+        gateway_completions_url=None,
+        credential_id=None,
+        agent_type=None,
+    )
+
     with pytest.raises(UnsupportedAgentError, match="harness"):
-        _resolve()
+        require_runnable_harness(agent, engine_given=False)
+
+
+def test_bringing_your_own_engine_rescues_an_unknown_harness(agent_doc):
+    """The error tells you to pass engine=. That has to actually work."""
+    from computeragent.harness.agentos_agent import require_runnable_harness
+
+    agent = ResolvedAgent(
+        agent_id="a",
+        name="a",
+        harness="deepagents",
+        source="x",
+        model=None,
+        gateway_type=None,
+        gateway_base_url=None,
+        gateway_completions_url=None,
+        credential_id=None,
+        agent_type=None,
+    )
+
+    require_runnable_harness(agent, engine_given=True)
 
 
 @respx.mock

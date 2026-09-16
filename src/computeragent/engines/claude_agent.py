@@ -26,6 +26,10 @@ from ..protocol_types import (
 
 logger = logging.getLogger("computeragent.engines.claude_agent")
 
+#: Permission modes where the CLI never prompts, so `can_use_tool` is skipped
+#: and an `allowed_tools` allowlist is inert.
+_PROMPT_SKIPPING_MODES = frozenset({"bypassPermissions", "dontAsk", "auto", "acceptEdits"})
+
 _CAPABILITIES = EngineCapabilities(
     streaming_input=True,
     partial_messages=True,
@@ -105,6 +109,12 @@ def _build_options(ctx: EngineContext) -> Any:
     # telemetry identifier and deliberately is not forced on the CLI.
     if ctx.session_store is not None:
         payload.setdefault("session_store", ctx.session_store)
+    # Continue the previous turn's conversation rather than starting a new one.
+    # `resume` is the right lever, not `session_id`: the CLI refuses a
+    # session_id that already exists ("Session ID … is already in use"), which
+    # is what makes pinning one fail on the second turn.
+    if ctx.resume_session_id and not payload.get("session_id"):
+        payload.setdefault("resume", ctx.resume_session_id)
     if ctx.envs:
         env_existing = dict(payload.get("env") or {})
         env_existing.update(ctx.envs)
@@ -116,6 +126,18 @@ def _build_options(ctx: EngineContext) -> Any:
     # harness session id onto the SDK's ToolPermissionContext (which doesn't
     # carry one) so the resulting policy_decision telemetry correlates with
     # this session's open OTel spans instead of landing on "unknown".
+    # `allowed_tools` is a permission ALLOWLIST, so under a permission mode
+    # that skips prompting it grants nothing and forbids nothing. Callers reach
+    # for it expecting a sandbox; say so rather than let them believe they have
+    # one. `disallowed_tools` is the lever that works in every mode.
+    if payload.get("allowed_tools") and payload.get("permission_mode") in _PROMPT_SKIPPING_MODES:
+        logger.warning(
+            "allowed_tools is set alongside permission_mode=%r, which skips permission prompts — "
+            "the allowlist cannot restrict anything there and every tool stays available. Use "
+            "disallowed_tools to actually block tools.",
+            payload.get("permission_mode"),
+        )
+
     if ctx.policy_decider is not None:
         bound = _bind_session_id(ctx.policy_decider, ctx.session_id)
         payload["can_use_tool"] = bound
@@ -129,12 +151,7 @@ def _build_options(ctx: EngineContext) -> Any:
         # hook's deny decision — mirroring the TS engine. Registered only for
         # the skipping modes so default-mode behavior (and telemetry volume)
         # is unchanged. MERGED with GAP/caller-supplied hooks, never replacing.
-        if payload.get("permission_mode") in (
-            "bypassPermissions",
-            "dontAsk",
-            "auto",
-            "acceptEdits",
-        ):
+        if payload.get("permission_mode") in _PROMPT_SKIPPING_MODES:
             hooks = dict(payload.get("hooks") or {})
             pre = list(hooks.get("PreToolUse") or [])
             pre.append(_policy_pretooluse_matcher(bound))

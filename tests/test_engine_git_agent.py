@@ -159,7 +159,7 @@ async def test_single_turn_happy_path(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -211,7 +211,7 @@ async def test_tool_call_routes_through_permission_hook(monkeypatch):
     fake_client.chat.completions.create = AsyncMock(side_effect=[first, second])
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -255,7 +255,7 @@ async def test_multi_turn_carries_context(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -292,7 +292,7 @@ async def test_cancel_event_short_circuits_loop(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()

@@ -149,6 +149,11 @@ class EngineContext:
     session_store: SessionStore | None = None
     policy_decider: PolicyDecider | None = None
     budget_max_usd: float | None = None
+    #: The engine-side session id of the PREVIOUS turn, when there was one.
+    #: An engine that can continue a conversation should resume from it; each
+    #: turn otherwise starts a fresh engine session, and a multi-turn chat
+    #: would have no memory of the turn before.
+    resume_session_id: str | None = None
 
 
 @dataclass

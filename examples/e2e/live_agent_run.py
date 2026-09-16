@@ -89,7 +89,10 @@ async def main(args: argparse.Namespace) -> int:
             git_token=args.git_token,
             source=source,
             engine=args.engine,
-            options={"system_prompt": "You are terse.", "allowed_tools": ["Read", "Glob"]},
+            # NOT `allowed_tools`: the dispatch permission mode is
+            # `bypassPermissions`, where an allowlist restricts nothing.
+            # `disallowed_tools` is the lever that works.
+            options={"system_prompt": "You are terse.", "disallowed_tools": ["Write", "Edit"]},
         )
     except Exception as exc:
         bad(f"{type(exc).__name__}: {exc}")
