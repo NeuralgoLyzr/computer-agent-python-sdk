@@ -21,7 +21,8 @@ Enforcement: fetch the RAI policy once (cache cedar + opa guardrails), then
 ``POST .../guardrails/evaluate-tool-call`` per tool — both through the agentos
 proxy. Fail-closed on SRS errors; fail-open if the binding can't be resolved.
 
-Only depends on ``httpx`` (a core dependency).
+Needs ``httpx``, imported lazily so that merely importing the package does not
+bind it — this module is reached eagerly from ``policy/__init__``.
 """
 
 from __future__ import annotations
@@ -29,8 +30,6 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
-
-import httpx
 
 from .types import FailMode, PolicyDecision, PolicyInput, PolicyResult
 
@@ -80,7 +79,7 @@ class SrsPolicyEngine:
         agent_name: str = "",
         fail_mode: FailMode = "deny",
         timeout: float = 10.0,
-        client: httpx.AsyncClient | None = None,
+        client: Any | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/") if endpoint else None
         self._policy_id = policy_id
@@ -93,7 +92,11 @@ class SrsPolicyEngine:
         self._resolved = False
         self._inert = False  # no policy bound -> allow everything
         self._via_agentos = False  # set in _resolve_config: proxy vs direct SRS
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        if client is None:
+            import httpx
+
+            client = httpx.AsyncClient(timeout=timeout)
+        self._client = client
 
     @classmethod
     def from_env(cls, *, agent_name: str = "", **overrides: Any) -> SrsPolicyEngine:

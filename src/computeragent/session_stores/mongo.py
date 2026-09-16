@@ -18,8 +18,11 @@ documented there too.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
+
+from claude_agent_sdk.types import SessionStoreListEntry
 
 from ..protocol_types import SessionKey, SessionStoreEntry
 
@@ -138,11 +141,11 @@ class MongoSessionStore:
     async def delete(self, key: SessionKey) -> None:
         await self._coll().delete_one({"_id": {"$eq": _doc_id(key)}})
 
-    async def list_sessions(self, project_key: str) -> list[dict[str, Any]]:
+    async def list_sessions(self, project_key: str) -> list[SessionStoreListEntry]:
         cursor = (
             self._coll().find({"projectKey": {"$eq": project_key}}).sort("updatedAt", -1).limit(50)
         )
-        out: list[dict[str, Any]] = []
+        out: list[SessionStoreListEntry] = []
         async for doc in cursor:
             updated = doc.get("updatedAt")
             mtime = int(updated.timestamp() * 1000) if isinstance(updated, datetime) else 0
@@ -168,7 +171,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def mongo_session_store_builder(**defaults: Any):
+def mongo_session_store_builder(**defaults: Any) -> Callable[[Any], MongoSessionStore]:
     """Registry builder. Per-call descriptor options merge over these defaults,
     so one registration can serve several databases::
 
@@ -179,6 +182,13 @@ def mongo_session_store_builder(**defaults: Any):
 
     def _build(options: Any = None) -> MongoSessionStore:
         merged = {**defaults, **(dict(options) if isinstance(options, dict) else {})}
+        if not merged.get("url") and not merged.get("client"):
+            raise ValueError(
+                "mongo session store: options.url is required — pass "
+                'session_store={"kind": "mongo", "options": {"url": "mongodb://…", '
+                '"database": "…"}}, or register the kind with a default url via '
+                "mongo_session_store_builder(url=…)"
+            )
         return MongoSessionStore(**merged)
 
     return _build

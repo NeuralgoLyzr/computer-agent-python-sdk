@@ -28,11 +28,9 @@ from typing import Any, Literal, Protocol, runtime_checkable
 # Note it is deliberately NOT runtime-checkable upstream: only `append` and
 # `load` are required and call sites probe for the rest, so a store is
 # duck-typed, never isinstance-checked.
-from claude_agent_sdk.types import (  # noqa: F401
-    SessionKey,
-    SessionStore,
-    SessionStoreEntry,
-)
+from claude_agent_sdk.types import SessionKey as SessionKey
+from claude_agent_sdk.types import SessionStore as SessionStore
+from claude_agent_sdk.types import SessionStoreEntry as SessionStoreEntry
 
 IdentitySource = Path | str | dict[str, Any]
 """Where the agent definition comes from.

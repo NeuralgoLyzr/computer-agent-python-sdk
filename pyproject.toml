@@ -1,7 +1,7 @@
 [project]
 name = "computer-agent-py"
-version = "0.3.0"
-description = "Drop-in replacement for claude-agent-sdk that adds a proxied telemetry pipeline (PII redaction + guardrails) with OpenTelemetry and AgentOS sinks."
+version = "0.4.0"
+description = "Run an AgentOS-registered agent locally, in your own process — plus a drop-in telemetry proxy for claude-agent-sdk."
 authors = [
     { name = "Abhi Bhat", email = "abhishek.bhat@lyzr.ai" },
 ]
@@ -137,7 +137,7 @@ ignore = ["E501"]
 "src/computeragent/engines/**" = ["TC001", "TC003"]
 "src/computeragent/substrates/**" = ["TC003"]
 "src/computeragent/identity/**" = ["TC003"]
-"src/computeragent/session_stores/**" = ["TC001"]
+"src/computeragent/session_stores/**" = ["TC001", "TC002", "TC003"]
 "src/computeragent/protocol_types/**" = ["TC003"]
 
 [tool.mypy]

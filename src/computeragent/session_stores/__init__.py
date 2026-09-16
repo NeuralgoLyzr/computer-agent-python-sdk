@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from ..harness.errors import UnknownSessionStoreError
 from ..protocol_types import SessionStore
@@ -45,7 +45,7 @@ def is_session_store(candidate: Any) -> bool:
 def register_session_store(name: str, store: SessionStore | SessionStoreBuilder) -> None:
     """Register a store kind, as either a builder or a ready instance."""
     if is_session_store(store):
-        instance = store
+        instance = cast("SessionStore", store)
 
         def _fixed(_options: Any = None) -> SessionStore:
             return instance
@@ -79,13 +79,13 @@ def resolve_session_store(spec: str | Mapping[str, Any]) -> SessionStore:
         raise UnknownSessionStoreError(
             f"unknown session store {kind!r}; registered: {sorted(_REGISTRY)!r}"
         ) from exc
-    return builder(options)
+    return cast("SessionStore", builder(options))
 
 
 # Built-ins. `memory` is stateless config-wise, so one instance serves every
 # caller — which also makes it a shared store across agents in one process,
 # the same as the TS in-process default.
-register_session_store("memory", InMemorySessionStore())
+register_session_store("memory", cast("SessionStore", InMemorySessionStore()))
 
 
 # `mongo` and `http` are registered as builders that import their driver only
@@ -95,13 +95,13 @@ register_session_store("memory", InMemorySessionStore())
 def _mongo_builder(options: Any = None) -> SessionStore:
     from .mongo import mongo_session_store_builder
 
-    return mongo_session_store_builder()(options)
+    return cast("SessionStore", mongo_session_store_builder()(options))
 
 
 def _http_builder(options: Any = None) -> SessionStore:
     from .http import http_session_store_builder
 
-    return http_session_store_builder()(options)
+    return cast("SessionStore", http_session_store_builder()(options))
 
 
 register_session_store("mongo", _mongo_builder)

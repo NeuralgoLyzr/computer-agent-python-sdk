@@ -7,8 +7,7 @@ against the ComputerAgent server, which performs the database write in-pod::
     POST {base}/session-store/entries  {sessionId, projectKey, entries}
 
 It exists so a harness that cannot reach a VPC-private database — and must not
-hold its credential — can still persist transcripts. Requires the ``[agentos]``
-or ``[remote]`` extra for ``httpx``.
+hold its credential — can still persist transcripts.
 
 Only ``append`` and ``load`` are implemented, and the omissions are deliberate:
 see the note on :meth:`load` and the class docstring's tail.
@@ -23,6 +22,7 @@ import contextlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 from ..protocol_types import SessionKey, SessionStoreEntry
@@ -284,7 +284,7 @@ class SessionStoreAppendError(RuntimeError):
     """An append the server refused, or that failed twice in a row."""
 
 
-def http_session_store_builder(**defaults: Any):
+def http_session_store_builder(**defaults: Any) -> Callable[[Any], HttpSessionStore]:
     """Registry builder.
 
     Unlike the mongo one this takes no connection defaults, and that is the

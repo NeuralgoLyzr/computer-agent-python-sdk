@@ -305,18 +305,15 @@ from computeragent.session_stores import register_session_store
 register_session_store("mystore", lambda options: MyStore(**(options or {})))
 ```
 
-> **`mongo` and `http` kinds are being added right now.** Do not hard-code their option shapes from this
-> document. Check what is actually registered before relying on them:
-> ```python
-> from computeragent.session_stores import resolve_session_store
-> from computeragent.harness.errors import UnknownSessionStoreError
-> try:
->     resolve_session_store("mongo")
-> except UnknownSessionStoreError as exc:
->     print(exc)      # the message lists every registered kind
-> ```
-> An unknown kind raises `UnknownSessionStoreError` naming the registered set, so the registry is
-> self-documenting.
+Two more kinds ship with the SDK:
+
+| Kind | Options | Notes |
+|---|---|---|
+| `mongo` | `url` **(required)**, `database`, `collection`, `owner_user`, `owner_group` | One document per transcript, uuid-deduped. Warns loudly when `database` is unset — the fallback is *not* the database AgentOS reads. Needs the `[mongo]` extra. |
+| `http` | `base_url` **(required)**, `token` **(required)**, `append_timeout`, `load_timeout`, `auto_refresh` | Two verbs against the CAS, which does the write in-pod — for a harness that cannot hold a database credential. `load` never raises: a store outage costs a session its resume, not its life. |
+
+An unknown kind raises `UnknownSessionStoreError` naming the registered set, and a known kind
+missing a required option raises `ValueError` naming the option — the registry is self-documenting.
 
 The store is handed to the Claude SDK itself, which mirrors transcript batches into it and materialises prior
 entries before spawning the subprocess. The harness deliberately does **not** also replay it — doing both

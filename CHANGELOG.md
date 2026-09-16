@@ -5,6 +5,68 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-09-16
+
+### Changed — BREAKING: one run mode
+
+`ComputerAgent` took eleven ways to start an agent and reliably delivered none of
+them against the live stack. It now takes one: name an agent registered in
+AgentOS and run it here.
+
+```python
+ComputerAgent(base_url=..., agent_id=..., api_key=...)
+```
+
+The SDK fetches the agent's definition and reproduces what the AgentOS dispatch
+path would have sent to a ComputerAgent server — same source, model, engine
+environment and permission mode — except the engine runs in this process.
+Everything beyond the three required arguments is an override for something the
+agent document already answers.
+
+### Removed
+
+- The bare `/v1` harness-protocol client, the CAS sandbox client, the remote
+  coordinator, process forking, and the old `POST /agents/resolve` client
+  (~1,600 lines), with their tests.
+- `run_task`, `ForkConfig`, `HarnessClient`, `ComputerAgentServerClient`,
+  `HarnessProtocolError`, and the `remote` extra.
+- Constructor parameters `runtime`, `identity_loader`, `harness*`, `fork_*`,
+  `parent_*`, `policy_id`.
+- Five examples built on the standalone `source=`/`engine=` constructor, and
+  `user-documentation.md` — superseded by `docs/USING_THE_SDK.md`.
+
+The drop-in `query` / `ClaudeSDKClient` surface is untouched. It is a different
+surface, not a run mode.
+
+### Added
+
+- `ComputerAgent(base_url=, agent_id=, api_key=)` — resolve an agent from
+  AgentOS by its Mongo `_id`, presenting the caller's Lyzr workspace key on
+  `x-api-key`. Unimplemented agent shapes (a generic gateway, bound MCP servers,
+  an orchestration block, an unknown harness) are refused **by field name**
+  rather than run as something quieter than they declare.
+- `llm_proxy_url=` and `git_token=`, each needed only in a specific case: the
+  first for an Anthropic-shaped engine against a native (OpenAI-shaped) gateway,
+  the second for a private source. Missing either where it is required is an
+  error at construction, not a failure mid-run.
+- **Session stores that work.** The axis was inert: a store could be configured
+  and no engine ever read it. It now targets the upstream
+  `claude_agent_sdk.SessionStore` contract, so a store reaches the engine and
+  resume actually happens. `mongo` and `http` ported from the TypeScript stores;
+  the registry now holds builders, so a kind can be configured per call.
+- `examples/e2e/live_agent_run.py` — a staged live run that prints pass/fail per
+  stage, including a preflight that separates a dead gateway from a stopped
+  proxy from a bad key.
+- `docs/USING_THE_SDK.md`, a developer reference, and design notes for the
+  deferred MCP and orchestration work in `docs/plans/`.
+
+### Fixed
+
+- `policy.srs` bound `httpx` at import time while `policy/__init__` documented
+  its engines as lazily imported. It is now lazy, as advertised.
+- The `mongo` session store built without a `url` raised a bare `TypeError`; it
+  now names the option to supply.
+
 ## [0.3.0] — 2026-08-21
 
 ### Added

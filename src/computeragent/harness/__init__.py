@@ -31,7 +31,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, M
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from ..engines import resolve_engine
 from ..protocol_types import (
@@ -118,7 +118,7 @@ class ChatHandle:
         self._drained = True
         self._result = self._finalize_result()
 
-    def __await__(self):
+    def __await__(self) -> Any:
         return self.result().__await__()
 
     async def result(self) -> ChatResult:
@@ -270,11 +270,12 @@ class ComputerAgent:
 
         resolved_store: SessionStore | None = None
         if session_store is not None:
-            resolved_store = (
-                session_store
-                if is_session_store(session_store)
-                else resolve_session_store(session_store)
-            )
+            if is_session_store(session_store):
+                resolved_store = cast("SessionStore", session_store)
+            else:
+                resolved_store = resolve_session_store(
+                    cast("str | Mapping[str, Any]", session_store)
+                )
 
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,

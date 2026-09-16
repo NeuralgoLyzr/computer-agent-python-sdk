@@ -11,7 +11,8 @@ use ``mongo``; for a sandbox that cannot hold a database credential, ``http``.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+
+from claude_agent_sdk.types import SessionStoreListEntry
 
 from ..protocol_types import SessionKey, SessionStoreEntry
 
@@ -65,7 +66,7 @@ class InMemorySessionStore:
             self._slots.pop(slot, None)
             self._seen.pop(slot, None)
 
-    async def list_sessions(self, project_key: str) -> list[dict[str, Any]]:
+    async def list_sessions(self, project_key: str) -> list[SessionStoreListEntry]:
         """Main transcripts for a project. Sub-agent subpaths are excluded —
         they are not sessions a caller can resume."""
         async with self._lock:
