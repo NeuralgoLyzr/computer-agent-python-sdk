@@ -144,3 +144,59 @@ def test_every_registered_store_kind_is_resolvable_or_names_what_it_needs():
             resolve_session_store(kind)
         except (ValueError, ImportError) as exc:
             assert str(exc), f"{kind} failed with an empty message"
+
+
+def test_resolving_an_agent_without_httpx_names_its_extra():
+    """The resolver's import is lazy, so the hint has to survive to the caller.
+
+    httpx cannot be uninstalled here — `mcp` pulls it in for everyone — so the
+    absence is simulated the same way the sink tests do it: drop it from
+    `sys.modules` and refuse the re-import.
+    """
+    from computeragent.harness.agentos_agent import AgentResolveError, resolve_agent
+
+    removed = _strip_modules(["httpx"])
+    try:
+
+        class _Blocker:
+            def find_spec(self, name, path=None, target=None):
+                if name == "httpx" or name.startswith("httpx."):
+                    raise ImportError(f"blocked {name} for test")
+                return
+
+        finder = _Blocker()
+        sys.meta_path.insert(0, finder)
+        try:
+            with pytest.raises(AgentResolveError) as exc:
+                resolve_agent(
+                    "6aa93f1b3817a13d3103d2c1", base_url="http://h/agentos/api", api_key="k"
+                )
+            assert "computer-agent-py[agentos]" in str(exc.value)
+        finally:
+            sys.meta_path.remove(finder)
+    finally:
+        _restore(removed)
+
+
+def test_http_session_store_without_httpx_names_its_extra():
+    from computeragent.session_stores.http import HttpSessionStore
+
+    removed = _strip_modules(["httpx"])
+    try:
+
+        class _Blocker:
+            def find_spec(self, name, path=None, target=None):
+                if name == "httpx" or name.startswith("httpx."):
+                    raise ImportError(f"blocked {name} for test")
+                return
+
+        finder = _Blocker()
+        sys.meta_path.insert(0, finder)
+        try:
+            with pytest.raises(ImportError) as exc:
+                HttpSessionStore(base_url="https://h", token="t")
+            assert "computer-agent-py[agentos]" in str(exc.value)
+        finally:
+            sys.meta_path.remove(finder)
+    finally:
+        _restore(removed)
