@@ -181,6 +181,14 @@ async def main(args: argparse.Namespace) -> int:
     ok(f"session={result.session_id}")
     ok(f"tokens in={result.usage.input_tokens} out={result.usage.output_tokens}")
     ok(f"duration={result.duration_ms:.0f}ms")
+    if result.usage.output_tokens and not result.usage.input_tokens:
+        # Not an SDK fault and not worth chasing from this side: the gateway's
+        # STREAMING usage omits prompt tokens (the same call made
+        # non-streaming reports them), so the proxy has nothing to map onto
+        # `input_tokens`. It does mean per-turn cost is understated.
+        info(
+            "input tokens are 0 while output is not — the gateway omits prompt tokens when streaming"
+        )
 
     stage(6, "Tool calls round-tripped")
     if tool_uses:
