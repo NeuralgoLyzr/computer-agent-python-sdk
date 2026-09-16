@@ -5,6 +5,56 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-09-16
+
+A survey of ~180 usage combinations against the live stack found six things that
+did not work and a set of inputs that failed late or plausibly-and-wrong. All
+are fixed; each of the six was verified live.
+
+### Fixed
+
+- **Multi-turn conversation had no memory.** Every `chat()` started a fresh
+  engine session, so a session store's key differed each turn and nothing was
+  rehydrated. Turns after the first now `resume` the previous engine session.
+  (`resume`, not `session_id` — the CLI refuses an id that already exists,
+  which is why the previously documented workaround failed on turn two.)
+- **`gitagent` could not run at all.** It read four variables from
+  `os.environ` while the harness delivers them on `EngineContext.envs`, so
+  every value the gateway branch computed was invisible to it.
+- **Conversation usage was billed as its final turn.** `session_ended` was
+  built from the last `ResultMessage`; the lifecycle rollup now sums finished
+  turns.
+- **`chat()` after `dispose()` ran against a deleted workspace**, and emitted
+  no `session_ended`. It raises.
+- **`engine=` could not rescue an unsupported harness**, though the error said
+  to try it. That check moved out of document validation into construction.
+- **`allowed_tools` restricted nothing** under the `bypassPermissions` this SDK
+  dispatches; the engine now warns when both are set. The e2e example shipped
+  such an allowlist and called "Bash ran anyway" a pass.
+- **Inputs that used to fail late or silently** are refused at construction:
+  an empty `source` (which resolved to the process's cwd and pointed a
+  bypassPermissions agent at it), a nonexistent or non-directory source path, a
+  wrong-typed source, a malformed `llm_proxy_url`, and a non-string `base_url`
+  (a bare `AttributeError` before).
+- **A `base_url` typo is refused rather than appended to.** `…/agentos/apiv1`
+  became `…/agentos/apiv1/agentos/api/v1`, and the resulting 404 blamed the
+  caller's agent id.
+- **`engine=object()` / `session_store=object()`** said "unknown *name*"; they
+  now say the value is not a driver or store.
+- **`on_tool_call` is never consulted on the claude engine** — accepted in
+  silence, so a caller believed they had a tool gate. It warns.
+- **`cancel()` before the first iteration** was a no-op and the turn ran to
+  completion. It now prevents the run.
+- `__all__` listed `SessionStore` and `SessionStoreEntry` twice.
+
+### Documentation
+
+`docs/USING_THE_SDK.md` gains a public-API and import table, how to extract the
+assistant's reply (`messages[-1]` is a `ResultMessage`; the text is `.result`),
+the real `EngineEvent` shape, async/concurrency and timeout behaviour, and the
+telemetry defaults. Corrected: the Claude CLI ships **bundled** with
+`claude-agent-sdk` and needs no `npm install`.
+
 ## [0.4.0] — 2026-09-16
 
 ### Changed — BREAKING: one run mode

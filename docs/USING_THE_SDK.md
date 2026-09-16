@@ -39,14 +39,9 @@ construction fails with *"resolving an agent requires httpx — install 'compute
 | `cedar` | `cedarpy` | `CedarPolicyEngine` |
 | `all` | all of the above | everything |
 
-**Also required for the `claude-agent-sdk` engine:** the Claude Code CLI on `PATH`, since the engine spawns
-it as a subprocess.
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-**Also required for a cloned source:** `git` on `PATH`.
+The `claude-agent-sdk` engine spawns a Claude Code CLI subprocess, but that CLI **ships bundled inside
+`claude-agent-sdk`** — no `npm install` is needed, and a globally installed CLI is ignored. The one
+thing needed outside Python is **`git` on `PATH`**, and only if the agent's source is cloned.
 
 ---
 
@@ -210,7 +205,7 @@ an unknown key is silently dropped rather than attached. Commonly used:
 | Key | Type | What it does |
 |---|---|---|
 | `system_prompt` | `str` / preset dict | Replaces / sets the system prompt. |
-| `allowed_tools` | `list[str]` | Whitelist, e.g. `["Read", "Glob", "Bash"]`. |
+| `allowed_tools` | `list[str]` | A permission **pre-approval** list — under the `bypassPermissions` this SDK dispatches it restricts nothing, and the engine logs a warning if you set both. Use `disallowed_tools` to actually block a tool. |
 | `disallowed_tools` | `list[str]` | Blacklist. |
 | `permission_mode` | `str` | `"bypassPermissions"` (the default this SDK sets), `"default"`, `"acceptEdits"`, `"dontAsk"`, `"auto"`. |
 | `max_turns` | `int` | Cap agentic turns. |
@@ -317,9 +312,14 @@ missing a required option raises `ValueError` naming the option — the registry
 
 The store is handed to the Claude SDK itself, which mirrors transcript batches into it and materialises prior
 entries before spawning the subprocess. The harness deliberately does **not** also replay it — doing both
-would double the transcript. The store's key is `(project_key, session_id)` and the SDK owns both: resume
-within a process works out of the box, but resuming a *specific* past conversation means pinning
-`options={"session_id": "<the CLI's uuid>"}`.
+would double the transcript.
+
+**Multi-turn works within one `ComputerAgent`.** Each turn after the first resumes the previous turn's
+engine session automatically, so the agent remembers earlier turns whether or not a store is configured.
+To resume a conversation in a *later process*, pass a durable store plus the engine session id from the
+earlier run — read it off any message (`result.messages[-1].session_id`) and pass it back as
+`options={"resume": "<that id>"}`. Use `resume`, not `session_id`: the CLI refuses an id that already
+exists.
 
 ---
 
@@ -363,7 +363,7 @@ checkpoint. It is a request, not a kill.
 ### The `async with` lifecycle
 
 **One `ComputerAgent` instance is one logical session.** `session_started` fires on the first chat and
-`session_ended` on dispose, so N `chat()` calls collapse into one conversation rather than N orphan sessions.
+`session_ended` on dispose, carrying the summed usage of every turn, so N `chat()` calls collapse into one conversation rather than N orphan sessions.
 
 ```python
 async with ComputerAgent(...) as agent:
@@ -514,7 +514,7 @@ The stages, each of which is a thing that can independently be wrong:
   is needed, but the SDK **cannot resolve it client-side** — redeeming it requires an operator service token.
   Without `git_token` the SDK tries AgentOS's GitHub-App credential route (best-effort; any miss,
   misconfiguration, or deployment without the App installed falls through silently) and then clones
-  anonymously, which fails for a private repo. The `credential_id` only ever appears in the error message.
+  anonymously, which fails for a private repo. The failure surfaces as git's own "Authentication failed" stderr — it does not mention `credential_id`, so recognise it by the repo URL.
 - **`budget_max_usd` is not enforced** by either built-in engine; it is carried into `EngineContext` and no
   more. Use `options={"max_budget_usd": ...}` for a cap the Claude CLI actually applies.
 - **`project_key` is inert** in the current wiring — accepted and stored, but the session-store key is owned
@@ -522,3 +522,66 @@ The stages, each of which is a thing that can independently be wrong:
 - **An inline `dict` source does not materialise files.** The workspace falls back to the process's cwd.
 - **`cancel()` is cooperative**, not a kill — the engine stops at its next checkpoint.
 - **`gitagent` tool execution is MCP-only**; the engine does not run filesystem tools itself.
+
+
+---
+
+## 13. Public API and imports
+
+Everything you need to name in code is importable from the top-level package — `from computeragent
+import …`. You never need a private path.
+
+| Name | What it is |
+|---|---|
+| `ComputerAgent` | The client. |
+| `ChatHandle`, `ChatResult`, `UsageRollup` | Turn handle and results. |
+| `EngineEvent` | What the stream yields. |
+| `ResolvedAgent` | What `agent.agent` is. |
+| `AgentResolveError`, `UnsupportedAgentError`, `GatewayConfigError`, `UnknownEngineError`, `UnknownSessionStoreError`, `HarnessError` | Construction-time failures. `UnsupportedAgentError` subclasses `AgentResolveError`. |
+| `EngineDriver`, `SessionStore`, `PolicyDecider`, `PermissionRequest` | Extension-point protocols. |
+| `Pipeline`, `configure`, `PolicyToolAuthorizer` | Telemetry and policy. |
+
+### Getting the assistant's reply out
+
+`result.messages[-1]` is a `ResultMessage`, whose `repr` is metadata — the text is in `.result`.
+
+```python
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
+
+def reply_text(result) -> str:
+    for m in reversed(result.messages):
+        if isinstance(m, ResultMessage) and isinstance(m.result, str) and m.result:
+            return m.result
+        if isinstance(m, AssistantMessage):
+            text = "".join(b.text for b in m.content if isinstance(b, TextBlock))
+            if text:
+                return text
+    return ""
+```
+
+An empty completion surfaces as a `ResultMessage` with an empty `.result` — not an exception.
+
+### `EngineEvent`
+
+`kind` is `"sdk_message"` or `"usage_snapshot"` (the only two the claude engine emits; treat the set as
+open). `payload` carries the raw upstream message for `sdk_message`. The token and cost fields are
+populated on `usage_snapshot`.
+
+### Async, threads, concurrency
+
+The constructor's AgentOS resolve is a **blocking** HTTP call — in an async server, build with
+`await asyncio.to_thread(ComputerAgent, …)`. There is no sync facade; wrap with `asyncio.run`. Several
+agents per process are fine; concurrent `chat()`s on one instance are not supported (one instance is one
+session with one input queue). Not thread-safe.
+
+### Timeouts
+
+The resolve has a 15-second timeout. **A chat turn has none, and nothing retries.** Behind a request
+handler, impose your own: `await asyncio.wait_for(agent.chat(msg), timeout=120)`. `cancel()` is
+cooperative and cannot enforce a deadline on a wedged turn.
+
+### Telemetry
+
+`capture_content` defaults to **False**. To silence telemetry entirely for one agent, pass
+`telemetry_pipeline=Pipeline(sinks=[])` — `COMPUTERAGENT_OTEL=disabled` only stops the OTel sink. With
+the `otel` extra installed and no OTLP endpoint, the console exporter prints traces to stdout.
