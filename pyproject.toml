@@ -1,6 +1,6 @@
 [project]
 name = "computer-agent-py"
-version = "0.4.1"
+version = "0.4.2"
 description = "Run an AgentOS-registered agent locally, in your own process — plus a drop-in telemetry proxy for claude-agent-sdk."
 authors = [
     { name = "Abhi Bhat", email = "abhishek.bhat@lyzr.ai" },
@@ -51,9 +51,6 @@ gitagent = [
 gap = [
     "pyyaml>=6,<7",
 ]
-sqlite = [
-    "aiosqlite>=0.20,<1",
-]
 all = [
     "pymongo>=4.9",
     "opentelemetry-api>=1.27",
@@ -65,7 +62,6 @@ all = [
     "openai>=1,<2",
     "anthropic>=0.40,<1",
     "pyyaml>=6,<7",
-    "aiosqlite>=0.20,<1",
 ]
 
 [project.urls]

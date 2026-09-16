@@ -156,6 +156,12 @@ class HarnessCoordinator:
         # one conversation, so each turn after the first resumes from this
         # rather than starting a fresh engine session with no memory.
         self._engine_session_id: str | None = None
+        # One ComputerAgent is one conversation, and since turns now resume the
+        # previous engine session, two in flight at once would interleave into
+        # the same session, the same workspace and the same session-store key.
+        # It used to "work" by luck; refuse it instead of corrupting a
+        # transcript.
+        self._turn_in_flight = False
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -331,6 +337,12 @@ class HarnessCoordinator:
         stream with its own ``session_started`` and ``session_ended``
         events at the boundaries.
         """
+        if self._turn_in_flight:
+            raise HarnessError(
+                "a chat turn is already in flight on this ComputerAgent. One instance is one "
+                "conversation with one workspace, so concurrent turns would interleave into the "
+                "same engine session — run concurrent work as separate ComputerAgent instances."
+            )
         await self._ensure_booted()
         assert self._workspace_path is not None
         assert self._manifest is not None
@@ -378,6 +390,7 @@ class HarnessCoordinator:
         # user_message events so each new prompt appends to entries without
         # re-seeding. The OtelSink captures per-turn content via turn_started
         # (emitted below), not via session_started.
+        self._turn_in_flight = True
         prompt_str = _stringify_prompt(message)
         is_first_chat = not self._lifecycle_started
         if is_first_chat:
@@ -554,6 +567,7 @@ class HarnessCoordinator:
             # ``sessions[].entries``. ``Pipeline.emit`` schedules sink
             # writes as background tasks; without flushing here the
             # next chat's events race and entries land out-of-order.
+            self._turn_in_flight = False
             with suppress(Exception):
                 await self._pipeline.flush()
 

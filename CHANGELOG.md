@@ -5,6 +5,46 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] — 2026-09-16
+
+### Changed
+
+- **`claude-agent-sdk` pinned at `>=0.2.152`** (was `>=0.2`, resolving to
+  0.2.87 — sixty-six releases behind). Includes a zombie-CLI-subprocess fix,
+  argv-injection hardening, and MCP 2.x. The three behaviours that could have
+  broken were each checked live: GAP skill mirroring, the in-process
+  `gap_tools` MCP server, and the widened message union.
+- **`project_key` removed.** It never reached the engine — the session-store key
+  is the SDK's own, derived from the workspace cwd — so it was a knob wired to
+  nothing.
+- **`budget_max_usd` now means what its name says**, mapping to the
+  `max_budget_usd` option the Claude CLI actually enforces. An explicit option
+  still wins.
+- **The `sqlite` extra is gone.** It promised a session store that does not
+  exist.
+
+### Fixed
+
+- **Concurrent turns on one `ComputerAgent` are refused.** They used to
+  interleave silently; since turns now resume the previous engine session, two
+  at once would share one session, one workspace and one store key.
+- **Options the engine cannot accept are logged**, naming them and the upstream
+  version. Dropping them silently made a typo — or an option renamed upstream —
+  fail invisibly.
+- **A temp clone left by a process that skipped `dispose()` is reaped at exit.**
+  Not a finalizer: `__del__` runs at an arbitrary point in async teardown.
+- **An inline `dict` source carrying `files` is refused.** The files were not
+  materialised and the workspace fell back to the current directory, so the
+  agent ran against the caller's cwd instead of the files they listed.
+
+### Testing
+
+Five verification gaps closed. `gitagent` proven live against the gateway
+(445 in / 8 out, where it previously raised). Cross-process resume proven
+through the mongo store — one process writes, a separate interpreter recalls.
+The `git://` clone branch now covered with a local `git daemon`, needing no
+credential. The httpx-missing hint covered without venv surgery.
+
 ## [0.4.1] — 2026-09-16
 
 A survey of ~180 usage combinations against the live stack found six things that

@@ -90,9 +90,22 @@ def _build_options(ctx: EngineContext) -> Any:
     # being attached as an attribute.
     accepted = set(ClaudeAgentOptions.__dataclass_fields__.keys())
     payload: dict[str, Any] = {}
+    dropped: list[str] = []
     for key, value in (ctx.manifest.options or {}).items():
         if key in accepted:
             payload[key] = value
+        else:
+            dropped.append(key)
+    if dropped:
+        # Silently dropping these made a typo — or an option renamed between
+        # upstream versions — fail invisibly, which is the worst way for a
+        # configuration mistake to behave.
+        logger.warning(
+            "ignoring option(s) %s: not fields of ClaudeAgentOptions on "
+            "claude-agent-sdk %s. Check spelling, or the upstream version.",
+            ", ".join(sorted(dropped)),
+            getattr(claude_agent_sdk, "__version__", "?"),
+        )
 
     payload.setdefault("cwd", str(ctx.workspace_path))
     # Hand the session store to the SDK itself. It mirrors each transcript

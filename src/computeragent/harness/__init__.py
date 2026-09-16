@@ -177,6 +177,13 @@ def _validate_source(source: IdentitySource) -> None:
     bypassPermissions agent at whatever directory the process happened to be in.
     """
     if isinstance(source, dict):
+        if source.get("files"):
+            raise AgentResolveError(
+                "an inline source with `files` is not supported: the files are not materialised "
+                "and the workspace falls back to the current working directory, so the agent "
+                "would run against your cwd rather than the files you listed. Write them to a "
+                "directory and pass source=Path(...)."
+            )
         return
     if isinstance(source, str):
         if not source.strip():
@@ -264,7 +271,6 @@ class ComputerAgent:
         envs: Mapping[str, str] | None = None,
         session_store: str | SessionStore | Mapping[str, Any] | None = None,
         session_id: str | None = None,
-        project_key: str = "default",
         agent_name: str | None = None,
         agent_description: str | None = None,
         policy_decider: PolicyDecider | None = None,
@@ -304,6 +310,12 @@ class ComputerAgent:
         )
         merged_envs = merge_envs(envs, gateway_envs)
         merged_options = build_options(self.agent, engine_name=engine_name, caller_options=options)
+        # `budget_max_usd` used to be carried to the engine context and read by
+        # nothing. The Claude CLI enforces `max_budget_usd` itself, so map it
+        # there and let the parameter mean what its name says. An explicit
+        # option from the caller still wins.
+        if budget_max_usd is not None:
+            merged_options.setdefault("max_budget_usd", budget_max_usd)
 
         # 4. What the agent runs against: the caller's workspace if they gave
         #    one, else the source the agent document names.
@@ -351,7 +363,6 @@ class ComputerAgent:
             on_permission_request=on_tool_call,
             budget_max_usd=budget_max_usd,
             telemetry_pipeline=telemetry_pipeline,
-            project_key=project_key,
             options_overlay=merged_options,
             git_token=git_token,
             git_credential_api_base=self._api_base,

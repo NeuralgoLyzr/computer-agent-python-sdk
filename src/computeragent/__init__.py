@@ -42,7 +42,7 @@ _upstream_all = [n for n in getattr(_cas, "__all__", []) if n != "__version__"]
 for _name in _upstream_all:
     globals()[_name] = getattr(_cas, _name)
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 upstream_version = getattr(_cas, "__version__", "unknown")
 
 # Override the two entry points with the proxied versions. Same signatures,

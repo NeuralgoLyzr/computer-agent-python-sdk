@@ -404,7 +404,6 @@ agentos = [
     { name = "httpx" },
 ]
 all = [
-    { name = "aiosqlite" },
     { name = "anthropic" },
     { name = "cedarpy" },
     { name = "httpx" },
@@ -436,9 +435,6 @@ otel = [
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
 ]
-sqlite = [
-    { name = "aiosqlite" },
-]
 
 [package.dev-dependencies]
 dev = [
@@ -463,8 +459,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiosqlite", marker = "extra == 'all'", specifier = ">=0.20,<1" },
-    { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20,<1" },
     { name = "anthropic", marker = "extra == 'all'", specifier = ">=0.40,<1" },
     { name = "anthropic", marker = "extra == 'gitagent'", specifier = ">=0.40,<1" },
     { name = "cedarpy", marker = "extra == 'all'", specifier = ">=4,<5" },
@@ -489,7 +483,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'gitagent'", specifier = ">=6,<7" },
     { name = "typing-extensions", specifier = ">=4.12" },
 ]
-provides-extras = ["otel", "agentos", "mongo", "cedar", "gitagent", "gap", "sqlite", "all"]
+provides-extras = ["otel", "agentos", "mongo", "cedar", "gitagent", "gap", "all"]
 
 [package.metadata.requires-dev]
 dev = [

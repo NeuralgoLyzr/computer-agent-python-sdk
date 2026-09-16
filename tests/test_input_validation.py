@@ -170,3 +170,89 @@ async def test_cancelling_before_iteration_prevents_the_run(agent_doc, tmp_path)
 
     assert events == []
     assert engine.contexts == []
+
+
+# ── parameters that now mean what they say ───────────────────────────────────
+
+
+@respx.mock
+def test_budget_max_usd_reaches_the_option_the_cli_enforces(agent_doc):
+    """It used to be carried to the engine context and read by nothing."""
+    agent = build(agent_doc, budget_max_usd=0.25)
+
+    assert agent._coordinator._options_overlay["max_budget_usd"] == 0.25
+
+
+@respx.mock
+def test_an_explicit_option_beats_the_budget_shortcut(agent_doc):
+    agent = build(agent_doc, budget_max_usd=0.25, options={"max_budget_usd": 1.0})
+
+    assert agent._coordinator._options_overlay["max_budget_usd"] == 1.0
+
+
+@respx.mock
+def test_project_key_is_gone(agent_doc):
+    """It never reached the engine — the store key is the SDK's, derived from
+    cwd — so the parameter was a knob wired to nothing."""
+    with pytest.raises(TypeError, match="project_key"):
+        build(agent_doc, project_key="anything")
+
+
+@respx.mock
+def test_an_inline_source_with_files_is_refused(agent_doc):
+    """The files are not materialised and the workspace falls back to cwd, so
+    the agent would run against the caller's directory instead."""
+    with pytest.raises(AgentResolveError, match="files"):
+        build(agent_doc, source={"name": "x", "version": "1", "files": {"a.txt": "hi"}})
+
+
+@respx.mock
+def test_an_inline_source_without_files_is_still_accepted(agent_doc):
+    build(agent_doc, source={"name": "x", "version": "1"})
+
+
+# ── one conversation, one turn at a time ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_concurrent_turns_on_one_instance_are_refused(agent_doc, tmp_path):
+    """They used to interleave silently. Since turns resume the previous engine
+    session, two at once would share one session, workspace and store key."""
+    import asyncio
+
+    from computeragent.harness.errors import HarnessError
+    from test_computeragent_init import FakeEngine
+
+    class SlowEngine(FakeEngine):
+        async def start_session(self, ctx):
+            self.contexts.append(ctx)
+            await asyncio.sleep(0.2)
+            async for _ in ctx.user_message_queue:
+                break
+            yield __import__("computeragent.protocol_types", fromlist=["EngineEvent"]).EngineEvent(
+                kind="sdk_message", payload={"type": "assistant"}
+            )
+
+    async with build(agent_doc, source=tmp_path, engine=SlowEngine()) as agent:
+        first = asyncio.create_task(agent.chat("one").result())
+        await asyncio.sleep(0.05)
+
+        with pytest.raises(HarnessError, match="already in flight"):
+            await agent.chat("two")
+
+        await first
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sequential_turns_are_unaffected(agent_doc, tmp_path):
+    """The guard must not break the normal multi-turn case."""
+    from test_computeragent_init import FakeEngine
+
+    engine = FakeEngine()
+    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+        await agent.chat("one")
+        await agent.chat("two")
+
+    assert len(engine.contexts) == 2
