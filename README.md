@@ -63,14 +63,27 @@ uv run mypy src
 ```
 
 `examples/e2e/live_agent_run.py` runs one turn against a live AgentOS and prints a pass/fail line
-per stage, so a failure localises itself. Integration-marked tests need real services and are
-skipped unless their environment variables are set.
+per stage, so a failure localises itself. `mcp_live_run.py` and `subagent_live_run.py` do the same
+for an agent's MCP tools and its sub-agent fan-out, and both have a mode that needs no credentials.
+Integration-marked tests need real services and are skipped unless their environment variables are
+set.
+
+## Beyond a single agent
+
+An agent's bound **MCP servers** become in-process tools the model interleaves with `Read`/`Write`/
+`Bash`, each one gated by the same policy decider (§15 of [the guide](docs/USING_THE_SDK.md)).
+`mcp_mode: "studio"` is refused — the tool loop would run inside Lyzr Studio and this SDK would
+never see the calls.
+
+An agent that declares `orchestration:` can **fan out worker sub-agents** that run concurrently,
+each as its own session with its own workspace, telemetry and guardrail — either editing the shared
+repo in per-worker git worktrees, or cloning the repos its `agents/*.yaml` crew names (§16).
 
 ## Not supported
 
-MCP servers and sub-agent orchestration. An agent declaring either is **refused at resolve time**
-rather than run as something quieter than it declares. Design notes for both live in
-[`docs/plans/`](docs/plans/).
+A generic (non-native) model gateway, and any harness but `claude-agent-sdk` or `gitagent` unless
+you pass your own `EngineDriver`. Each is refused by name at resolve time rather than run as
+something quieter than it declares.
 
 ## License
 

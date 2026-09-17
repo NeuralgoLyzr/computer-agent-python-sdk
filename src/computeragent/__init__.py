@@ -42,7 +42,7 @@ _upstream_all = [n for n in getattr(_cas, "__all__", []) if n != "__version__"]
 for _name in _upstream_all:
     globals()[_name] = getattr(_cas, _name)
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 upstream_version = getattr(_cas, "__version__", "unknown")
 
 # Override the two entry points with the proxied versions. Same signatures,
@@ -78,6 +78,23 @@ from .harness import (  # noqa: E402
 # Policy surface (v0.2 — tool-use authorization). Engines themselves
 # (OpaPolicyEngine, CedarPolicyEngine) stay in ``computeragent.policy`` so
 # users opt into Cedar's extra deliberately.
+# Orchestration surface (sub-agent fan-out). The contract types are exported so
+# a caller can build an OrchestrationSpec by hand or read one off a resolved
+# manifest; the dispatch machinery stays in ``computeragent.orchestration``,
+# which the harness drives itself.
+from .orchestration import (  # noqa: E402
+    ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME,
+    CollectMode,
+    OrchestrationIsolation,
+    OrchestrationMode,
+    OrchestrationSpec,
+    RosterEntry,
+    ScopeGuardDecider,
+    WorkerCrewEntry,
+    WorkerResult,
+    WorkerScope,
+    is_orchestration_internal_tool,
+)
 from .policy import (  # noqa: E402
     PolicyAction,
     PolicyDecision,
@@ -173,5 +190,17 @@ _own = [
     "UnknownSessionStoreError",
     "UnknownSubstrateError",
     "UsageRollup",
+    # orchestration layer (sub-agent fan-out)
+    "ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME",
+    "CollectMode",
+    "OrchestrationIsolation",
+    "OrchestrationMode",
+    "OrchestrationSpec",
+    "RosterEntry",
+    "ScopeGuardDecider",
+    "WorkerCrewEntry",
+    "WorkerResult",
+    "WorkerScope",
+    "is_orchestration_internal_tool",
 ]
 __all__ = sorted({*_upstream_all, "__version__"}) + [n for n in _own if n not in set(_upstream_all)]

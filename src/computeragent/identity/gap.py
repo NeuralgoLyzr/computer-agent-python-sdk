@@ -39,7 +39,7 @@ from typing import Any
 
 from ..protocol_types import AgentManifest, IdentitySource
 from .gap_hooks import load_gap_hooks
-from .gap_subagents import load_gap_subagents
+from .gap_subagents import classify_gap_agents, load_gap_subagents
 from .gap_tools import MCP_SERVER_NAME, load_gap_tools
 
 logger = logging.getLogger("computeragent.identity.gap")
@@ -139,15 +139,68 @@ class GapIdentityLoader:
             target_engine,
             options.get("model"),
         )
+        # Surface an orchestration spec when this agent declares a worker crew
+        # (`agents/*.yaml` with `use:`) and/or an `orchestration` block. Absent
+        # for a plain agent, so the single-agent load path is unaffected.
+        crew = classify_gap_agents(workspace_path).workers
+        orchestration = _build_orchestration(raw, runtime_block, crew)
+
         return AgentManifest(
             name=name,
             version=str(version),
             options=options,
             harden=harden,
+            orchestration=orchestration,
         )
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+
+def _build_orchestration(
+    raw: dict[str, Any], runtime_block: dict[str, Any], crew: tuple[Any, ...]
+) -> Any:
+    """Build the orchestration spec from the manifest's ``orchestration`` block
+    plus the resolved worker crew.
+
+    Returns ``None`` for a plain agent (no block and no ``use:`` workers) so the
+    single-agent load path is unaffected. Stage budget falls back to
+    ``runtime.budget_usd``.
+    """
+    from ..orchestration.contract import OrchestrationSpec, normalize_mcp_policy
+
+    block = raw.get("orchestration")
+    if not isinstance(block, dict):
+        block = {}
+    if not block and not crew:
+        return None
+
+    budget_usd = block.get("budget_usd")
+    if budget_usd is None:
+        budget_usd = runtime_block.get("budget_usd")
+
+    mode = block.get("mode")
+    collect = block.get("collect")
+    isolation = block.get("isolation")
+    max_parallel = block.get("max_parallel")
+    return OrchestrationSpec(
+        mode=mode if mode in ("supervised", "roster") else "roster",
+        max_parallel=(
+            max_parallel
+            if isinstance(max_parallel, int)
+            and not isinstance(max_parallel, bool)
+            and max_parallel > 0
+            else 4
+        ),
+        collect=collect if collect in ("into-context", "gate") else "into-context",
+        isolation=isolation if isolation in ("worktree", "none") else "worktree",
+        budget_usd=float(budget_usd) if isinstance(budget_usd, (int, float)) else None,
+        # Workers inherit the orchestrator's MCP servers unless told otherwise.
+        # A fan-out is one logical run, so splitting the tool surface between
+        # the planner and the workers that do the work is the surprising default.
+        worker_mcp=normalize_mcp_policy(block.get("worker_mcp")) or "inherit",
+        workers=tuple(crew),
+    )
 
 
 def _load_yaml(path: Path) -> Any:

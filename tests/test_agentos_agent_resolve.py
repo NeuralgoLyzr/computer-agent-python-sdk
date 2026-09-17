@@ -251,11 +251,55 @@ def test_bindings_do_not_put_a_credential_on_the_resolved_agent(agent_doc):
 
 
 @respx.mock
-def test_refuses_orchestration(agent_doc):
-    agent_doc["orchestration"] = {"mode": "roster", "maxParallel": 4}
+def test_the_orchestration_block_is_carried_as_an_override(agent_doc):
+    # It holds only tunables — the worker crew lives in the GAP repo's
+    # `agents/*.yaml`, which is why this layers over the repo rather than
+    # replacing what it declares.
+    agent_doc["orchestration"] = {
+        "mode": "roster",
+        "maxParallel": 2,
+        "isolation": "none",
+        "collect": "gate",
+        "budgetUsd": 5,
+    }
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    with pytest.raises(UnsupportedAgentError, match="orchestration"):
+    assert _resolve().orchestration == {
+        "mode": "roster",
+        "isolation": "none",
+        "collect": "gate",
+        "maxParallel": 2,
+        "budgetUsd": 5.0,
+    }
+
+
+@respx.mock
+def test_an_absent_or_empty_orchestration_block_is_none(agent_doc):
+    agent_doc["orchestration"] = {}
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+    assert _resolve().orchestration is None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"mode": "swarm"},
+        {"isolation": "container"},
+        {"collect": "eventually"},
+        {"maxParallel": 0},
+        {"maxParallel": "four"},
+        {"budgetUsd": -1},
+        {"budgetUsd": "lots"},
+    ],
+)
+@respx.mock
+def test_a_value_this_run_mode_cannot_honour_is_refused_by_name(agent_doc, block):
+    # Coercing `mode: "swarm"` to "roster" would run a fan-out the agent never
+    # asked for.
+    agent_doc["orchestration"] = block
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    with pytest.raises(UnsupportedAgentError, match=next(iter(block))):
         _resolve()
 
 
