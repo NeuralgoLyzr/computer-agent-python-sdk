@@ -94,7 +94,23 @@ chokepoint.
 The drop-in proxy (`_proxy/`) keeps its own emit for standalone `query()` use, which is why it is a
 separate surface rather than a mode of `ComputerAgent`.
 
+## Orchestration
+
+`orchestration/` is the sub-agent fan-out, ported from the TypeScript harness-server's services. The
+unit a worker runs on is a second `HarnessCoordinator`, parent-linked — this SDK has no session
+registry because one `ComputerAgent` is one session, so `OrchestratorRef` is the snapshot a fan-out
+reads off its parent instead.
+
+The layering is deliberate: `contract.py` is pure types, then a tier of pure functions
+(`parse_roster`, `crew`, `worker_mcp`, `budget`, `scorecard`, `globmatch`, `worker_digest`) that
+touch nothing, then `worktree.py` (real git) and `spawn_child.py` (real sessions), then the two
+dispatchers and the coordinator drive above them. Everything below `spawn_child` is testable without
+an engine, which is where most of the behaviour that used to break in production lives.
+
+Each divergence from the TypeScript original is documented at the site that makes it, and listed in
+the changelog under the release that introduced it.
+
 ## Deferred
 
-MCP support and sub-agent orchestration are refused at resolve time rather than silently degraded.
-Design notes for both, written against the TypeScript implementations, are in [`plans/`](plans/).
+Nothing from the original plan set remains deferred. Design notes written against the TypeScript
+implementations are in [`plans/`](plans/).

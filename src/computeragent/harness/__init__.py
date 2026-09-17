@@ -393,6 +393,7 @@ class ComputerAgent:
             telemetry_pipeline=telemetry_pipeline,
             options_overlay=merged_options,
             git_token=git_token,
+            orchestration_overrides=self.agent.orchestration,
             mcp_bindings=self.agent.mcp_bindings,
             mcp_client=self._build_mcp_client(),
             mcp_bridge_servers=self._build_bridge_servers(),

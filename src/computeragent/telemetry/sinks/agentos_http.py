@@ -56,6 +56,18 @@ DEFAULT_MAX_BUFFER_BYTES = 4_000_000
 # session_ended forces a drain so each run's rollup + transcript land promptly.
 _DRAIN_KINDS = {"session_ended"}
 
+#: Kinds this sink never forwards. See ``emit`` for why each one is here.
+_LOCAL_ONLY_KINDS = frozenset(
+    {
+        "response_first_token",
+        "worker_wave_started",
+        "worker_started",
+        "worker_completed",
+        "worker_wave_ended",
+        "orchestration_scorecard",
+    }
+)
+
 
 class AgentOSHttpSink:
     """Buffer telemetry events and POST them to the AgentOS ingest endpoint."""
@@ -102,7 +114,13 @@ class AgentOSHttpSink:
         # response_first_token is an OTel-trace-only signal (it drives the TTFT
         # span attribute in OtelSink). It carries no audit value, so it must NOT
         # be projected into Mongo via the ingest endpoint.
-        if event.kind == "response_first_token":
+        #
+        # The five wave kinds are skipped for a different reason: the ingest
+        # projection has no writer for them, so every one would land as an
+        # unrecognised row. The audit trail is not lost — each worker is its own
+        # session and its events arrive stamped with `parent_session_id`, which
+        # is what reconstructs the fan-out server-side.
+        if event.kind in _LOCAL_ONLY_KINDS:
             return
         dto = self._serialize(event)
         # Append synchronously (no await before this) so the buffer preserves

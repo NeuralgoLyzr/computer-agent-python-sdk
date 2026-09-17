@@ -18,6 +18,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from ..orchestration.wave_events import WAVE_EVENT_KINDS, WaveReporter
 from ..protocol_types import (
     EngineContext,
     EngineDriver,
@@ -60,6 +61,15 @@ class _SessionState:
         self.usage = UsageRollup()
         self.messages: list[Any] = []
         self.started_at = time.monotonic()
+        # Carried across engine turns: a roster orchestrator takes a second
+        # (the closing synthesis), and what the run REPORTS must be that turn's
+        # answer, not the roster the first one wrote.
+        self.last_assistant_text: str = ""
+        self.result_payload: Any = None
+        # Wave events produced by a fan-out, waiting to ride out on this
+        # session's stream. A supervised fan-out fills this while the engine
+        # loop is parked on a tool call; the roster path drains it live.
+        self.wave_events: asyncio.Queue[EngineEvent | None] = asyncio.Queue()
 
 
 class HarnessCoordinator:
@@ -96,6 +106,11 @@ class HarnessCoordinator:
         # The PAT used to clone a private source, when there is one.
         git_token: str | None = None,
         mcp_bindings: tuple[Any, ...] = (),
+        # The registry's own `orchestration` block, layered over whatever the
+        # identity loader declares. See `_apply_orchestration_overrides`.
+        orchestration_overrides: dict[str, Any] | None = None,
+        # False for a coordinator that IS a worker. See `_orchestration`.
+        drive_orchestration: bool = True,
         mcp_client: Any | None = None,
         mcp_bridge_servers: Any | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
@@ -130,6 +145,8 @@ class HarnessCoordinator:
         # MCP servers bound on the agent, and the client that reaches them.
         # Attached at boot rather than at construction because discovery is
         # a network call and construction is synchronous.
+        self._orchestration_overrides = dict(orchestration_overrides or {})
+        self._drive_orchestration = drive_orchestration
         self._mcp_bindings = mcp_bindings
         self._mcp_client = mcp_client
         self._mcp_bridge_servers = mcp_bridge_servers
@@ -164,6 +181,14 @@ class HarnessCoordinator:
         # It used to "work" by luck; refuse it instead of corrupting a
         # transcript.
         self._turn_in_flight = False
+        # ── orchestration state ─────────────────────────────────────────
+        # One counter per SESSION, not per turn: a second chat's fan-out is
+        # `wave_2`. Worker ids repeat across waves (`w1` again), so the wave id
+        # is what keeps the two waves' rows apart on the caller's side.
+        self._wave_seq = 0
+        # Set by `_run_wave` when the fan-out wants one more turn to write the
+        # answer; consumed immediately by the turn loop.
+        self._pending_follow_up: str | None = None
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -243,7 +268,66 @@ class HarnessCoordinator:
                 hardened = harden(dict(loaded.options or {}))
                 if isinstance(hardened, dict):
                     loaded = replace(loaded, options=hardened)
+        loaded = self._apply_orchestration_overrides(loaded)
+        loaded = self._attach_roster_contract(loaded)
         self._manifest = loaded
+
+    def _apply_orchestration_overrides(self, loaded: Any) -> Any:
+        """Layer the registry's ``orchestration`` block over the loader's spec.
+
+        The two sources are not alternatives and neither can replace the other.
+        The GAP repo is the only place that can name a worker CREW — ``use:``
+        entries are files in that repo — while the registry is where an operator
+        turns the knobs (parallelism, isolation, the stage budget) without a
+        commit. So the repo supplies the crew and the defaults, and the registry
+        overrides field by field.
+
+        A registry block on an agent whose repo declares no orchestration at all
+        still creates a spec: a worktree fan-out needs no crew, because its
+        workers are defined inline by the roster the model writes.
+        """
+        if not self._orchestration_overrides:
+            return loaded
+        from dataclasses import replace
+
+        from ..orchestration.contract import OrchestrationSpec
+
+        spec = getattr(loaded, "orchestration", None) or OrchestrationSpec()
+        overrides = self._orchestration_overrides
+        changes: dict[str, Any] = {}
+        for wire, field in (
+            ("mode", "mode"),
+            ("isolation", "isolation"),
+            ("collect", "collect"),
+            ("maxParallel", "max_parallel"),
+            ("budgetUsd", "budget_usd"),
+        ):
+            if wire in overrides:
+                changes[field] = overrides[wire]
+        if not changes:
+            return loaded
+        logger.info("orchestration: registry overrides %s", sorted(changes))
+        return replace(loaded, orchestration=replace(spec, **changes))
+
+    def _attach_roster_contract(self, loaded: Any) -> Any:
+        """Append the roster contract to a ``mode: "roster"`` orchestrator's
+        system prompt.
+
+        Runs AFTER ``harden`` on purpose. The contract is a property of the
+        protocol this harness PARSES, not of the agent's own compliance posture,
+        and hardening rewrites the options wholesale — so appending earlier
+        risked a harden implementation dropping it, with the only symptom being
+        an agent that occasionally answers a plain question in JSON.
+        """
+        spec = getattr(loaded, "orchestration", None)
+        if spec is None or getattr(spec, "mode", None) != "roster":
+            return loaded
+        from dataclasses import replace
+
+        from ..orchestration.roster_contract import append_roster_contract
+
+        options = append_roster_contract(dict(loaded.options or {}), self._engine.name)
+        return replace(loaded, options=options)
 
     async def _attach_mcp(self, loaded: Any) -> Any:
         """Merge the agent's MCP servers into the engine options.
@@ -440,6 +524,9 @@ class HarnessCoordinator:
             policy_decider=self._policy_decider,
             budget_max_usd=self._budget_max_usd,
             resume_session_id=self._engine_session_id,
+            # Supervised orchestration only; `None` for every other agent, and
+            # an engine that ignores the field behaves exactly as before.
+            dispatch=self._build_dispatch_hook(state),
         )
 
         # session_started fires ONCE per ComputerAgent lifecycle so AgentOS
@@ -495,109 +582,54 @@ class HarnessCoordinator:
     async def _stream_engine_events(
         self, state: _SessionState, ctx: EngineContext
     ) -> AsyncIterator[EngineEvent]:
-        """Iterate the engine, translate each event, push telemetry."""
-        last_assistant_text = ""
-        result_payload: Any = None
-        # Fired once per turn when the first streamed content chunk arrives →
-        # time-to-first-token. Only the OtelSink consumes it.
-        first_token_emitted = False
+        """Drive the engine, then any orchestration this agent declares.
+
+        A plain agent takes exactly one pass through the loop and behaves
+        identically to before. A ``mode: "roster"`` orchestrator takes a second:
+        its first turn composes the roster (machine text), the fan-out runs, and
+        the workers' reports are fed back for one closing turn that writes the
+        answer the caller actually gets.
+
+        DIVERGENCE FROM THE TS PORT, stated because it is visible to callers.
+        The TS harness WITHHOLDS the roster text — it never reaches the client.
+        This SDK streams events live, so by the time the harness knows the text
+        was a roster it has already been yielded. What the run REPORTS is still
+        the closing answer: the second turn overwrites ``last_assistant_text``
+        and the terminal result, so ``ChatResult`` and the ``session_ended``
+        telemetry carry the answer, not the roster. A caller rendering raw
+        assistant text mid-stream can suppress it by watching for
+        ``worker_wave_started``.
+        """
+        orchestration = self._orchestration()
+        turn_index = 0
         try:
-            async for ev in self._engine.start_session(ctx):
-                if ev.kind == "sdk_message":
-                    # Remember the engine's own session id so the next turn can
-                    # resume this conversation. It appears on every message the
-                    # CLI emits; the first one we see is the one to keep.
-                    engine_sid = getattr(ev.payload, "session_id", None)
-                    if isinstance(engine_sid, str) and engine_sid:
-                        self._engine_session_id = engine_sid
-                if ev.kind == "usage_snapshot":
-                    state.usage.absorb(ev)
-                    # The LIFECYCLE total is summed from finished turns at the
-                    # bottom of this function, not from these snapshots: a
-                    # cumulative engine restarts its counters each turn, so
-                    # absorbing them here would leave the conversation billed
-                    # as its final turn alone.
-                    # Forward as a synthetic ResultMessage-shaped telemetry
-                    # event so the existing OTel sink picks it up.
-                    await self._emit(
-                        TelemetryEvent(
-                            kind="usage_snapshot",
-                            session_id=state.session_id,
-                            agent_name=state.agent_name,
-                            agent_description=state.agent_description,
-                            payload={
-                                "input_tokens": ev.input_tokens,
-                                "output_tokens": ev.output_tokens,
-                                "cache_creation_input_tokens": ev.cache_creation_input_tokens,
-                                "cache_read_input_tokens": ev.cache_read_input_tokens,
-                                "total_cost_usd": ev.cost_usd or 0.0,
-                                "cost_semantic": ev.cost_semantic or "delta",
-                            },
-                            raw=ev,
-                        )
-                    )
-                elif ev.kind == "sdk_message":
-                    state.messages.append(ev.payload)
-                    last_assistant_text = _maybe_assistant_text(ev.payload, last_assistant_text)
-                    result_payload = _maybe_result_payload(ev.payload, result_payload)
-                    # First, try the claude-agent-sdk-shape translator —
-                    # for the Claude engine this yields tool_use /
-                    # assistant_message / tool_result / usage_snapshot
-                    # events directly.
-                    upstream_events = TelemetryEvent.from_message(
-                        ev.payload,
-                        session_id=state.session_id,
-                        agent_name=state.agent_name,
-                    )
-                    if upstream_events:
-                        for tev in upstream_events:
-                            if state.agent_description is not None:
-                                tev.agent_description = state.agent_description
-                            await self._emit(tev)
-                            # An assistant_message marks the end of one LLM call;
-                            # re-arm so the NEXT call's first streamed token fires
-                            # its own response_first_token (per-call TTFT).
-                            if tev.kind == "assistant_message":
-                                first_token_emitted = False
-                    elif upstream_events is None:
-                        # from_message returned None → unrecognized type, not a
-                        # claude-agent-sdk message (e.g. Anthropic raw response,
-                        # OpenAI ChatCompletion, plain dict from gitagent).
-                        # Synthesise so AgentOS / OTel sinks see the same picture.
-                        for tev in _synthesise_telemetry(
-                            ev.payload,
-                            session_id=state.session_id,
-                            agent_name=state.agent_name,
-                            agent_description=state.agent_description,
-                        ):
-                            await self._emit(tev)
-                    # upstream_events == [] → recognised SDK type with nothing to
-                    # emit (StreamEvent, RateLimitEvent, …). Use the first
-                    # content-bearing StreamEvent of the turn as the
-                    # time-to-first-token signal (OtelSink-only).
-                    elif not first_token_emitted and _is_first_token_stream_event(ev.payload):
-                        first_token_emitted = True
-                        with suppress(Exception):
-                            ft_ev = TelemetryEvent(
-                                kind="response_first_token",
-                                session_id=state.session_id,
-                                agent_name=state.agent_name,
-                            )
-                            if state.agent_description is not None:
-                                ft_ev.agent_description = state.agent_description
-                            await self._emit(ft_ev)
-                elif ev.kind == "permission_request":
-                    # Engines ask the harness; the harness routes to user
-                    # callbacks / policy decider. The Future returned by
-                    # ``ctx.on_permission_request`` is what unblocks.
-                    pass
-                elif ev.kind in {"session_started", "session_ended"}:
-                    # Engines may emit these but the coordinator owns the
-                    # canonical pair — ignore engine-side duplicates.
-                    pass
-                else:
-                    raise HarnessProtocolError(f"unknown engine event kind: {ev.kind!r}")
-                yield ev
+            while True:
+                turn_index += 1
+                async for ev in self._drive_engine(state, ctx):
+                    yield ev
+
+                follow_up: str | None = None
+                # Roster mode fans out AFTER the orchestrator's turn, so the
+                # run — and the workspace — stay alive until the workers finish.
+                # Only the first turn composes a roster; the closing turn is an
+                # ordinary answer and must never be parsed as one, or a wave
+                # would follow every wave forever.
+                if (
+                    orchestration is not None
+                    and getattr(orchestration, "mode", None) == "roster"
+                    and turn_index == 1
+                ):
+                    async for wave_ev in self._run_wave(state, orchestration):
+                        yield wave_ev
+                    follow_up = self._pending_follow_up
+                    self._pending_follow_up = None
+
+                for wave_ev in _drain(state.wave_events):
+                    yield wave_ev
+
+                if not follow_up:
+                    break
+                ctx = await self._follow_up_context(state, ctx, follow_up)
         except BaseException as exc:
             duration_ms = (time.monotonic() - state.started_at) * 1000.0
             with suppress(Exception):
@@ -615,10 +647,10 @@ class HarnessCoordinator:
             # can build a faithful session_ended payload with cumulative
             # data. NO per-chat session_ended emission — that would
             # produce N agent_logs rows for one conversation.
-            if last_assistant_text:
-                self._lifecycle_last_assistant_text = last_assistant_text
-            if result_payload is not None:
-                self._lifecycle_last_result_payload = result_payload
+            if state.last_assistant_text:
+                self._lifecycle_last_assistant_text = state.last_assistant_text
+            if state.result_payload is not None:
+                self._lifecycle_last_result_payload = state.result_payload
             # This turn is over and `state.usage` is final — fold it into the
             # conversation total that `session_ended` reports.
             self._lifecycle_usage.add(state.usage)
@@ -630,6 +662,394 @@ class HarnessCoordinator:
             self._turn_in_flight = False
             with suppress(Exception):
                 await self._pipeline.flush()
+
+    async def _drive_engine(
+        self, state: _SessionState, ctx: EngineContext
+    ) -> AsyncIterator[EngineEvent]:
+        """Iterate the engine for ONE turn, translate each event, push telemetry.
+
+        Called once per engine turn. A roster orchestrator takes a second turn
+        (the closing synthesis), so the per-turn state that used to be locals
+        here — the last assistant text, the terminal result payload — lives on
+        ``state`` instead: the caller reads it after this generator ends, and
+        the second turn is meant to overwrite it.
+        """
+        # Fired once per turn when the first streamed content chunk arrives →
+        # time-to-first-token. Only the OtelSink consumes it.
+        first_token_emitted = False
+        async for ev in self._engine.start_session(ctx):
+            if ev.kind == "sdk_message":
+                # Remember the engine's own session id so the next turn can
+                # resume this conversation. It appears on every message the
+                # CLI emits; the first one we see is the one to keep.
+                engine_sid = getattr(ev.payload, "session_id", None)
+                if isinstance(engine_sid, str) and engine_sid:
+                    self._engine_session_id = engine_sid
+            if ev.kind == "usage_snapshot":
+                state.usage.absorb(ev)
+                # The LIFECYCLE total is summed from finished turns at the
+                # bottom of this function, not from these snapshots: a
+                # cumulative engine restarts its counters each turn, so
+                # absorbing them here would leave the conversation billed
+                # as its final turn alone.
+                # Forward as a synthetic ResultMessage-shaped telemetry
+                # event so the existing OTel sink picks it up.
+                await self._emit(
+                    TelemetryEvent(
+                        kind="usage_snapshot",
+                        session_id=state.session_id,
+                        agent_name=state.agent_name,
+                        agent_description=state.agent_description,
+                        payload={
+                            "input_tokens": ev.input_tokens,
+                            "output_tokens": ev.output_tokens,
+                            "cache_creation_input_tokens": ev.cache_creation_input_tokens,
+                            "cache_read_input_tokens": ev.cache_read_input_tokens,
+                            "total_cost_usd": ev.cost_usd or 0.0,
+                            "cost_semantic": ev.cost_semantic or "delta",
+                        },
+                        raw=ev,
+                    )
+                )
+            elif ev.kind == "sdk_message":
+                state.messages.append(ev.payload)
+                state.last_assistant_text = _maybe_assistant_text(
+                    ev.payload, state.last_assistant_text
+                )
+                state.result_payload = _maybe_result_payload(ev.payload, state.result_payload)
+                # First, try the claude-agent-sdk-shape translator —
+                # for the Claude engine this yields tool_use /
+                # assistant_message / tool_result / usage_snapshot
+                # events directly.
+                upstream_events = TelemetryEvent.from_message(
+                    ev.payload,
+                    session_id=state.session_id,
+                    agent_name=state.agent_name,
+                )
+                if upstream_events:
+                    for tev in upstream_events:
+                        if state.agent_description is not None:
+                            tev.agent_description = state.agent_description
+                        await self._emit(tev)
+                        # An assistant_message marks the end of one LLM call;
+                        # re-arm so the NEXT call's first streamed token fires
+                        # its own response_first_token (per-call TTFT).
+                        if tev.kind == "assistant_message":
+                            first_token_emitted = False
+                elif upstream_events is None:
+                    # from_message returned None → unrecognized type, not a
+                    # claude-agent-sdk message (e.g. Anthropic raw response,
+                    # OpenAI ChatCompletion, plain dict from gitagent).
+                    # Synthesise so AgentOS / OTel sinks see the same picture.
+                    for tev in _synthesise_telemetry(
+                        ev.payload,
+                        session_id=state.session_id,
+                        agent_name=state.agent_name,
+                        agent_description=state.agent_description,
+                    ):
+                        await self._emit(tev)
+                # upstream_events == [] → recognised SDK type with nothing to
+                # emit (StreamEvent, RateLimitEvent, …). Use the first
+                # content-bearing StreamEvent of the turn as the
+                # time-to-first-token signal (OtelSink-only).
+                elif not first_token_emitted and _is_first_token_stream_event(ev.payload):
+                    first_token_emitted = True
+                    with suppress(Exception):
+                        ft_ev = TelemetryEvent(
+                            kind="response_first_token",
+                            session_id=state.session_id,
+                            agent_name=state.agent_name,
+                        )
+                        if state.agent_description is not None:
+                            ft_ev.agent_description = state.agent_description
+                        await self._emit(ft_ev)
+            elif ev.kind == "permission_request":
+                # Engines ask the harness; the harness routes to user
+                # callbacks / policy decider. The Future returned by
+                # ``ctx.on_permission_request`` is what unblocks.
+                pass
+            elif ev.kind in {"session_started", "session_ended"}:
+                # Engines may emit these but the coordinator owns the
+                # canonical pair — ignore engine-side duplicates.
+                pass
+            elif ev.kind in WAVE_EVENT_KINDS:
+                # An engine has no reason to emit these — the harness does —
+                # but tolerate it rather than killing a turn over an event
+                # whose whole purpose is observability.
+                pass
+            else:
+                raise HarnessProtocolError(f"unknown engine event kind: {ev.kind!r}")
+            yield ev
+            # A supervised fan-out runs inside the engine's own tool call, so
+            # its wave events are produced while this loop is parked awaiting
+            # the next engine event. Drain them here: the CLI is blocked on
+            # the tool result anyway, so the first thing that arrives after
+            # the fan-out carries them out.
+            for wave_ev in _drain(state.wave_events):
+                yield wave_ev
+
+    # ── orchestration ──────────────────────────────────────────────────────
+
+    def _orchestration(self) -> Any:
+        """The agent's orchestration spec, or ``None`` for a plain agent.
+
+        A coordinator that is itself a WORKER always answers ``None``, and the
+        fan-out is single-level as a result. That mirrors the TS harness
+        structurally rather than by accident: there, the fan-out branch lives in
+        ``driveSession`` while a worker is started with ``runSession``, so the
+        branch is simply never reached for a worker. Here one class owns both
+        paths, so the distinction has to be a flag.
+
+        Without it a referenced worker whose own repo declares ``orchestration:``
+        would fan out again, and nothing bounds the recursion: each level clones
+        a repo, opens worktrees and spends the caller's budget.
+        """
+        if not self._drive_orchestration:
+            return None
+        return getattr(self._manifest, "orchestration", None) if self._manifest else None
+
+    def _orchestrator_ref(self) -> Any:
+        """A snapshot of this session for the fan-out to spawn workers from."""
+        from ..orchestration.spawn_child import OrchestratorRef
+
+        assert self._workspace_path is not None
+        assert self._lifecycle_session_id is not None
+        return OrchestratorRef(
+            session_id=self._lifecycle_session_id,
+            engine=self._engine,
+            engine_name=self._engine.name,
+            engine_options=dict((self._manifest.options if self._manifest else None) or {}),
+            envs=self._envs,
+            workdir=self._workspace_path,
+            agent_id=self._agent_id,
+            agent_name=self._agent_name or (self._manifest.name if self._manifest else None),
+            policy_decider=self._policy_decider,
+            telemetry_pipeline=self._pipeline,
+            session_store=self._session_store,
+            project_key=self._project_key,
+            orchestration=self._orchestration(),
+            git_token=self._git_token,
+        )
+
+    def _new_wave_reporter(self, state: _SessionState) -> Any:
+        self._wave_seq += 1
+        return WaveReporter(
+            state.wave_events.put_nowait, state.session_id, f"wave_{self._wave_seq}"
+        )
+
+    def _build_dispatch_hook(self, state: _SessionState) -> Any:
+        """Surface A — the in-session ``dispatch_many`` the engine exposes.
+
+        Returns ``None`` for anything but a supervised orchestrator, so an
+        ordinary session hands the engine no hook and nothing changes.
+        """
+        spec = self._orchestration()
+        if spec is None or getattr(spec, "mode", None) != "supervised":
+            return None
+
+        from ..orchestration.contract import DispatchResultItem
+        from ..orchestration.parse_roster import RosterEntry
+        from ..orchestration.roster_run import dispatch_roster_entries
+        from ..orchestration.worktree_dispatch import dispatch_worktree_entries
+
+        async def dispatch(items: Any) -> Any:
+            entries = tuple(
+                RosterEntry(
+                    task=item.task,
+                    id=item.id,
+                    use=item.use,
+                    role=item.role,
+                    scope=item.scope,
+                    model=item.model,
+                    tools=item.tools,
+                )
+                for item in items
+            )
+            reporter = self._new_wave_reporter(state)
+            parent = self._orchestrator_ref()
+            result: Any
+            if spec.isolation == "worktree":
+                result = await dispatch_worktree_entries(parent, spec, entries, reporter=reporter)
+            else:
+                result = await dispatch_roster_entries(parent, spec, entries, reporter=reporter)
+            logger.info(
+                "orchestration.dispatched: session=%s mode=supervised:%s dispatched=%d",
+                state.session_id,
+                spec.isolation,
+                len(result.workers),
+            )
+            return [
+                DispatchResultItem(id=w.id, status=w.status, text=w.text, error=w.error)
+                for w in result.workers
+            ]
+
+        return dispatch
+
+    async def _run_wave(self, state: _SessionState, spec: Any) -> AsyncIterator[EngineEvent]:
+        """Surface B — fan out the workers this turn\'s roster named, streaming
+        the wave\'s events as they happen.
+
+        Runs the fan-out as a task and drains the reporter\'s queue while it
+        runs, so a caller watching the stream sees each worker start and finish
+        instead of a silent gap followed by everything at once. Never raises: a
+        fan-out failure is logged and the turn ends with the orchestrator\'s own
+        text.
+        """
+        from ..orchestration.roster_run import (
+            direct_answer_reason,
+            dispatch_roster,
+            gate_applies,
+            no_reports_to_fold,
+            synthesis_enabled,
+            wave_needs_synthesis,
+        )
+        from ..orchestration.scorecard import build_scorecard
+        from ..orchestration.worker_digest import (
+            build_direct_answer_prompt,
+            build_synthesis_prompt,
+        )
+        from ..orchestration.worktree_dispatch import dispatch_worktree_roster
+
+        text = _result_text(state.result_payload) or state.last_assistant_text
+        reporter = self._new_wave_reporter(state)
+        parent = self._orchestrator_ref()
+        worktree = spec.isolation == "worktree"
+
+        async def run() -> Any:
+            if worktree:
+                return await dispatch_worktree_roster(parent, spec, text, reporter)
+            return await dispatch_roster(parent, spec, text, reporter)
+
+        task = asyncio.ensure_future(run())
+        task.add_done_callback(lambda _t: state.wave_events.put_nowait(None))
+        while True:
+            ev = await state.wave_events.get()
+            if ev is None:
+                break
+            yield ev
+            await self._emit_wave_telemetry(state, ev)
+
+        try:
+            result = task.result()
+        except Exception:  # noqa: BLE001 — a fan-out must not lose the turn
+            logger.exception("orchestration: the fan-out failed; keeping the agent's own text")
+            return
+
+        logger.info(
+            "orchestration.dispatched: session=%s mode=%s dispatched=%d %s",
+            state.session_id,
+            "worktree" if worktree else "clone",
+            result.dispatched,
+            (
+                f"conflicts={len(result.conflicts)}"
+                if worktree
+                else f"unmatched={len(result.unmatched)}"
+            ),
+        )
+
+        gate = None
+        if worktree and spec.collect == "gate" and gate_applies(result.outcome):
+            # Measurement + the gate: score the integrated run — unless the
+            # agent deliberately fanned out to nobody, which is not a run to
+            # score (see `gate_applies`).
+            card = build_scorecard(
+                parent.agent_name or "agent",
+                workers=result.workers,
+                conflicts=result.conflicts,
+                integrated=result.integrated,
+                aborted=result.aborted,
+                budget=result.budget,
+            )
+            gate = card.gate
+            logger.info(
+                "orchestration.scorecard: session=%s verdict=%s reasons=%s integrated=%d",
+                state.session_id,
+                card.gate.verdict,
+                list(card.gate.reasons),
+                len(card.integrated),
+            )
+            # The gate verdict is the point of a `collect: "gate"` run, and it
+            # used to exist only in a log line — the caller who asked for the
+            # work never learned whether it passed.
+            score_ev = EngineEvent(
+                kind="orchestration_scorecard",
+                payload={
+                    "session_id": state.session_id,
+                    "wave_id": reporter.wave_id,
+                    "verdict": card.gate.verdict,
+                    "scorecard": _as_plain(card),
+                },
+            )
+            yield score_ev
+            await self._emit_wave_telemetry(state, score_ev)
+
+        if not wave_needs_synthesis(result, result.outcome):
+            logger.info(
+                "orchestration.synthesis_skipped: session=%s outcome=%s — no workers "
+                "dispatched and the orchestrator answered in prose, so its own answer stands",
+                state.session_id,
+                result.outcome,
+            )
+            return
+        if not synthesis_enabled():
+            return
+
+        self._pending_follow_up = (
+            # Nothing ran and nothing failed to run: the ONLY reason a closing
+            # turn exists is that the orchestrator's text was a roster, so
+            # asking it to summarise a wave would be asking it to summarise
+            # nothing.
+            build_direct_answer_prompt(direct_answer_reason(result.outcome))
+            if no_reports_to_fold(result)
+            else build_synthesis_prompt(
+                workers=result.workers,
+                unmatched=getattr(result, "unmatched", ()) or (),
+                integrated=getattr(result, "integrated", ()) or (),
+                conflicts=getattr(result, "conflicts", None),
+                aborted=result.aborted,
+                budget=result.budget,
+                gate=gate,
+                collect=spec.collect,
+            )
+        )
+
+    async def _emit_wave_telemetry(self, state: _SessionState, ev: EngineEvent) -> None:
+        """Mirror one wave event onto the telemetry pipeline.
+
+        Best-effort like every other emit here: a sink must never cost a wave.
+        """
+        with suppress(Exception):
+            tev = TelemetryEvent(
+                kind=ev.kind,  # type: ignore[arg-type]
+                session_id=state.session_id,
+                agent_name=state.agent_name,
+                agent_description=state.agent_description,
+                payload=dict(ev.payload or {}),
+                raw=ev,
+            )
+            await self._emit(tev)
+
+    async def _follow_up_context(
+        self, state: _SessionState, ctx: EngineContext, prompt: str
+    ) -> EngineContext:
+        """A context for the closing turn, resuming the engine session the
+        orchestrator just finished.
+
+        A fresh queue, because the previous one was closed when its single
+        message drained. No ``user_message`` telemetry: this prompt is harness
+        machinery, not something the user typed, and projecting it would put the
+        harness\'s own instructions into the conversation transcript.
+        """
+        from dataclasses import replace
+
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        await _enqueue_user_message(queue, prompt)
+        state.user_queue = queue
+        return replace(
+            ctx,
+            user_message_queue=_QueueAsyncIterable(queue),
+            resume_session_id=self._engine_session_id,
+        )
 
     # ── helpers ────────────────────────────────────────────────────────────
 
@@ -784,6 +1204,44 @@ class _QueueAsyncIterable:
             if item is None:
                 return
             yield item
+
+
+def _drain(queue: asyncio.Queue[Any]) -> list[Any]:
+    """Everything already in ``queue``, without waiting for more.
+
+    Used where the consumer cannot block — the engine loop is mid-turn — so the
+    events ride out with the next thing that happens rather than holding it up.
+    """
+    out: list[Any] = []
+    while True:
+        try:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return out
+        if item is not None:
+            out.append(item)
+
+
+def _result_text(payload: Any) -> str:
+    """The final text off a terminal result message, when there is one."""
+    result = getattr(payload, "result", None)
+    if result is None and isinstance(payload, dict):
+        result = payload.get("result")
+    return result if isinstance(result, str) else ""
+
+
+def _as_plain(value: Any) -> Any:
+    """A dataclass tree as plain dicts/lists, for an event payload a sink will
+    serialise. Anything already plain passes through untouched."""
+    import dataclasses
+
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: _as_plain(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    if isinstance(value, dict):
+        return {k: _as_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_as_plain(v) for v in value]
+    return value
 
 
 def _stringify_prompt(message: Any) -> str:

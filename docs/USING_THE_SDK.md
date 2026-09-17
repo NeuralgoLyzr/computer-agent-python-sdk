@@ -509,8 +509,16 @@ The stages, each of which is a thing that can independently be wrong:
   service lives, and neither does AgentOS's discovery document. Pass `mcp_base_url=`.
 - **`persist_auth` is carried and ignored.** Nothing in the hosted dispatch path reads it either; it
   appears to matter only inside Lyzr's own service.
-- **Sub-agent orchestration is not supported.** An agent with `orchestration` set is refused, because it
-  would otherwise run as a plain single agent — not what it declares.
+- **A worker crew (`use:`) needs a reachable source.** `use:` resolves to a local path or a git URL and
+  the worker clones it with the same `git_token` the orchestrator used; a bare registered-agent id is
+  not resolvable client-side and fails at clone — see §16.
+- **Sub-agent fan-out is single-level.** A worker never fans out, even when its own repo declares
+  `orchestration:` — matching the hosted harness, and closing an otherwise unbounded recursion.
+- **A worker has no timeout.** One that wedges holds its slot in the pool and the wave never
+  ends; the stage budget bounds spend, not time. Bound the whole turn with `asyncio.wait_for`.
+- **In roster mode the roster text still reaches your stream.** The hosted harness withholds it; this
+  SDK streams events live, so it is already out by the time the harness knows what it was. The
+  `ChatResult` and the telemetry still carry the closing answer — see §16.
 - **Only `native` gateways (or none).** Generic gateways are refused.
 - **Only two harnesses run in-process:** `claude-agent-sdk` and `gitagent`. Anything else needs your own
   `EngineDriver` passed as `engine=`.
@@ -546,6 +554,8 @@ import …`. You never need a private path.
 | `AgentResolveError`, `UnsupportedAgentError`, `GatewayConfigError`, `UnknownEngineError`, `UnknownSessionStoreError`, `HarnessError` | Construction-time failures. `UnsupportedAgentError` subclasses `AgentResolveError`. |
 | `EngineDriver`, `SessionStore`, `PolicyDecider`, `PermissionRequest` | Extension-point protocols. |
 | `Pipeline`, `configure`, `PolicyToolAuthorizer` | Telemetry and policy. |
+| `OrchestrationSpec`, `WorkerCrewEntry`, `WorkerScope`, `RosterEntry`, `WorkerResult`, `OrchestrationMode`, `OrchestrationIsolation`, `CollectMode` | Sub-agent fan-out contract (§16). Read one off `manifest.orchestration`, or build one by hand. |
+| `ScopeGuardDecider`, `is_orchestration_internal_tool`, `ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME` | The per-worker write guard, and the two names a policy layer needs to recognise the harness's own control plane (§16). |
 
 ### Getting the assistant's reply out
 
@@ -569,9 +579,12 @@ An empty completion surfaces as a `ResultMessage` with an empty `.result` — no
 
 ### `EngineEvent`
 
-`kind` is `"sdk_message"` or `"usage_snapshot"` (the only two the claude engine emits; treat the set as
-open). `payload` carries the raw upstream message for `sdk_message`. The token and cost fields are
-populated on `usage_snapshot`.
+`kind` is `"sdk_message"` or `"usage_snapshot"` from the claude engine, plus the five the harness
+itself emits during a sub-agent fan-out — `worker_wave_started`, `worker_started`,
+`worker_completed`, `worker_wave_ended`, `orchestration_scorecard` (§16). Treat the set as open.
+
+`payload` carries the raw upstream message for `sdk_message` and a plain dict for the five wave
+kinds. The token and cost fields are populated on `usage_snapshot`.
 
 ### Async, threads, concurrency
 
@@ -719,3 +732,219 @@ uv run python examples/e2e/mcp_live_run.py --fake-facade \
 
 Add `--deny-mcp` to exercise the policy gate; it asserts the facade received no execute request at
 all, which is the difference between blocking a call and discarding its result.
+
+---
+
+## 16. Sub-agent fan-out
+
+An agent can split a task across **worker sub-agents** that run concurrently, each as its own
+session with its own workspace, telemetry and guardrail. This is not the Claude CLI's in-context
+`Task` tool: a worker is a real session, so it shows up as a nested child in traces, its tool calls
+pass the same policy decider, and its spend is capped individually.
+
+Two things are separate and easy to confuse:
+
+| | Where it comes from | What it is |
+|---|---|---|
+| **Embedded sub-agents** | `agents/<name>.yaml` with an inline `prompt`, or `agents/<name>/SOUL.md` | Native Claude Agent SDK sub-agents, run in-context via the Agent tool. Unchanged from before. |
+| **Referenced workers** | `agents/<name>.yaml` with a `use:` | A *crew* — each runs as its own session against a different repo. This section. |
+
+A file with `use:` is never also an embedded sub-agent; `use:` wins.
+
+### Turning it on
+
+Nothing to pass at construction. The agent's GAP repo declares it:
+
+```yaml
+# agent.yaml
+name: orchestrator
+version: "1.0.0"
+orchestration:
+  mode: roster          # or: supervised
+  isolation: worktree   # or: none
+  collect: into-context # or: gate
+  max_parallel: 4
+  budget_usd: 8.0       # falls back to runtime.budget_usd
+  worker_mcp: inherit   # or: none, or a list of server names
+```
+
+An agent that declares neither an `orchestration:` block nor a `use:` crew is a plain single agent
+and nothing in this section applies to it — the run path is byte-identical to before.
+
+The registry's own `orchestration` block on the agent document (`mode`, `maxParallel`, `isolation`,
+`collect`, `budgetUsd`) layers **over** the repo's, field by field, so an operator can turn a knob
+without a commit. It can never supply a crew: `use:` entries are files in the repo. A value the
+registry accepted but this run mode cannot honour is refused by name at resolve time rather than
+coerced.
+
+### The two modes
+
+**`roster`** — the orchestrator's turn ends with a JSON block naming its workers. The harness parses
+it, fans out, and then feeds the workers' reports back for **one more turn** that writes the answer:
+
+````text
+```json
+{"workers": [
+  {"id": "w1", "role": "api",  "task": "implement the endpoints", "scope": {"write": ["src/api/**"]}},
+  {"id": "w2", "role": "docs", "task": "document them",           "scope": {"write": ["docs/**"]}}
+]}
+```
+````
+
+The harness appends a short contract to a roster agent's system prompt, because every orchestrator
+prompt in the wild says "emit exactly one JSON block, nothing else" and none say what to do when the
+task needs no decomposition. Without it, asked a plain question the model obeys the only rule it was
+given and emits `{"workers": []}` — nobody is dispatched and the user gets machine output where an
+answer should be.
+
+**`supervised`** — the orchestrator gets an in-session tool, `mcp__orchestration__dispatch_many`, and
+asks for workers mid-turn; their reports come back as the tool result. The tool is injected only for
+this mode, and it is **not put to the policy decider**: it touches no file, host or network, and
+everything the workers it starts then do arrives back at the same tool boundary where the same policy
+applies in full. A default-deny policy written for the agent's real tools would otherwise deny every
+fan-out by omission.
+
+### The two isolation strategies
+
+**`worktree`** (the default) — shared codebase. The orchestrator's workspace *is* the repo being
+worked on. Each worker gets its own `git worktree` off a shared baseline commit, so
+`git diff --name-only` is that worker's exact record of what it wrote, and worker A's writes can
+never appear in worker B's diff. The branches are then merged, which measures scope overlap for
+free: two workers whose scopes did not overlap cannot conflict, so **a merge conflict is the
+finding**. Workers are defined inline by the roster — no crew needed.
+
+**`none`** — independent. Each roster entry is matched to a crew member (`use:` names the template;
+the roster supplies the per-instance `id` and `task`) and the worker clones that repo into its own
+workspace:
+
+```yaml
+# agents/reviewer.yaml
+use: github.com/acme/reviewer-agent      # a git URL, or a local path
+separate_session: true                   # default — own session id, parent-linked
+scope:
+  write: ["reports/**"]
+budget_usd: 2.0
+max_turns: 12
+model: my-model-id
+tools: ["Read", "Grep"]
+mcp: inherit                             # or: none, or ["jira"]
+```
+
+A roster entry that matches no crew member is reported as `unmatched` rather than dropped — that is
+a configuration error and a `collect: gate` run fails on it.
+
+### What a worker inherits
+
+| | Inherited? | Notes |
+|---|---|---|
+| `envs` | yes | Plus anything the worker's own spec adds. |
+| Model | yes, when the roster names none | Without the fallback a worker sends no model and the CLI substitutes its own default, which a gateway-routed deployment rejects outright. |
+| MCP servers | per `worker_mcp` — **`inherit` is the default** | A fan-out is one logical run; splitting the tool surface between the planner and the workers that do the work is the surprising default. |
+| The bound guardrail | **always** | Otherwise the orchestrator's every tool call is gated while its workers' `Bash`/`Write`/MCP calls run through nothing. |
+| `git_token` | yes | So a private `use:` repo clones. |
+
+Two MCP details worth knowing. An **in-process** server (the GAP repo's own `gap_tools`) is never
+inherited: its live instance is served by the session that built it, so a worker presenting the same
+object cannot connect — and the inherited entry would win over the worker's own working copy.
+Separately, an inherited entry carries the **caller's** credential, so a worker cloned from a
+third-party repo via `use:` acts with the caller's MCP identity; the grant is logged at `warning`
+whenever the source is not inline, which is the line to grep when auditing who got what.
+
+### Scope, and what it actually enforces
+
+`scope.write` becomes a per-worker guard on that worker's session. It denies `Write`/`Edit`/
+`MultiEdit`/`NotebookEdit` calls whose target falls outside the declared globs, or outside the
+worker's workspace entirely. Globs are minimatch-shaped: `*` stops at a separator, `**` crosses
+them, `{a,b}` alternates, and a leading dot is not special.
+
+It is a guard, not a sandbox. A shell tool is blind — a command string does not say what it
+touches — so `Bash` is allowed and measured afterwards against the worktree diff. That is why the
+merge matters: it catches what the guard cannot see.
+
+A worker that declares *no* scope is unscoped, and still gets an allow-all decider rather than
+nothing. An engine that routes every tool call through the permission path has nobody subscribed to
+a worker's stream, so its first tool call would wait forever and take the whole wave with it.
+
+### Budget
+
+`budget_usd` is a **stage** budget for the whole wave. Each worker's cap is the smaller of its own
+and its fair share of what is left, because the workers run concurrently: hand N in-flight workers
+the whole remainder each and the stage overruns N× while every worker stays inside its own cap. A
+wave whose fair share falls below $0.05 per worker is refused **before dispatch** — a clean,
+reportable abort rather than a partial spend. A tighter crew-declared cap still wins.
+
+The cap rides on each worker as `max_budget_usd`, which the Claude CLI enforces in-session. An
+engine that declares `capabilities.budget: False` ignores it, and the dispatch site says so rather
+than reporting a cap nothing enforces.
+
+### Watching a wave
+
+Five event kinds appear on the orchestrator's own chat stream, so the 30–120s gap while its workers
+run is explained rather than silent:
+
+| Kind | Carries |
+|---|---|
+| `worker_wave_started` | `wave_id`, `mode`, `isolation`, `max_parallel`, `planned[]` |
+| `worker_started` | `worker_id`, `worker_session_id`, `role`, `task`, `engine`, `model`, `scope` |
+| `worker_completed` | `status`, `error`, `text`, `artifacts[]`, `usage`, `duration_ms` |
+| `worker_wave_ended` | `dispatched`, `integrated[]`, `conflicts{}`, `unmatched[]`, `budget` |
+| `orchestration_scorecard` | `verdict`, the full `scorecard` (`collect: gate` only) |
+
+```python
+async for ev in agent.chat("build the API and document it"):
+    if ev.kind == "worker_started":
+        print("→", ev.payload["worker_id"], ev.payload["task"])
+    elif ev.kind == "worker_completed":
+        print("←", ev.payload["worker_id"], ev.payload["status"], ev.payload.get("artifacts"))
+```
+
+The wave id (`wave_1`, `wave_2`, …) is per **session**, not per turn: worker ids repeat across waves
+(`w1` again), so the wave id is what keeps two waves' rows apart.
+
+These five reach your own telemetry sinks too. They are **not** forwarded to AgentOS ingest — its
+projection has no writer for a wave — but nothing is lost: each worker is its own session and its
+events arrive stamped with `parent_session_id`, which is what reconstructs the fan-out server-side.
+
+### The gate
+
+With `collect: gate` a worktree run is scored after the merge. The verdict is mechanical: every
+worker completed, no merge conflict, no budget abort, and at least one worker dispatched. It is
+emitted as `orchestration_scorecard` and folded into the closing turn's prompt, so the caller who
+asked for the work learns whether it passed.
+
+One outcome is deliberately **not** scored: an empty roster. The agent emitted the roster shape with
+nobody in it because the task needed no delegation, and scoring that produced the worst possible
+verdict for a turn where nothing was wrong.
+
+### What the run reports
+
+A roster run takes two engine turns. The second one — prompted with the workers' reports, the merge
+result, the gate verdict and the budget — writes the answer, and that is what `ChatResult` and the
+`session_ended` telemetry carry.
+
+**One divergence from the hosted harness, visible to you.** The hosted harness *withholds* the roster
+text, so a client never sees it. This SDK streams events live, so by the time the harness knows the
+text was a roster it has already been yielded. If you render raw assistant text mid-stream, suppress
+it from `worker_wave_started` onwards. Set `ORCHESTRATOR_SYNTHESIS=0` to skip the closing turn
+entirely and keep the old behaviour.
+
+When the wave has nothing to report *and* the orchestrator's own text was machine output, the
+closing turn gets a different prompt — "answer the user directly; your last message was never shown
+to them" — rather than a wave digest. Asking a model to summarise a wave that ran nobody produces a
+summary of nothing, or a flat refusal, on a turn where the user simply asked a question.
+
+If the orchestrator answered in **prose** and dispatched nobody, its own answer stands untouched:
+synthesising there would spend a call and overwrite a good answer.
+
+### Verifying it end to end
+
+`examples/e2e/subagent_live_run.py` runs nine staged checkpoints. `--scripted` drives the harness
+with a stub engine that writes a sentinel file per worker, so it needs no credentials and cannot be
+fooled by a model that paraphrases plausibly:
+
+```bash
+uv run python examples/e2e/subagent_live_run.py --scripted
+```
+
+Drop `--scripted` and pass the usual `--base-url` / `--agent-id` / `--api-key` / `--llm-proxy-url`
+to have a real agent compose the roster and real workers do the work.

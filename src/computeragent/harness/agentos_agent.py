@@ -101,6 +101,13 @@ class ResolvedAgent:
     mcp_bindings: tuple[McpBinding, ...] = ()
     #: ``"engine"`` (the AgentOS default) or ``"studio"``.
     mcp_mode: str = DEFAULT_MCP_MODE
+    #: The registry's ``orchestration`` block, camelCase and normalised, or
+    #: ``None``. It carries only the tunables — ``mode``, ``maxParallel``,
+    #: ``isolation``, ``collect``, ``budgetUsd`` — and never a crew: the worker
+    #: crew lives in the GAP repo's ``agents/*.yaml`` and only the repo can name
+    #: it. So this is an OVERRIDE layered over what the repo declares, not a
+    #: replacement for it.
+    orchestration: dict[str, Any] | None = None
 
     @property
     def has_native_gateway(self) -> bool:
@@ -186,7 +193,9 @@ def require_runnable_harness(agent: ResolvedAgent, *, engine_given: bool) -> Non
     )
 
 
-def _require_supported(doc: dict[str, Any], agent_id: str) -> tuple[tuple[McpBinding, ...], str]:
+def _require_supported(
+    doc: dict[str, Any], agent_id: str
+) -> tuple[tuple[McpBinding, ...], str, dict[str, Any] | None]:
     """Refuse agent shapes this run mode does not implement, naming the field.
 
     A *null* gateway is fine — that is a direct-Anthropic run, exactly what the
@@ -219,13 +228,58 @@ def _require_supported(doc: dict[str, Any], agent_id: str) -> tuple[tuple[McpBin
             "it here."
         )
 
-    if doc.get("orchestration") is not None:
-        raise UnsupportedAgentError(
-            f"agent {agent_id}: orchestration is set and sub-agent fan-out is not supported in this "
-            "run mode. The agent would run as a plain single agent, which is not what it declares."
-        )
+    return bindings, mode, _orchestration_overrides(doc, agent_id)
 
-    return bindings, mode
+
+_ORCHESTRATION_CHOICES = {
+    "mode": {"supervised", "roster"},
+    "isolation": {"worktree", "none"},
+    "collect": {"into-context", "gate"},
+}
+
+
+def _orchestration_overrides(doc: dict[str, Any], agent_id: str) -> dict[str, Any] | None:
+    """The registry's ``orchestration`` block, validated by field.
+
+    Refusing a value the registry accepted but this run mode does not implement
+    is the whole point: silently coercing ``mode: "swarm"`` to ``"roster"``
+    would run a fan-out the agent never asked for.
+    """
+    block = doc.get("orchestration")
+    if not isinstance(block, dict) or not block:
+        return None
+
+    out: dict[str, Any] = {}
+    for key, allowed in _ORCHESTRATION_CHOICES.items():
+        value = block.get(key)
+        if value is None:
+            continue
+        if value not in allowed:
+            raise UnsupportedAgentError(
+                f"agent {agent_id}: orchestration.{key}={value!r} is not one of "
+                f"{sorted(allowed)} — this run mode cannot honour it."
+            )
+        out[key] = value
+
+    parallel = block.get("maxParallel")
+    if parallel is not None:
+        if not isinstance(parallel, int) or isinstance(parallel, bool) or parallel < 1:
+            raise UnsupportedAgentError(
+                f"agent {agent_id}: orchestration.maxParallel={parallel!r} must be a positive "
+                "integer."
+            )
+        out["maxParallel"] = parallel
+
+    budget = block.get("budgetUsd")
+    if budget is not None:
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget < 0:
+            raise UnsupportedAgentError(
+                f"agent {agent_id}: orchestration.budgetUsd={budget!r} must be a non-negative "
+                "number."
+            )
+        out["budgetUsd"] = float(budget)
+
+    return out or None
 
 
 def _require_consistent_gateway(doc: dict[str, Any], agent_id: str) -> None:
@@ -299,7 +353,7 @@ def resolve_agent(
             f"AgentOS returned {type(doc).__name__}, expected an object, from {url}"
         )
 
-    mcp_bindings, mcp_mode = _require_supported(doc, agent_id)
+    mcp_bindings, mcp_mode, orchestration = _require_supported(doc, agent_id)
     _require_consistent_gateway(doc, agent_id)
 
     gateway = doc.get("model_gateway") if isinstance(doc.get("model_gateway"), dict) else None
@@ -316,6 +370,7 @@ def resolve_agent(
         agent_type=doc.get("type"),
         mcp_bindings=mcp_bindings,
         mcp_mode=mcp_mode,
+        orchestration=orchestration,
     )
     logger.debug(
         "resolved agent %s name=%r harness=%s gateway=%s model=%s",
