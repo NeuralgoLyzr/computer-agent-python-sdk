@@ -15,6 +15,7 @@ import respx
 
 from computeragent.harness.agentos_agent import (
     AgentResolveError,
+    McpModeUnsupportedError,
     ResolvedAgent,
     UnsupportedAgentError,
     api_base,
@@ -163,13 +164,90 @@ def test_refuses_generic_gateway(agent_doc):
         _resolve()
 
 
+# ── MCP ──────────────────────────────────────────────────────────────────────
+#
+# The resolver used to refuse any bound MCP server outright. It now refuses only
+# the shape it genuinely cannot run, and the "no MCP base configured" case lives
+# in ComputerAgent.__init__ — it depends on the caller's arguments, not on the
+# document. See tests/test_mcp_resolution.py for that half.
+
+
 @respx.mock
-def test_refuses_bound_mcp_servers(agent_doc):
+def test_no_bindings_resolves_exactly_as_before(agent_doc):
+    """Regression guard for relaxing the refusal: the common agent, which binds
+    nothing, must be untouched by any of this."""
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    agent = _resolve()
+
+    assert agent.mcp_bindings == ()
+    assert agent.mcp_mode == "engine"
+
+
+@respx.mock
+def test_engine_mode_bindings_are_parsed_onto_the_resolved_agent(agent_doc):
+    agent_doc["mcp_servers"] = [
+        {"server_id": "srv_1", "action_names": ["get_weather"], "tool_name": "Weather"}
+    ]
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    agent = _resolve()
+
+    assert [b.tool_name for b in agent.mcp_bindings] == ["Weather"]
+    assert agent.mcp_bindings[0].action_names == ("get_weather",)
+    assert agent.mcp_mode == "engine"
+
+
+@respx.mock
+def test_studio_mode_with_bindings_is_refused(agent_doc):
+    """The tool loop would run inside Lyzr Studio, so this SDK would see no tool
+    calls at all — no spans, no policy, no HITL — while looking like it worked."""
+    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "action_names": ["x"]}]
+    agent_doc["mcp_mode"] = "studio"
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    with pytest.raises(McpModeUnsupportedError, match="studio"):
+        _resolve()
+
+
+@respx.mock
+def test_studio_mode_without_bindings_is_harmless(agent_doc):
+    """Nothing would have been attached anyway, so there is nothing to refuse."""
+    agent_doc["mcp_mode"] = "studio"
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    assert _resolve().mcp_mode == "studio"
+
+
+@respx.mock
+def test_a_malformed_binding_is_refused_naming_the_rule(agent_doc):
+    """A parse failure IS a refusal: such a binding persists cleanly in Studio
+    and then does nothing, which is what the rules exist to convert into a
+    visible error."""
+    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "action_names": []}]
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    with pytest.raises(UnsupportedAgentError, match="silently exposes no tools"):
+        _resolve()
+
+
+@respx.mock
+def test_an_unknown_mcp_mode_is_refused(agent_doc):
+    agent_doc["mcp_mode"] = "Engine"
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    with pytest.raises(UnsupportedAgentError, match="mcp_mode"):
+        _resolve()
+
+
+@respx.mock
+def test_bindings_do_not_put_a_credential_on_the_resolved_agent(agent_doc):
+    """The dataclass holds no secret by design, and adding fields is exactly
+    when that invariant gets broken."""
     agent_doc["mcp_servers"] = [{"server_id": "srv_1", "action_names": ["x"]}]
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    with pytest.raises(UnsupportedAgentError, match="mcp_servers"):
-        _resolve()
+    assert KEY not in repr(_resolve())
 
 
 @respx.mock

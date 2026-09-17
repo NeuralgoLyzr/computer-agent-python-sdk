@@ -439,7 +439,9 @@ All of these are raised **from the constructor**, before anything boots.
 |---|---|---|
 | `harness` not in `{claude-agent-sdk, gitagent}` (e.g. `deepagents`, a custom TS engine) | `harness` | Pass `engine=` with your own `EngineDriver` to run it anyway, or re-register the agent on a supported harness. |
 | `model_gateway.type != "native"` (a **generic** gateway) | `model_gateway.type` | Not implemented — its upstream contract differs. Bind the agent to a native gateway, or to none. |
-| `mcp_servers` non-empty | `mcp_servers` | MCP is not supported. The servers would be silently dropped, so the run is refused instead. Unbind them, or run this agent server-side. |
+| `mcp_servers` bound with `mcp_mode: "studio"` | `mcp_mode` | The tool loop runs inside Lyzr Studio, so this SDK never sees the calls — no spans, no policy, no HITL. Re-register with `mcp_mode: "engine"` (the AgentOS default). |
+| `mcp_servers` malformed (no `action_names`, a duplicate action across bindings) | the rule it broke | Such a binding persists cleanly in Studio and then silently does nothing, so it is refused here. Fix it on the agent. |
+| `mcp_servers` bound but no MCP base configured | `mcp_base_url` | Pass `mcp_base_url=` or set `LYZR_MCP_CLIENT_URL`. Refused rather than started tool-less — see §15. |
 | `orchestration` set | `orchestration` | Sub-agent fan-out is not supported. The agent would run as a plain single agent, which is not what it declares. |
 | `modelGatewayId` set but `model_gateway` absent in the response | `did not resolve` | The binding did not resolve **for this caller**. Check that the agent's `ownerGroup` matches a group with a configured gateway. |
 | gateway resolved but carries no `baseUrl` | `GatewayConfigError` | Fix the gateway's `baseUrl` in AgentOS. |
@@ -502,8 +504,11 @@ The stages, each of which is a thing that can independently be wrong:
 
 ## 12. Known limitations
 
-- **MCP is not supported.** An agent with non-empty `mcp_servers` is refused at resolve time rather than run
-  with the servers silently dropped.
+- **MCP runs in `engine` mode only.** `mcp_mode: "studio"` is refused — see §15.
+- **MCP needs a service base you supply.** The agent document names the servers but not where the MCP
+  service lives, and neither does AgentOS's discovery document. Pass `mcp_base_url=`.
+- **`persist_auth` is carried and ignored.** Nothing in the hosted dispatch path reads it either; it
+  appears to matter only inside Lyzr's own service.
 - **Sub-agent orchestration is not supported.** An agent with `orchestration` set is refused, because it
   would otherwise run as a plain single agent — not what it declares.
 - **Only `native` gateways (or none).** Generic gateways are refused.
@@ -614,3 +619,103 @@ entirely. That is the quickest way to work on a private agent while debugging.
 > GitHub-App-only, while these deployments authenticate with PATs — held on the agent or in the Lyzr
 > credential vault — so it could never return a usable token. It was removed in 0.4.3 rather than left
 > to turn a missing token into a slower, less legible failure.
+
+
+---
+
+## 15. MCP tools
+
+An agent can have Lyzr MCP servers bound to it. When it does, this SDK turns each binding into an
+**in-process** MCP server whose tools call the Lyzr MCP service directly — so the model can
+interleave them with `Read`/`Write`/`Bash` in one plan, and every call produces a span and passes
+your `policy_decider`.
+
+```python
+async with ComputerAgent(
+    base_url="http://localhost:8788/agentos/api",
+    agent_id="6aa93f1b3817a13d3103d2c1",
+    api_key=KEY,
+    llm_proxy_url="http://127.0.0.1:8786",
+    mcp_base_url="https://mcp.lyzr.ai",     # or set LYZR_MCP_CLIENT_URL
+) as agent:
+    await agent.chat("Check the weather in Pune and summarise it.")
+```
+
+### The one input you have to supply
+
+| Input | Default | Needed when |
+|---|---|---|
+| `mcp_base_url` | `LYZR_MCP_CLIENT_URL` from the environment | the agent binds any MCP server |
+| `mcp_bridge_url` | — | only if a hosted MCP **bridge** fronts this SDK; see below |
+
+The agent document tells the SDK *which* servers and *which* tools, but not *where* the MCP service
+is — and neither does AgentOS's discovery document, which publishes only `ingest`, `api` and `otel`.
+So it is an argument, exactly like `llm_proxy_url` and `git_token`.
+
+**If you bind servers and configure no base, the run is refused.** That is deliberate: an agent
+running without its tools is indistinguishable from one whose model simply never chose a tool, and
+that ambiguity is the whole failure class this layer exists to remove.
+
+### Tool names
+
+A binding's `tool_name` is the tool **namespace**, defaulting to the server id:
+
+```
+server:  <tool_name>
+tools:   mcp__<tool_name>__<action_name>
+grant:   mcp__<tool_name>          (one entry covers the server)
+```
+
+Identical to what the hosted stack produces, so a prompt or an allowlist written against one works
+against the other. Two caveats, both because nothing upstream validates `tool_name`:
+
+- It must match `[A-Za-z0-9_-]+`. A namespace with a space produces `mcp__My Server__x`, which no
+  allowlist can match — such a binding is **skipped with a warning** rather than attached.
+- Two bindings may legitimately carry the same `tool_name` (AgentOS enforces action-name uniqueness
+  across bindings, but not this). The first wins; the second is skipped with a warning.
+
+### `allowed_tools` and MCP
+
+If you pass `options={"allowed_tools": [...]}`, the SDK **extends** it with `mcp__<namespace>` grants.
+If you pass none, none is created — creating one would flip "every tool allowed" into "only these"
+and silently strip `Read`/`Write`/`Bash`.
+
+Note this list is **inert** under `bypassPermissions`, which is what this run mode dispatches. The
+gate that actually fires on every MCP call is `policy_decider`, routed through a `PreToolUse` hook.
+If you want to block MCP tools, deny them there — not in `allowed_tools`.
+
+### Failure behaviour
+
+A facade outage, an unreachable base, or a binding whose action names do not match the server's real
+tool names all degrade the run to **"no MCP tools this turn"** with a warning, rather than failing
+the boot. A model can work around a missing tool; it cannot work around an exception. The warnings
+name the binding, and for a name mismatch they print the bound action names beside the server's
+actual ones — that pair is usually the whole diagnosis.
+
+A tool that runs and fails comes back as a normal result with `is_error`, which the model can read
+and adapt to, rather than as a protocol fault it cannot recover from.
+
+### The bridge escape hatch
+
+If your deployment already fronts this SDK with the CAS's translator proxy, `mcp_bridge_url=` points
+at its MCP bridge instead of calling the facade in-process. The entries produced are byte-for-byte
+what the hosted stack emits. Two things to know: the bridge 401s a request with no credential and has
+no operator-token fallback, and the URL must be the proxy's *externally reachable* origin — the CAS
+default is loopback, which means nothing from outside its pod.
+
+### Verifying it end to end
+
+`examples/e2e/mcp_live_run.py` runs nine staged checkpoints. `--fake-facade` serves a local stand-in
+whose tool returns a sentinel string, so it needs no MCP credentials and cannot be fooled by a model
+that paraphrases plausibly:
+
+```bash
+uv run python examples/e2e/mcp_live_run.py --fake-facade \
+    --base-url http://localhost:8788/agentos/api \
+    --agent-id  6aa93f1b3817a13d3103d2c1 \
+    --api-key   "$LYZR_API_KEY" \
+    --llm-proxy-url http://127.0.0.1:8786
+```
+
+Add `--deny-mcp` to exercise the policy gate; it asserts the facade received no execute request at
+all, which is the difference between blocking a call and discarding its result.

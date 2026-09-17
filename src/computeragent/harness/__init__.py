@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from ..engines import resolve_engine
+from ..mcp.binding import McpBinding, McpBindingError
 from ..protocol_types import (
     AgentManifest,
     EngineDriver,
@@ -47,6 +49,7 @@ from ..substrates import LocalSubstrate
 from ..telemetry.pipeline import Pipeline
 from .agentos_agent import (
     AgentResolveError,
+    McpModeUnsupportedError,
     ResolvedAgent,
     UnsupportedAgentError,
     api_base,
@@ -259,6 +262,15 @@ class ComputerAgent:
         # Only a PRIVATE source needs one. Without it the clone is
         # unauthenticated, which fails for a private repo.
         git_token: str | None = None,
+        # The Lyzr MCP service base, e.g. https://mcp.lyzr.ai. Required only
+        # when the agent binds MCP servers. Defaults to LYZR_MCP_CLIENT_URL —
+        # the same variable the hosted stack sets — so an operator who has
+        # already configured it gets this for free.
+        mcp_base_url: str | None = None,
+        # Point MCP at a hosted bridge instead of calling the facade
+        # in-process. Only for a deployment already fronted by the CAS's
+        # translator proxy — see computeragent.mcp.bridge.
+        mcp_bridge_url: str | None = None,
         # ── overrides for what the agent document already answers ────────
         # Use this workspace instead of cloning the agent's own source. A local
         # Path, a git URL, or an inline manifest dict.
@@ -299,6 +311,22 @@ class ComputerAgent:
             else resolve_engine(engine or self.agent.harness)
         )
         engine_name = resolved_engine.name
+
+        # 2b. MCP needs a service base, and the agent document cannot supply
+        #     one. Refusing beats running silently tool-less: an agent with no
+        #     tools is indistinguishable from one whose model never chose a
+        #     tool, which is the failure class the whole binding layer exists
+        #     to eliminate.
+        self._mcp_base_url = mcp_base_url or os.environ.get("LYZR_MCP_CLIENT_URL") or None
+        self._mcp_bridge_url = mcp_bridge_url or None
+        if self.agent.mcp_bindings and not (self._mcp_base_url or self._mcp_bridge_url):
+            raise AgentResolveError(
+                f"agent {self.agent.agent_id} binds {len(self.agent.mcp_bindings)} MCP server(s) "
+                f"({', '.join(b.tool_name for b in self.agent.mcp_bindings)}) but no MCP service "
+                "base is configured, so the tools cannot be reached. Pass mcp_base_url= or set "
+                "LYZR_MCP_CLIENT_URL (or pass mcp_bridge_url= if a hosted MCP bridge fronts "
+                "this SDK). The run is refused rather than started without its tools."
+            )
 
         # 3. Where the model calls go. Raises here, naming the missing
         #    parameter, rather than surfacing as a 405 mid-run.
@@ -365,7 +393,39 @@ class ComputerAgent:
             telemetry_pipeline=telemetry_pipeline,
             options_overlay=merged_options,
             git_token=git_token,
+            mcp_bindings=self.agent.mcp_bindings,
+            mcp_client=self._build_mcp_client(),
+            mcp_bridge_servers=self._build_bridge_servers(),
         )
+
+    def _build_bridge_servers(self) -> Any | None:
+        """Pre-built HTTP entries when a hosted bridge was named.
+
+        Built here rather than at boot because, unlike the in-process path,
+        there is no discovery call — the bridge does ``tools/list`` itself when
+        the CLI handshakes.
+        """
+        if not self.agent.mcp_bindings or not self._mcp_bridge_url:
+            return None
+        from ..mcp.bridge import build_bridge_servers
+
+        return build_bridge_servers(
+            self.agent.mcp_bindings, bridge_url=self._mcp_bridge_url, api_key=self._api_key
+        )
+
+    def _build_mcp_client(self) -> Any | None:
+        """The facade client, or ``None`` when the agent binds no MCP servers.
+
+        Holds the caller's own key — the same one that fetched the agent
+        document — which is exactly what the hosted bridge forwards upstream.
+        There is no operator credential anywhere in this path.
+        """
+        # An explicit bridge wins: it is the deliberate override.
+        if not self.agent.mcp_bindings or self._mcp_bridge_url or not self._mcp_base_url:
+            return None
+        from ..mcp.client import LyzrMcpClient
+
+        return LyzrMcpClient(base_url=self._mcp_base_url, api_key=self._api_key)
 
     async def __aenter__(self) -> ComputerAgent:
         return self
@@ -391,6 +451,9 @@ __all__ = [
     "ComputerAgent",
     "GatewayConfigError",
     "HarnessError",
+    "McpBinding",
+    "McpBindingError",
+    "McpModeUnsupportedError",
     "ResolvedAgent",
     "UnknownEngineError",
     "UnknownIdentityLoaderError",

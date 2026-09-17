@@ -15,6 +15,132 @@ Both fields are emitted verbatim by AgentOS at `packages/agentos-server/src/rout
 
 ---
 
+## 0. Revision — 2026-09-16, after re-reading both codebases
+
+The plan above was written before the single-run-mode work landed. §1–§6 (the TypeScript
+survey) were re-verified line by line and are **unchanged and accurate**. What follows is
+what re-reading turned up; §7 onward is rewritten against it.
+
+### 0.1 Four things in `claude-agent-sdk` that make "port `mcp.ts` verbatim" wrong
+
+This is the substantive finding. The TS bridge emits MCP over the wire, where the full content
+union and `structuredContent` are available. The Python SDK's in-process path is **narrower
+than the MCP wire**, and every place it is narrower it discards silently — the exact failure
+class `normalizeContent` exists to prevent.
+
+Read from the installed `claude_agent_sdk` 0.2.153:
+
+| # | Upstream behaviour | Where | Consequence for a verbatim port |
+|---|---|---|---|
+| 1 | `run_tool` builds `CallToolResult` from **only** `content` and `isError` | `__init__.py:608-613` | `structuredContent` **has no path to the CLI**. Hoisting a `{type:"structured", data}` block out of `content` — which is what `mcp.ts:413-414` does — would *delete the tool's payload*. Strictly worse than the TS. |
+| 2 | `_convert_tool_content` accepts `text`, `image`, `resource_link`, `resource`; **everything else is dropped with a warning** | `__init__.py:_convert_tool_content` | `mcp.ts`'s `MCP_CONTENT_TYPES` also contains **`audio`**. Passing an audio block through, as the TS does, hands it to a converter that drops it. |
+| 3 | `_build_input_schema` passes a dict through **only** when it has a string `type` *and* a `properties` key; otherwise it reinterprets the dict as a `{param_name: python_type}` mapping | `__init__.py:_build_input_schema` | A facade schema of `{"type":"object"}` (no `properties`) is not passed through — it is read as a parameter map, producing `{"type":"object","properties":{"type":{...}},"required":["type"]}`. Every call then fails argument validation. |
+| 4 | Arguments are validated with `jsonschema` **before** the handler runs; a failure returns `is_error` without ever calling the tool | `__init__.py:602-606` | Validation moves from the remote MCP server to our process. A facade schema stricter or more malformed than what the server actually enforces rejects calls the server would have accepted, and the model sees a tool that never works. |
+
+**Therefore** `content.py` is not a transcription of `normalizeContent`. It is the same
+*intent* — never drop what the tool returned — expressed against a different sink:
+
+```
+known-and-convertible (text/image/resource_link/resource) → pass through
+{type:"structured", data}                                 → JSON text block   (NOT hoisted — 1)
+audio, and every other type                               → JSON text block   (NOT passed — 2)
+non-object element                                        → str() text block
+None/absent                                               → []
+```
+
+Same rule in one line: **exactly the four types upstream can convert survive as blocks;
+everything else becomes text.** A text block always validates and always reaches the model, so
+nothing is lost. The parity test therefore asserts *Python-correct* outputs and cites this
+table for the two rows where they deliberately differ from `mcp.ts`.
+
+### 0.2 The MCP base: an init kwarg, and no server change
+
+Open question 2 asked where the SDK learns the Lyzr MCP service base, and floated a discovery
+key as "the best fit". Re-reading says otherwise, for a reason that was not visible before:
+
+**AgentOS does not know the MCP base either.** `LYZR_MCP_CLIENT_URL` appears in
+`packages/computeragent-server` (the CAS) and nowhere in `agentos-server`; its `config.ts` has
+no MCP entry. So a discovery key is not "publish a value the server already holds" — it is a
+new config on a service that has never needed one, for a single consumer.
+
+Meanwhile the SDK has an established precedent for exactly this shape: `llm_proxy_url` and
+`git_token` are both optional init kwargs, both needed only in specific cases, both things the
+server would supply in a hosted deployment. MCP is the third instance of that pattern.
+
+**Decision: `mcp_base_url=` on `ComputerAgent.__init__`**, falling back to
+`LYZR_MCP_CLIENT_URL` in the environment (matching the CAS's own var name, so an operator who
+has already set it for the CAS gets it for free). No server change. A discovery key stays
+available later if a hosted deployment wants one; nothing here forecloses it.
+
+There are **two** reachable spellings of the facade, and the SDK should use the first:
+
+| Base | Paths | Used by |
+|---|---|---|
+| `LYZR_MCP_CLIENT_URL` (e.g. `https://mcp-dev.test.studio.lyzr.ai`) | `/api/v1/mcp/servers/{id}/tools`, `/api/v1/mcp/tools/execute` | the bridge (`mcp.ts`) |
+| `LYZR_UPSTREAM_BASE` (the Studio host) | `/v3/tools/mcp/servers`, `/v3/tools/mcp/servers/{id}/tools` — **reads only, no execute** | AgentOS bind-time validation |
+
+`lyzr-studio-client.ts:223-226` states the two "expose identical bodies for these reads", but
+the Studio proxy has no execute route, so only the first can back a running tool. This also
+partly answers open question 3: AgentOS reaches the read half with a Studio key on a different
+host, which is why one key working against both was never demonstrated. Still to verify live.
+
+### 0.3 `allowed_tools` is inert in this run mode — the real gate is the policy decider
+
+§6 makes "extend `allowed_tools`, never create it" the load-bearing safety rule, and
+`tests/test_mcp_coordinator_wiring.py` was to call it "the single most important assertion".
+
+That was written before `build_options` fixed `permission_mode: "bypassPermissions"` as this
+run mode's default (`gateway_envs.py:192-194`, mirroring what AgentOS dispatches). Under a
+prompt-skipping mode `allowed_tools` grants nothing and forbids nothing — the SDK already says
+so out loud at `engines/claude_agent.py:146-152`, and a test pins it.
+
+So the rule stays (it is three lines, and it is correct the moment a caller passes
+`permission_mode="default"`), but it is **demoted from safety property to hygiene**. The gate
+that actually fires on every MCP call in this run mode is `policy_decider`, routed through the
+`PreToolUse` hook at `engines/claude_agent.py:154-172`. Phase 4 is where the feature's
+governance claim is proved, and it is no longer optional polish.
+
+### 0.4 `tool_name` becomes an MCP server name, and nothing validates it
+
+`mcp-binding.ts:157-160` calls `toolName` a "Display/audit label only — never sent to the
+LLM", and its own wire-shape docstring uses `"tool_name": "My Server"`. But
+`agent-defs.ts:916-925` sets `name: b.toolName` as the tool **namespace**, so that example
+produces the MCP server name `My Server` and tool ids `mcp__My Server__get_weather`. The two
+comments contradict; the second is what runs.
+
+Nothing validates it on either side: not AgentOS (which checks action-name uniqueness across
+bindings but not `tool_name`), not the CAS, and not `claude-agent-sdk` — `subprocess_cli.py:660-682`
+serialises whatever key it is given straight into `--mcp-config`. A namespace with a space
+reaches the CLI unexamined.
+
+The Python builder therefore validates the namespace itself: `[A-Za-z0-9_-]+`, and a binding
+that fails it is **skipped with a warning naming the binding and the fix** rather than
+attached. Refusing the whole run would be wrong — the other bindings are fine — and attaching
+it would produce a server whose tools are unaddressable. Raised as a server-side question in
+§9; not fixed there by this work.
+
+### 0.5 Smaller corrections
+
+- **The fork block is gone.** `371c815`'s dead `from .fork import` was removed; `coordinator.py`
+  contains no `fork` reference. Phase 3 therefore **introduces the first deep-merge site**,
+  rather than sitting after one. The overlay merge it must not break is the shallow
+  `merged_options.update(self._options_overlay)` at `coordinator.py:219-221`.
+- **The dependency work is already done.** `pyproject.toml` pins `claude-agent-sdk>=0.2.152,<0.3`
+  and the lock resolves 0.2.153 with **`mcp` 1.27.2** — not 2.x. Phase 3's floor bump is a
+  no-op, and open question 7 is moot for the versions we actually resolve.
+- **The fixture is already right.** `tests/fixtures/agent_doc.json` already carries
+  `mcp_servers: []` and `mcp_mode: "engine"`. No fixture change needed.
+- **`httpx` is not optional.** The plan proposed an `mcp = ["httpx>=0.27"]` extra. `httpx`
+  arrives transitively via `claude_agent_sdk → mcp` and cannot be absent — this was established
+  when a test asserting otherwise had to be rewritten. **No new extra.**
+- **Line numbers refreshed:** the MCP refusal is `agentos_agent.py:183-188`; the test to
+  rewrite is `tests/test_agentos_agent_resolve.py:166-172`.
+- **`gap.py` creates `allowed_tools`** when a GAP repo declares tools (`gap.py:330-331`), so
+  the extend path is live on a GAP source and the absent path is live on a plain repo. Both
+  need a test.
+
+---
+
 ## 1. The TypeScript wire and server side
 
 ### 1.1 What a descriptor is (and what it deliberately is not)
@@ -299,165 +425,220 @@ Reserved names to avoid colliding with: `gap_tools` (`gap_tools.py:54`) and `for
 
 ## 7. Phased implementation plan
 
-Each phase is independently shippable and testable. File paths are relative to the repo root.
+Each phase is independently shippable and testable. Paths are relative to the repo root.
+Rewritten against §0 — where this differs from the original §7, §0 says why.
 
-### Phase 1 — carry the fields (no behaviour change)
+### Phase 1 — carry the fields, narrow the refusal (no tools attached yet)
 
-**Goal:** the agent doc's MCP fields reach the harness as typed values, and the blanket refusal becomes a targeted one. Nothing attaches tools yet.
+New module `src/computeragent/mcp/binding.py`, called from `harness/agentos_agent.py`:
 
-- New module `src/computeragent/mcp/binding.py`, called from `src/computeragent/harness/agentos_agent.py`, parsing `mcp_servers` and `mcp_mode` into frozen values:
+```python
+@dataclass(frozen=True)
+class McpBinding:
+    server_id: str
+    action_names: tuple[str, ...]
+    tool_name: str          # namespace; defaults to server_id — mcp-binding.ts:157-160
+    persist_auth: bool
 
-  ```python
-  @dataclass(frozen=True)
-  class McpBinding:
-      server_id: str
-      action_names: tuple[str, ...]
-      tool_name: str          # defaults to server_id, per mcp-binding.ts:157-160
-      persist_auth: bool
+DEFAULT_MCP_MODE = "engine"   # mcp-binding.ts:44
+```
 
-  DEFAULT_MCP_MODE = "engine"   # mirrors mcp-binding.ts:44
-  ```
+Parse rules ported from `mcp-binding.ts:90-165`: non-list ⇒ error; entry not an object ⇒
+error; missing `server_id` ⇒ error; empty `action_names` ⇒ error (`MCP_ACTIONS_REQUIRED`);
+the same action name in two bindings ⇒ error (`MCP_DUPLICATE_ACTION`); `mcp_mode` outside
+`{engine, studio}` ⇒ error, never a silent fallback. Absent `mcp_servers` and `[]` are both
+"no bindings" here — the absent-vs-empty distinction `ParsedMcpBindings` draws matters only to
+a PATCH, which this SDK does not perform.
 
-  Parse rules mirrored from `mcp-binding.ts:90-165`: non-list ⇒ error; entry missing `server_id` ⇒ error; empty `action_names` ⇒ error (`MCP_ACTIONS_REQUIRED` — an empty whitelist silently exposes no tools); duplicate action name across bindings ⇒ error (`MCP_DUPLICATE_ACTION`). `mcp_mode` other than `engine`/`studio` ⇒ error, never a silent fallback (`mcp-binding.ts:55-67`).
-- Narrow the blanket refusal at `agentos_agent.py:155-161` into three distinct outcomes, keeping `UnsupportedAgentError` and its "name the offending field" contract (`:46-49`): `studio` ⇒ refuse (Phase 2 message); `engine` + no MCP configuration ⇒ refuse with the "configure a Lyzr MCP base or pass `mcp_bridge_url=`" message; `engine` + configured ⇒ proceed (still a no-op this phase, behind a log line). Parsing lives in `binding.py`; `_require_supported` keeps only the policy decision, matching how it already delegates nothing else.
-- Add `mcp_bindings: tuple[McpBinding, ...]` and `mcp_mode: str` to `ResolvedAgent` (`agentos_agent.py:52-85`), populated in `resolve_agent` (`:189`). The dataclass holds no credential by design — keep it that way; the `api_key` stays on `ComputerAgent` (`harness/__init__.py:234`) and is passed to the MCP client at boot, never stored on `ResolvedAgent`.
-- Thread bindings + mode from `ComputerAgent.__init__` (`src/computeragent/harness/__init__.py:234-241`) down to `HarnessCoordinator.__init__` (`src/computeragent/harness/coordinator.py`) as private fields, alongside the existing `_fork_mode` / `_fork_config` pattern.
+Add `mcp_bindings: tuple[McpBinding, ...]` and `mcp_mode: str` to `ResolvedAgent`. **It still
+holds no credential** — that invariant is pinned by an existing test and must survive.
 
-**Ships:** clearer errors than today. **Testable:** pure parsing + `respx` on the agent-doc GET; rewrite `tests/test_agentos_agent_resolve.py:166-171` into the three cases rather than deleting it.
+Narrow the blanket refusal at `agentos_agent.py:183-188` into three outcomes, keeping
+`UnsupportedAgentError`'s name-the-field contract:
+
+| doc state | outcome |
+|---|---|
+| no bindings | resolves, exactly as today (regression guard) |
+| bindings + `mcp_mode: "studio"` | refuse — Phase 2 |
+| bindings + `engine`, no MCP base configured | refuse, naming `mcp_base_url=` / `LYZR_MCP_CLIENT_URL` |
+| bindings + `engine` + base configured | resolve, log the server ids |
+
+The third row is the one that matters: never run silently tool-less. Because it depends on
+configuration the resolver does not receive, the check lives in `ComputerAgent.__init__`
+alongside the `llm_proxy_url` check, which is already the precedent for "the document is fine,
+your arguments are not".
+
+**Ships:** better errors. **Tests:** pure parsing + `respx`.
 
 ### Phase 2 — `studio` mode refusal
 
-**Goal:** an agent that would run ungoverned never runs.
+`McpModeUnsupportedError(UnsupportedAgentError)`, message naming the cause and the fix: the
+tool loop runs inside Lyzr Studio, so this SDK sees no tool calls — no `execute_tool` spans, no
+policy decisions, no HITL — re-register with `mcp_mode: engine`. No `force` flag: a tool-less
+run is indistinguishable from a model that chose no tool, which is the ambiguity
+`mcp-binding.ts` exists to remove.
 
-- A dedicated subclass of `UnsupportedAgentError` (`agentos_agent.py:46-49`) — e.g. `McpModeUnsupportedError` — raised from `_require_supported` (`:131-167`) alongside the harness/gateway/orchestration refusals, so it inherits the existing "resolved fine, but this run mode does not implement that shape, and the message names the field" contract. Message names the cause and the fix: *"agent `<name>` is configured `mcp_mode: studio` — the tool loop runs inside Lyzr Studio, so this SDK never sees the tool calls: no `execute_tool` spans, no policy decisions, no HITL prompts. Re-register the agent with `mcp_mode: engine` (the AgentOS default) to run it here."*
-- Do **not** offer a `force` flag. Running tool-less under a `studio` binding is indistinguishable from a working agent whose model chose no tool; that ambiguity is the failure class `mcp-binding.ts` exists to remove.
-
-**Ships:** independently. **Testable:** one unit test per mode, next to the existing refusal tests in `tests/test_agentos_agent_resolve.py`.
-
-### Phase 3 — the in-process Lyzr MCP bridge
-
-**Goal:** engine-mode bindings become callable tools.
+### Phase 3 — the in-process Lyzr MCP client
 
 New package `src/computeragent/mcp/`:
 
 | File | Contents |
-| --- | --- |
-| `binding.py` | Phase 1 dataclass + parser |
-| `lyzr_client.py` | `LyzrMcpClient` — the ported translation half of `mcp.ts`. Two methods over `httpx.AsyncClient`, both sending `x-api-key: <api_key>` (`mcp.ts:352-355`): `list_tools(server_id) -> list[ToolSpec]` (`GET /api/v1/mcp/servers/{id}/tools`, `input_schema` → JSON Schema, 60s TTL cache keyed `f"{server_id}::{api_key}"`, filter after caching — `mcp.ts:210-248`) and `execute(server_id, tool_name, arguments) -> dict` (`POST /api/v1/mcp/tools/execute`) |
-| `content.py` | `normalize_content(result) -> tuple[list[dict], Any \| None]` — a behavioural port of `normalizeContent` (`mcp.ts:362-428`), with the TS citation in the docstring |
-| `server.py` | `build_lyzr_mcp_servers(bindings, client) -> LyzrMcpResult` — per binding, one `create_sdk_mcp_server(name=tool_name, tools=[...])` plus the `mcp__<tool_name>` grant |
+|---|---|
+| `binding.py` | Phase 1 |
+| `client.py` | `LyzrMcpClient` over `httpx.AsyncClient`, `x-api-key: <api_key>` (`mcp.ts:352-355`). `list_tools(server_id)` → `GET /api/v1/mcp/servers/{id}/tools`, 60s TTL cache keyed `f"{server_id}::{api_key}"`, **filter after caching** (`mcp.ts:218,243-247`). `execute(server_id, tool_name, arguments)` → `POST /api/v1/mcp/tools/execute` |
+| `content.py` | `normalize_content(result) -> list[dict]` — **the §0.1 table**, not a transcription of `normalizeContent`. Docstring cites `mcp.ts:362-428` *and* the two upstream sinks that force the divergence |
+| `server.py` | `build_mcp_servers(bindings, client, api_key) -> McpServers` — per binding one `create_sdk_mcp_server(name=tool_name, tools=[...])` plus the `mcp__<tool_name>` grant |
 
-`server.py` shape (illustrative only):
+Behaviours carried over, each with its TS citation in a comment:
+
+- **Allowlist enforced at list time and at call time** (`mcp.ts:243-247`, `:266-272`). In-process
+  the list is already filtered, but the handler still rejects an out-of-binding name — the model
+  can guess, and `create_sdk_mcp_server` would happily dispatch it.
+- **Error-channel split** (`mcp.ts:309-334`): `success: false` from the facade is a tool that ran
+  and failed ⇒ `{"content": [text], "is_error": True}`, which the model can read and work
+  around. A transport failure is *also* `is_error` rather than a raise — an exception out of a
+  handler is caught by `run_tool` and turned into `is_error` anyway (`__init__.py:614-615`), so
+  raising only loses the message we would have written.
+- **Never throw out of boot** (`agent-defs.ts:888-891`): a facade outage degrades the run to
+  "no MCP tools this turn". Log at WARN naming the server ids.
+- **Zero discovered tools is logged with both lists** — requested action names beside the
+  server's real tool names (`mcp.ts:188-192`). This is the most common cause of a bound tool
+  never appearing, and the two lists side by side are the whole diagnosis.
+- **Schema guard (§0.1 row 3):** a facade `input_schema` is passed through only when it is a
+  dict with a string `type` *and* a `properties` key; anything else becomes
+  `{"type":"object","properties":{}}`. Otherwise `_build_input_schema` silently reinterprets it
+  and every call fails validation.
+- **Namespace guard (§0.4):** `tool_name` must match `[A-Za-z0-9_-]+`; a binding that fails is
+  skipped with a warning naming it. Reserved names `gap_tools` (`gap_tools.py:54`) and any key
+  the loader already produced are skipped the same way.
+- **Per-tool closures** (`gap_tools.py:140-161`): one `_build_tool` function per tool, so each
+  handler closes over its own spec. The late-binding trap, already paid for once in this repo.
+
+**Wiring** in `HarnessCoordinator._ensure_booted`, after the overlay merge at
+`coordinator.py:219-221` and before `harden`. This is the first deep-merge site in the file
+(§0.5), so it carries the comment explaining why a shallow `update` is wrong here:
 
 ```python
-def _build_tool(client, server_id, spec):           # own function per tool —
-    async def handler(args):                        # closure late-binding trap,
-        out = await client.execute(server_id, spec.name, args or {})   # cf. gap_tools.py:140-146
-        if out.get("success") is False:             # tool ran and failed → model-visible
-            return {"content": [{"type": "text",
-                                 "text": out.get("error") or "tool execution failed"}],
-                    "is_error": True}               # mcp.ts:318-334
-        content, structured = normalize_content(out.get("result"))
-        return {"content": content, "is_error": False}
-    return tool(spec.name, spec.description or f"Lyzr MCP tool: {spec.name}", spec.input_schema)(handler)
+mcp = dict(merged_options.get("mcp_servers") or {})   # gap_tools lives here
+for name, cfg in built.servers.items():
+    if name in mcp:
+        logger.warning(...)   # never silently overwrite a loader-supplied server
+        continue
+    mcp[name] = cfg
+merged_options["mcp_servers"] = mcp
+if merged_options.get("allowed_tools"):               # EXTEND ONLY — worker-mcp.ts:164-193
+    merged_options["allowed_tools"] = [*merged_options["allowed_tools"], *built.grants]
 ```
 
-Behaviours that must be carried over, each with its TS citation in a comment:
+Attached for `claude-agent-sdk` only; any other engine gets a warning and no servers, matching
+`applyMcpServers`'s refusal to write an Anthropic-shaped allowlist for an engine that cannot
+read it (`index.ts:4237-4256`).
 
-- Allowlist enforced **both** at list time and at call time (`mcp.ts:243-247`, `:266-272`). In-process this is mostly list-time, but the call handler still rejects an out-of-binding name — the model can guess.
-- A transport failure is an `is_error` result, not an exception that kills the turn (`mcp.ts:298-307`).
-- Never throw out of boot: a facade outage degrades the run to "no MCP tools this turn", mirroring `mcpDescriptorsFor`'s never-throws rule (`agent-defs.ts:888-891`). Log at WARN naming the server ids.
-- Discovery result of zero tools is logged with the requested action names next to the server's real tool names — the single most common cause of a bound tool never appearing (`mcp.ts:188-192`).
+`mcp_base_url=` is added to `ComputerAgent.__init__` next to `llm_proxy_url`, defaulting to
+`os.environ.get("LYZR_MCP_CLIENT_URL")` (§0.2). No new extra, no dependency change (§0.5).
 
-Wiring, in `HarnessCoordinator._ensure_booted` (`src/computeragent/harness/coordinator.py`), **immediately after the fork block at `:244-281`** and using the same deep-merge, for the same reason (`:244-249`):
+### Phase 4 — governance verification (not optional)
+
+§0.3: `allowed_tools` is inert under this run mode's default permission mode, so this phase is
+where the feature's safety claim is actually established.
+
+- An MCP tool call produces an `execute_tool` span with `gen_ai.tool.name == "mcp__<ns>__<tool>"`
+  (`telemetry/sinks/otel.py:1053-1066`).
+- A `policy_decider` denying `mcp__*` blocks the call under `permission_mode="default"` (via
+  `can_use_tool`) **and** under `bypassPermissions` (via the `PreToolUse` hook,
+  `engines/claude_agent.py:154-172`). The second is the one that matters here.
+- The guardrails middleware's `mcp__*` glob (`telemetry/middleware/guardrails.py:115-118`)
+  matches the generated names.
+- `on_tool_call` — note it is *already* warned as inert on this engine
+  (`harness/__init__.py`), so the assertion is that the warning is honest, not that the
+  callback fires.
+
+### Phase 5 — the HTTP-bridge escape hatch
+
+`mcp_bridge_url=`: when set, skip the in-process builder and emit CAS-identical entries —
 
 ```python
-mcp = dict(opts.get("mcp_servers") or {})
-for name, server_cfg in built.servers.items():
-    if name in mcp:                       # gap_tools / fork / a duplicate tool_name
-        logger.warning(...); continue     # never silently overwrite
-    mcp[name] = server_cfg
-opts["mcp_servers"] = mcp
-if opts.get("allowed_tools"):             # EXTEND ONLY — worker-mcp.ts:164-193
-    opts["allowed_tools"] = list(opts["allowed_tools"]) + built.grants
+{"type": "http",
+ "url": f"{base}/mcp/{quote(b.server_id)}?tools={quote(','.join(b.action_names))}",
+ "headers": {"x-api-key": api_key},
+ "alwaysLoad": True}
 ```
 
-Also in this phase: raise the `claude-agent-sdk` floor to `>=0.2.140,<0.3` in `pyproject.toml` and refresh `uv.lock` (§4.3). Add an optional extra `mcp = ["httpx>=0.27"]` and fold it into `all`, matching how `agentos`/`remote` are declared.
+byte-for-byte `index.ts:4270-4282`, grants `mcp__<tool_name>` (`:4285`). Worth keeping because
+it is one kwarg and zero maintenance, it is right for a deployment already fronted by the CAS
+proxy, and it is the escape hatch if the facade changes and the Python port lags. Document that
+the bridge 401s without the header and that the URL must be the proxy's externally reachable
+origin, not CAS loopback.
 
-**Ships:** the feature. **Testable:** entirely offline (stub client) plus `respx` for `LyzrMcpClient`.
-
-### Phase 4 — governance verification
-
-**Goal:** prove the thing that justifies `engine` mode.
-
-No new production code expected; this phase is tests plus whatever small fixes they force.
-
-- An MCP tool call produces an `execute_tool <name>` span with `gen_ai.tool.name == "mcp__<server>__<tool>"` (`otel.py:1053-1066`).
-- A `policy_decider` that denies `mcp__*` blocks the call under `permission_mode="default"` (via `can_use_tool`) **and** under `bypassPermissions` (via the `PreToolUse` hook at `claude_agent.py:118-128`).
-- `on_tool_call` receives the MCP tool and its arguments.
-- The guardrails middleware's `mcp__*` glob (`guardrails.py:115-118`) matches the generated names.
-
-### Phase 5 — escape hatches
-
-- **(a) `mcp_bridge_url=`** on `ComputerAgent.__init__`, next to the existing `harness_url` / `harness_token` kwargs (`src/computeragent/harness/__init__.py:192-200`). When set, skip the in-process builder and emit CAS-identical entries:
-
-  ```python
-  {"type": "http",
-   "url": f"{base}/mcp/{quote(b.server_id)}?tools={quote(','.join(b.action_names))}",
-   "headers": {"x-api-key": api_key},
-   "alwaysLoad": True}
-  ```
-
-  — byte-for-byte `index.ts:4270-4282`. Grants stay `mcp__<tool_name>` (`:4285`). Document that the bridge 401s without the header (`mcp.ts:124-136`) and that the URL must be the proxy's *externally reachable* origin, not the CAS loopback (`index.ts:4130-4142`).
-- **(c) direct HTTP servers** already work through `gap.py:315-341` for GAP repos; no change beyond making sure the Phase 3 merge does not clobber them (it does not — it skips existing keys).
+Direct HTTP servers from a GAP repo (`gap.py:315-341`) already work and are untouched — the
+Phase 3 merge skips existing keys.
 
 ### Phase 6 — documentation
 
-- `docs/ARCHITECTURE.md` — extend the GAP row at `:178` and add an MCP section describing the two paths and the `engine`-only rule.
-- `user-documentation.md` — how to configure the Lyzr MCP base, what `mcp_mode: studio` means and why it is refused, and the extend-never-create allowlist rule for anyone passing `options={"allowed_tools": [...]}`.
-- `CHANGELOG.md` — note the `claude-agent-sdk` floor bump as a breaking-ish dependency change.
+`docs/USING_THE_SDK.md` gains an MCP section (inputs, the `engine`-only rule, why `studio` is
+refused, and the extend-never-create note for anyone passing `options={"allowed_tools": [...]}`);
+`docs/ARCHITECTURE.md` gains the two paths; `CHANGELOG.md` + a version bump. The published
+artifact is re-published from the same source.
 
 ---
 
 ## 8. Test plan
 
-Conventions taken from the repo: `pytest` with `asyncio_mode = "auto"` and `--strict-markers` (`pyproject.toml` `[tool.pytest.ini_options]`), `respx` + `httpx.Response` for HTTP (`tests/test_agentos_discovery.py:44-53`, and the agent-doc mocking in `tests/test_agentos_agent_resolve.py`), the `integration` marker for anything needing a live service, shared fixtures in `tests/conftest.py`, and the in-process-MCP assertion style of `tests/test_gap_tools.py:35-54` (assert on `result.mcp_server["type"] == "sdk"` and `["name"]`, and on the qualified `mcp__…` names).
+Conventions as the repo already uses them: `pytest` with `asyncio_mode = "auto"` and
+`--strict-markers`, `respx` for HTTP, the `integration` marker for anything live, and the
+in-process-MCP assertion style of `tests/test_gap_tools.py:35-54`.
 
-**Fixtures in `tests/conftest.py`:**
+`tests/fixtures/agent_doc.json` already carries `mcp_servers: []` / `mcp_mode: "engine"` (§0.5).
+One new fixture: `stub_lyzr_mcp`, an in-memory `LyzrMcpClient` double recording calls and
+returning scripted payloads, so `server.py` needs no network.
 
-- `agent_doc` — **already exists** (`tests/conftest.py:156-163`, deep-copying `tests/fixtures/agent_doc.json`). Tests override `doc["mcp_servers"]` / `doc["mcp_mode"]` in place, exactly as `tests/test_agentos_agent_resolve.py:166-171` already does. Add `mcp_servers: []` and `mcp_mode: "engine"` to the JSON fixture so the default doc matches what AgentOS actually emits (`routes/agents.ts:713-721`).
-- `stub_lyzr_mcp` — an in-memory `LyzrMcpClient` double recording `list_tools` / `execute` calls and returning scripted payloads, so `server.py` tests need no network.
+| File | Covers |
+|---|---|
+| `test_mcp_binding.py` | parity with `mcp-binding.ts:90-165` — non-list, non-object entry, missing `server_id`, empty `action_names`, duplicate action across bindings, `tool_name` defaults to `server_id`, `persist_auth` strictly `is True`, unknown `mcp_mode` rejected, absent ⇒ `"engine"` |
+| `test_mcp_client.py` (`respx`) | `input_schema` carried through; allowlist filtering; cache serves a second call with `route.call_count == 1`; two credentials do **not** share an entry; non-2xx raises typed; `execute` sends `{server_id, tool_name, arguments}` + `x-api-key` |
+| `test_mcp_content.py` | the **§0.1 table**: `None` ⇒ `[]`; bare string ⇒ one text block; each of text/image/resource_link/resource passes through; **`structured` ⇒ a text block, not hoisted**; **`audio` ⇒ a text block, not passed through**; unknown type ⇒ text; non-object ⇒ `str()`. The two bold rows carry a comment citing the upstream line that forces them |
+| `test_mcp_server_build.py` | one binding ⇒ one `type: "sdk"` server keyed by `tool_name`, grants `["mcp__<tool_name>"]`, per-action tools; a facade failure at boot ⇒ zero servers, no exception; `success: False` ⇒ `is_error` with the upstream message; a transport exception ⇒ `is_error`, not a raise; an out-of-allowlist name is refused by the handler; a `tool_name` with a space is skipped with a warning (§0.4); a malformed `input_schema` is normalised (§0.1 row 3); **each handler closes over its own tool** |
+| `test_mcp_coordinator_wiring.py` | servers land under `mcp_servers` **alongside** `gap_tools` without clobbering it; a pre-existing key of the same name is skipped with a warning; an existing `allowed_tools` is extended; **an absent `allowed_tools` stays absent**; nothing attaches for a non-`claude-agent-sdk` engine; the caller's `options={"mcp_servers": …}` overlay is not destroyed by the merge |
+| `test_agentos_agent_resolve.py` (extend) | replaces `:166-172` with the Phase 1 four-row table; `ResolvedAgent` repr still carries no credential |
+| `test_mcp_policy.py` | Phase 4 — deny on `mcp__*` under **both** `default` and `bypassPermissions`; an `execute_tool` span is emitted; the guardrails glob matches |
+| `test_mcp_integration.py` | `@pytest.mark.integration`, skipped without `LYZR_MCP_CLIENT_URL` + a key. The only place the real facade is touched — and the only place open question 3 gets answered |
 
-**`tests/test_mcp_binding.py`** (pure, no I/O) — parity with `mcp-binding.ts:90-165`: absent vs `[]` (leave-alone vs explicit clear); non-list rejected; missing `server_id` rejected; empty `action_names` rejected; duplicate action across two bindings rejected; `tool_name` defaults to `server_id`; `persist_auth` strictly `is True`; `mcp_mode` unknown value rejected; `mcp_mode` absent ⇒ `"engine"`.
-
-**`tests/test_mcp_lyzr_client.py`** (`respx`) — `list_tools` maps `input_schema` → `inputSchema`-equivalent JSON Schema and filters by the allowlist; the cache serves a second call without a second request (`route.call_count == 1`, as in `test_agentos_discovery.py:53`) and two different credentials do **not** share a cache entry; a non-2xx raises the typed error; `execute` sends `{server_id, tool_name, arguments}` and `x-api-key`.
-
-**`tests/test_mcp_content.py`** (pure) — the parity table from `mcp.ts:362-428`: `None` ⇒ `[]`; a bare string ⇒ one text block; a known block type passes through untouched; `{"type":"structured","data":…}` is hoisted out of `content`; a second `structured` block is ignored, not overwritten (`mcp.ts:413-414`); an unknown type is JSON-stringified into a text block, never dropped; a non-object element is stringified.
-
-**`tests/test_mcp_server_build.py`** (stub client) — one binding ⇒ one `type: "sdk"` server keyed by `tool_name`, grants `["mcp__<tool_name>"]`, and per-action `SdkMcpTool`s; a facade failure at boot yields zero servers and no exception; `success: False` from `execute` becomes `{"is_error": True}` with the upstream message; a transport exception becomes `is_error`, not a raise; **each handler closes over its own tool** (build two tools, call the first, assert the second's name was not used — the `gap_tools.py:140-146` trap).
-
-**`tests/test_mcp_coordinator_wiring.py`** — build a coordinator, run `_ensure_booted`, and assert on `coord._manifest.options`. (`tests/test_fork.py` was the model for this style but has been deleted in the in-flight tree; `tests/test_gap_tools.py:35-54` remains as the in-process-MCP assertion reference.) MCP servers land under `mcp_servers` alongside `gap_tools` without clobbering it; a pre-existing key of the same name is skipped with a warning; an existing `allowed_tools` is extended; **an absent `allowed_tools` stays absent** (the single most important assertion in this file — `worker-mcp.ts:164-193`); nothing is attached for `mcp_mode: "studio"` because construction already raised; nothing is attached for a non-`claude-agent-sdk` engine.
-
-**`tests/test_agentos_agent_resolve.py`** (extend in place) — replace the single `test_refuses_bound_mcp_servers` (`:166-171`) with: `mcp_mode: "studio"` raises `McpModeUnsupportedError`; engine-mode bindings with no MCP base configured raise the configuration error naming `mcp_servers`; engine-mode + configured populates `ResolvedAgent.mcp_bindings` with the parsed tuple; an empty/absent `mcp_servers` resolves exactly as today (regression guard for the relaxed refusal); `ResolvedAgent` `repr()` still contains no credential.
-
-**`tests/test_mcp_policy.py`** (Phase 4; uses `upstream_query_factory` / `fake_upstream_client` from `conftest.py:68-145`) — deny on `mcp__*` under both `default` and `bypassPermissions`; an `execute_tool` span is emitted for an MCP tool; `on_tool_call` sees the qualified name.
-
-**`tests/test_mcp_integration.py`** — `@pytest.mark.integration`, skipped unless `LYZR_MCP_CLIENT_URL` and a workspace key are present: list the real tools of a known `srv_…`, execute one, assert a well-formed MCP result. This is the only place the real facade is touched.
-
-**Also:** extend `tests/test_surface_parity.py` / `tests/test_optional_extras.py` for the new `mcp` extra, and guard the `claude-agent-sdk>=0.2.140` assumption there rather than letting a stale lock fail mysteriously at run time.
+Gates as before: `pytest -q -m "not integration"`, `ruff check`, `ruff format --check`.
 
 ---
 
-## 9. Open questions — things I could not determine
+## 9. Open questions
 
-1. **The single-run-mode work landed mid-way through writing this plan**, as `371c815` *feat(harness)!: one run mode — resolve from AgentOS, run locally* (which also swept this file into the commit). §4.2 and §7 are written against it, but it is one commit old and line numbers will move — **Phase 1 should re-read `agentos_agent.py` before editing it.** Two consequences worth flagging:
-   - `371c815` deleted `src/computeragent/harness/fork.py` (-409 lines) but left the fork-injection block and its `from .fork import …` at `coordinator.py:244-281`. It is unreachable — `harness/__init__.py` no longer passes `fork_mode`, so the default `"off"` short-circuits before the import — so this is dead code rather than a live `ImportError`. Phase 3 should copy its *pattern* (deep-merge `mcp_servers`, extend-only `allowed_tools`) but must not assume the block survives; if it is stripped, Phase 3 introduces the first deep-merge site rather than sitting after one.
-   - `ResolvedAgent` carries no MCP fields at all, and holds no credential by design (`agentos_agent.py:57-61`). Phase 1 is additive to it; that invariant must survive.
-2. **Where does the Python SDK learn the Lyzr MCP service base?** The AgentOS discovery document publishes only `ingest`, `api`, `otel` (`packages/agentos-server/src/routes/discovery.ts:30-34`) — there is no `mcp` endpoint. Three candidates, none decided: a new discovery key (needs a server change, but matches the SDK's no-baked-paths rule at `src/computeragent/agentos.py:1-20`); a `LYZR_MCP_CLIENT_URL` env var (matches the CAS, `index.ts:4995`); or an explicit init kwarg. A server-side discovery key is the best fit for the SDK's stated design, and is the largest single unknown in this plan.
-3. **Does the workspace `api_key` authenticate against the MCP facade?** The bridge forwards the caller's key verbatim to `LYZR_MCP_CLIENT_URL/api/v1/mcp/*` (`mcp.ts:352-355`), while AgentOS's own validation uses a *different* host and path — `/v3/tools/mcp/servers` on the Studio host (`lyzr-studio-client.ts:218-247`, with the note at `:223-226` explaining the choice). Whether one `x-api-key` works against both, and whether a workspace key differs from whatever the CAS forwards in practice, is unverified here. **Verify against a live service before Phase 3 is called done.**
-4. **`persist_auth` appears inert under `engine` mode.** It is parsed (`mcp-binding.ts:161`), stored, echoed (`routes/agents.ts:717`) and warned about for group-owned agents (`routes/agents.ts:423-436`), but nothing in `mcpDescriptorsFor`, `applyMcpServers` or `mcp.ts` reads it — the descriptor type has no such field (`agent-defs.ts:863-868`). It presumably matters only inside Lyzr's own service, keyed off the server registration. The plan therefore parses and carries it and does nothing with it. **Unconfirmed.**
-5. **Pagination and rate limits on the facade.** `mcp.ts:193-195` asserts the facade returns the whole tool list in one response with no cursor, but that is an assertion about today's service, not a documented contract. Unknown for `tools/execute` rate limits.
-6. **`alwaysLoad` on the Python path.** The CAS sets it (`index.ts:4281`) and `gap.py:334` copies it, and `subprocess_cli.py:311-326` passes extra keys through for non-SDK servers — but whether the CLI honours it identically on the Python SDK path, and whether it means anything for an *in-process* server, is unverified. Harmless either way.
-7. **`mcp` 2.x transitively.** 0.2.140 widens to `mcp>=1.23.0,<3.0.0`; whether a resolved `mcp` 2.x changes anything observable for in-process servers built by `create_sdk_mcp_server` on this repo's code paths has not been tested. Phase 3's version guard is the mitigation, not an answer.
-8. **Duplicate `tool_name` across bindings.** AgentOS enforces action-name uniqueness across bindings (`mcp-binding.ts:139-152`) but not `tool_name` uniqueness, and in the CAS a duplicate would silently overwrite a key in `servers` (`index.ts:4272`). The plan makes the Python side skip-and-warn instead. Whether AgentOS should reject it at bind time is a server-side question raised, not answered, here.
-9. **gitagent.** `GitAgentEngine` is MCP-stub in 0.2.x (`src/computeragent/engines/git_agent.py:20-23`, `:260`, `:384`), so the `<server>__<tool>` grant shape from `worker-mcp.ts:86` has no Python consumer yet. Documented in §6 for when it does; not implemented.
+Reduced from nine — §0 closed four (2, 6, 7, and the `371c815` half of 1) and reframed two.
+
+1. **Does the workspace `api_key` authenticate against `/api/v1/mcp/*`?** **Probed live on
+   2026-09-16 against `https://mcp-dev.test.studio.lyzr.ai`, and still open** — because the list
+   route turns out not to be an auth oracle at all:
+
+   ```
+   no x-api-key header   → 422 {"detail":[{"type":"missing", …}]}    (FastAPI validation)
+   x-api-key: garbage    → 200 {"servers": [], "total": 0}
+   x-api-key: real key   → 200 {"servers": [], "total": 0}
+   ```
+
+   A bogus key and a real one are indistinguishable on an account with no servers registered, so a
+   200 establishes nothing. Two consequences, both now pinned by tests in
+   `tests/test_mcp_integration.py`: **code branching on 401 to mean "bad MCP credential" is wrong
+   for this service**, and the question can only be settled against an account that actually has a
+   server registered, or through the execute route. `client.py` remains correct by construction —
+   it sends exactly what the hosted bridge sends — but unconfirmed by observation.
+
+2. **`persist_auth` appears inert under `engine` mode.** Parsed, stored, echoed and warned about
+   for group-owned agents, but read by nothing in `mcpDescriptorsFor`, `applyMcpServers` or
+   `mcp.ts` — `McpDescriptor` has no such field. Presumably meaningful only inside Lyzr's own
+   service. Parsed and carried; nothing acts on it.
+3. **Pagination and rate limits on the facade.** `mcp.ts:193-195` asserts the whole tool list
+   comes back with no cursor, but that is an assertion about today's service, not a contract.
+   Unknown for `tools/execute`.
+4. **Duplicate `tool_name` across bindings, and `tool_name` validity.** AgentOS enforces
+   action-name uniqueness but not `tool_name` uniqueness or shape (§0.4), and the CAS would let a
+   duplicate silently overwrite a key. Python skips-and-warns for both. **Whether AgentOS should
+   reject a non-identifier `tool_name` at bind time is a server-side question raised here, not
+   answered** — and its own docstring example, `"My Server"`, would fail that check.
+5. **gitagent.** `GitAgentEngine` is MCP-stub, so the `<server>__<tool>` grant shape from
+   `worker-mcp.ts:86` has no Python consumer. Documented in §6; not implemented.
