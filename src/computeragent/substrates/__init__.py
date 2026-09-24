@@ -1,6 +1,10 @@
-"""Substrate registry — resolves string labels to :class:`Substrate`
-instances. Third-party substrates can ``register_substrate("e2b", ...)``
-at import time and the harness will accept ``runtime="e2b"``.
+"""Substrate registry — resolves string labels to :class:`Substrate` instances.
+
+Note that :class:`~computeragent.harness.ComputerAgent` no longer selects a
+substrate: it always runs on :class:`~computeragent.substrates.local.LocalSubstrate`,
+and the ``runtime=`` argument that used to pick one is gone. The registry is kept
+for code driving :class:`~computeragent.harness.coordinator.HarnessCoordinator`
+directly, which still takes a ``substrate=``.
 """
 
 from __future__ import annotations

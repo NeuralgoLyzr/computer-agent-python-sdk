@@ -32,6 +32,7 @@ def build(agent_doc, **kw):
         "agent_id": AGENT_ID,
         "base_url": BASE,
         "api_key": KEY,
+        "engine": "claude-agent-sdk",
         "llm_proxy_url": PROXY,
         "source": Path.cwd(),
     }

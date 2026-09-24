@@ -236,7 +236,12 @@ def parse_args() -> argparse.Namespace:
         type=lambda v: Path(v).resolve(),
         help="run against this directory instead of cloning",
     )
-    p.add_argument("--engine", default=None, help="override the agent's harness")
+    p.add_argument(
+        "--engine",
+        default="claude-agent-sdk",
+        help="engine to run the agent with (required by ComputerAgent; "
+        "'claude-agent-sdk' or 'gitagent')",
+    )
     args = p.parse_args()
     missing = [n for n in ("base_url", "agent_id", "api_key") if not getattr(args, n)]
     if missing:
