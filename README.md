@@ -15,6 +15,7 @@ async def main():
         base_url="http://localhost:8788/agentos/api",
         agent_id="6aa93f1b3817a13d3103d2c1",
         api_key="<lyzr workspace key>",
+        engine="claude-agent-sdk",
         llm_proxy_url="http://127.0.0.1:8786",   # only for a gateway-bound agent
     ) as agent:
         result = await agent.chat("List the files in your working directory.")
@@ -23,8 +24,20 @@ async def main():
 asyncio.run(main())
 ```
 
-That is the only run mode. Everything beyond the three required arguments is an override for
-something the agent document already answers.
+That is the only run mode. The four required arguments are `base_url`, `agent_id`, `api_key` and
+`engine`; everything else is an override for something the agent document already answers.
+
+`engine` is required rather than inferred from the agent's registered `harness` because it also
+selects how the model is routed — see the three cases in the reference. Letting the document pick
+meant an edit in AgentOS could silently re-shape `ANTHROPIC_BASE_URL` under a caller who never
+asked.
+
+## Telemetry
+
+Every run emits OpenTelemetry spans and metrics. Set `OTEL_EXPORTER_OTLP_ENDPOINT` and they go to
+your collector; leave it unset and they are collected but exported nowhere. Nothing is printed to
+your console unless you ask for it with `configure(exporter="console")`, and
+`COMPUTERAGENT_OTEL=disabled` drops the sink entirely.
 
 ## Install
 

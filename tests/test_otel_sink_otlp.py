@@ -277,3 +277,42 @@ def test_otel_temporality_env_var_garbage_falls_back_to_delta(monkeypatch):
     monkeypatch.setattr(otel_mod, "HttpMetricExporter", _FakeMetricExporter)
     sink = OtelSink()
     assert sink._temporality == "delta"
+
+
+# ── Bug 4: no endpoint must mean no export, not console ─────────────────────
+
+
+def test_no_endpoint_exports_nowhere(monkeypatch):
+    """A default install with the [otel] extra and no collector used to
+    pretty-print every span, every 5s metric cycle and every log record as JSON
+    on stderr, burying the program's own output. Console is opt-in now."""
+    from computeragent.telemetry.sinks.otel import _infer_exporter
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    assert _infer_exporter(None) == "none"
+    assert _infer_exporter("https://otlp.nr-data.net") == "otlp-http"
+
+
+def test_none_exporter_attaches_no_span_processor_and_no_metric_reader():
+    from computeragent.telemetry.sinks.otel import (
+        _build_meter_provider,
+        _build_tracer_provider,
+    )
+
+    tracer = _build_tracer_provider(service_name="t", exporter="none", endpoint=None, headers={})
+    # The SynchronousMultiSpanProcessor the provider starts with holds none.
+    assert not tracer._active_span_processor._span_processors  # type: ignore[attr-defined]
+
+    meter = _build_meter_provider(service_name="t", exporter="none", endpoint=None, headers={})
+    # A reader with a no-op exporter would still tick every 5s on a daemon
+    # thread for the life of the process; there must be no reader at all.
+    # Assert on the INSTANCE's readers: `_all_metric_readers` is a class-level
+    # WeakSet every other test's provider also lands in.
+    assert meter._sdk_config.metric_readers == []  # type: ignore[attr-defined]
+
+
+def test_console_is_still_reachable_explicitly():
+    from computeragent.telemetry.sinks.otel import _build_tracer_provider
+
+    tracer = _build_tracer_provider(service_name="t", exporter="console", endpoint=None, headers={})
+    assert len(tracer._active_span_processor._span_processors) == 1  # type: ignore[attr-defined]

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0] — 2026-09-17
 
+### Changed
+
+- **Telemetry no longer prints to the console by default.** With the `[otel]` extra installed and
+  no `OTEL_EXPORTER_OTLP_ENDPOINT` configured, `OtelSink` fell back to the OTel *console*
+  exporters — so every span, every 5-second metric cycle and every log record was pretty-printed
+  as JSON on stderr, burying the program's own output in a trace nobody asked for. It also left a
+  `PeriodicExportingMetricReader` ticking on a daemon thread, which produced
+  `Exception while exporting metrics: I/O operation on closed file` at interpreter shutdown.
+
+  No endpoint now means `exporter="none"`: providers are still built and every instrumentation
+  path runs unchanged, but nothing is exported. Console is opt-in via `configure(exporter=
+  "console")`, which is what it was always meant to be. Callers passing their own provider, or an
+  OTLP endpoint, see no change.
+
+- `orchestration.dispatch_tool_enabled` and `policy.control_plane_bypass` moved from `INFO` to
+  `DEBUG` on the `claude-agent-sdk` engine — the latter fired on every internal tool call. The two
+  `WARNING`s there (a dropped option, `allowed_tools` under a prompt-skipping permission mode) stay
+  put: both report a configuration mistake the caller needs to see.
+
+- **BREAKING: `engine` is now a required argument to `ComputerAgent`.** It used to default to the
+  agent document's `harness`. That default was more load-bearing than it looked: `engine` selects
+  the driver *and* which gateway-env branch `build_gateway_envs` produces, so a `harness` edit in
+  AgentOS could silently re-shape `ANTHROPIC_BASE_URL` and the model string under a caller who
+  never asked for either. Naming it makes the run reproducible from the call site.
+
+  Migration: pass `engine="claude-agent-sdk"` (the previous effective default for every agent whose
+  document did not say otherwise) or `engine="gitagent"`, or an `EngineDriver` instance.
+
+  `require_runnable_harness` is no longer called during construction — with the engine named by the
+  caller, `resolve_engine` is the gate, and it raises `UnknownEngineError` listing what *is*
+  registered. The function remains exported for callers who validate a document on their own. An
+  engine that differs from the agent's declared `harness` is still legal (that is how you run an
+  unsupported harness) and now logs a warning naming both, because it also moves the env branch.
+
 ### Added
 
 - **Sub-agent fan-out.** An agent that declares `orchestration:` in its GAP repo can now split a

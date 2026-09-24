@@ -58,6 +58,7 @@ async def main():
         base_url="http://localhost:8788/agentos/api",
         agent_id="6aa93f1b3817a13d3103d2c1",
         api_key="<lyzr workspace key>",
+        engine="claude-agent-sdk",
         llm_proxy_url="http://127.0.0.1:8786",   # see §6 — needed for a gateway-bound agent
     ) as agent:
         result = await agent.chat("List the files in your working directory.")
@@ -76,6 +77,7 @@ async with ComputerAgent(
     base_url="http://localhost:8788/agentos/api",
     agent_id="6aa93f1b3817a13d3103d2c1",
     api_key=os.environ["LYZR_API_KEY"],
+    engine="claude-agent-sdk",
     llm_proxy_url="http://127.0.0.1:8786",
     source=Path("/path/to/local/checkout"),      # skip the clone, run against this directory
     options={
@@ -139,10 +141,10 @@ All parameters are **keyword-only**.
 | `agent_id` | `str` | **yes** | — | 24-hex Mongo `_id`. |
 | `base_url` | `str` | **yes** | — | AgentOS API base; three spellings (§3). |
 | `api_key` | `str` | **yes** | — | Lyzr workspace key, sent as `x-api-key`. |
+| `engine` | `str \| EngineDriver` | **yes** | — | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. Also selects which gateway-env branch is built (§6) — which is why it is not inferred from the agent document. |
 | `llm_proxy_url` | `str \| None` | conditional | `None` | Required for an Anthropic-shaped engine against a native gateway (§6); unused otherwise. |
 | `git_token` | `str \| None` | conditional | `None` | Only for a **private** source. A PAT with read access to the repo. Without it the clone is unauthenticated and a private source fails. |
 | `source` | `Path \| str \| dict \| None` | no | agent document's `source` | Workspace override — see below. |
-| `engine` | `str \| EngineDriver \| None` | no | agent document's `harness` | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. An explicit value also selects which gateway-env branch is built. |
 | `options` | `Mapping[str, Any] \| None` | no | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
 | `envs` | `Mapping[str, str] \| None` | no | `None` | Extra environment for the engine subprocess. Gateway envs are layered **over** yours. |
 | `session_store` | `str \| SessionStore \| Mapping \| None` | no | `None` (no store) | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
@@ -402,7 +404,7 @@ Note that `on_tool_call` only fires for engines that emit `permission_request` e
 | Env var | Effect |
 |---|---|
 | `COMPUTERAGENT_OTEL=disabled` | turn the OTel sink off (it is on whenever the `otel` extra is importable) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | standard OTLP config; no endpoint → console exporter |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | standard OTLP config. **No endpoint → nothing is exported** (spans and metrics are still collected). Console output is opt-in: `configure(exporter="console")`. |
 | `AGENTOS_DISCOVERY_URL` / `AGENTOS_INGEST_URL` | attach the AgentOS HTTP sink (needs `httpx`) |
 | `COMPUTERAGENT_HARNESS_TOKEN` / `AGENTOS_INGEST_TOKEN` | bearer for that sink |
 | `COMPUTERAGENT_CAPTURE_CONTENT`, `COMPUTERAGENT_CAPTURE_CONTENT_MODE`, `COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH`, `COMPUTERAGENT_OTEL_TEMPORALITY` | content capture and attribute limits |
@@ -602,8 +604,13 @@ cooperative and cannot enforce a deadline on a wedged turn.
 ### Telemetry
 
 `capture_content` defaults to **False**. To silence telemetry entirely for one agent, pass
-`telemetry_pipeline=Pipeline(sinks=[])` — `COMPUTERAGENT_OTEL=disabled` only stops the OTel sink. With
-the `otel` extra installed and no OTLP endpoint, the console exporter prints traces to stdout.
+`telemetry_pipeline=Pipeline(sinks=[])` — `COMPUTERAGENT_OTEL=disabled` only stops the OTel sink.
+
+Nothing is written to your console unless you ask for it. With the `otel` extra installed and no
+OTLP endpoint the sink resolves to `exporter="none"`: the providers are built and every
+instrumentation path runs, but no exporter is attached and no metric reader is started. Pass
+`configure(exporter="console")` to print spans, metrics and log records as JSON on stderr — useful
+when you are debugging the instrumentation itself, and very loud otherwise.
 
 
 ---
@@ -648,6 +655,7 @@ async with ComputerAgent(
     base_url="http://localhost:8788/agentos/api",
     agent_id="6aa93f1b3817a13d3103d2c1",
     api_key=KEY,
+    engine="claude-agent-sdk",
     llm_proxy_url="http://127.0.0.1:8786",
     mcp_base_url="https://mcp.lyzr.ai",     # or set LYZR_MCP_CLIENT_URL
 ) as agent:

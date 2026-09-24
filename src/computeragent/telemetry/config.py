@@ -37,7 +37,7 @@ def configure(
     middleware: list[TelemetryMiddleware] | None = None,
     sinks: list[TelemetrySink] | None = None,
     service_name: str | None = None,
-    exporter: Literal["console", "otlp-http"] | None = None,
+    exporter: Literal["console", "otlp-http", "none"] | None = None,
     endpoint: str | None = None,
     headers: dict[str, str] | None = None,
     sample_rate: float = 1.0,
@@ -53,6 +53,11 @@ def configure(
     and :class:`~computeragent.telemetry.sinks.agentos_http.AgentOSHttpSink` if their
     extras are installed and not already in ``sinks``. Pass ``sinks=[]`` to
     disable all auto-attachment.
+
+    ``exporter`` defaults to ``"otlp-http"`` when an endpoint resolves and
+    ``"none"`` when one does not — telemetry is collected but exported nowhere.
+    Pass ``"console"`` to print spans, metrics and log records as JSON on
+    stderr; it is a debugging mode, not the no-endpoint fallback.
 
     ``temporality`` controls metric aggregation temporality. Defaults to
     delta (set by OtelSink) which is what every major SaaS OTLP intake

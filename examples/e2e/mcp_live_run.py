@@ -130,6 +130,7 @@ async def main(args: argparse.Namespace) -> int:
                 agent_id=args.agent_id,
                 api_key=args.api_key,
                 llm_proxy_url=args.llm_proxy_url,
+                engine="claude-agent-sdk",
                 mcp_base_url=mcp_base,
                 source=args.source or Path.cwd(),
                 options={"system_prompt": "You are terse. Use your tools when they apply."},

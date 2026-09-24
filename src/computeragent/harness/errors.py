@@ -12,7 +12,12 @@ class UnknownEngineError(HarnessError):
 
 
 class UnknownSubstrateError(HarnessError):
-    """``runtime="..."`` did not match any registered substrate."""
+    """A substrate label did not match any registered substrate.
+
+    Retained for the registry API; ``ComputerAgent`` itself fixes the substrate
+    to :class:`~computeragent.substrates.local.LocalSubstrate` and exposes no
+    way to select another.
+    """
 
 
 class UnknownSessionStoreError(HarnessError):

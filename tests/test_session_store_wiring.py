@@ -51,6 +51,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "agent_id": AGENT_ID,
         "base_url": BASE,
         "api_key": "ags_test",
+        "engine": "claude-agent-sdk",
         "llm_proxy_url": "http://127.0.0.1:8786",
     }
     params.update(kwargs)

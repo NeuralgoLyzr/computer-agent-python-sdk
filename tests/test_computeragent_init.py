@@ -16,6 +16,7 @@ import respx
 
 from computeragent.harness import ComputerAgent
 from computeragent.harness.agentos_agent import AgentResolveError
+from computeragent.harness.errors import UnknownEngineError
 from computeragent.harness.gateway_envs import GatewayConfigError
 from computeragent.protocol_types import EngineCapabilities, EngineContext, EngineEvent
 
@@ -84,7 +85,13 @@ def test_resolution_failure_surfaces_at_construction(agent_doc):
     respx.get(URL).mock(return_value=httpx.Response(404, json={"error": {"code": "NOT_FOUND"}}))
 
     with pytest.raises(AgentResolveError):
-        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, source=Path.cwd())
+        ComputerAgent(
+            agent_id=AGENT_ID,
+            base_url=BASE,
+            api_key=KEY,
+            source=Path.cwd(),
+            engine=FakeEngine(),
+        )
 
 
 @respx.mock
@@ -100,15 +107,59 @@ def test_missing_proxy_is_refused_at_construction(agent_doc):
 # ── engine selection ─────────────────────────────────────────────────────────
 
 
+def test_engine_is_required():
+    """Not inferred from the agent document: `engine` also selects which
+    gateway-env branch is built, so a document change must not be able to
+    re-shape ANTHROPIC_BASE_URL under a caller who never asked."""
+    with pytest.raises(TypeError, match="engine"):
+        ComputerAgent(  # type: ignore[call-arg]
+            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_proxy_url=PROXY
+        )
+
+
 @respx.mock
-def test_engine_defaults_to_the_agents_harness(agent_doc):
+def test_a_named_engine_resolves_to_the_registered_driver(agent_doc):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     agent = ComputerAgent(
-        agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_proxy_url=PROXY, source=Path.cwd()
+        agent_id=AGENT_ID,
+        base_url=BASE,
+        api_key=KEY,
+        llm_proxy_url=PROXY,
+        source=Path.cwd(),
+        engine="claude-agent-sdk",
     )
 
     assert agent._coordinator._engine.name == "claude-agent-sdk"  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_an_unregistered_engine_name_is_refused(agent_doc):
+    """The replacement for the old harness-runnability check: the caller names
+    the engine, so the caller is the one told what is registered."""
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    with pytest.raises(UnknownEngineError, match="claude-agent-sdk"):
+        ComputerAgent(
+            agent_id=AGENT_ID,
+            base_url=BASE,
+            api_key=KEY,
+            llm_proxy_url=PROXY,
+            source=Path.cwd(),
+            engine="langgraph",
+        )
+
+
+@respx.mock
+def test_an_engine_that_differs_from_the_harness_is_logged(agent_doc, caplog):
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    with caplog.at_level("WARNING", logger="computeragent.harness"):
+        ComputerAgent(
+            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, source=Path.cwd(), engine="gitagent"
+        )
+
+    assert any("overrides agent" in r.getMessage() for r in caplog.records)
 
 
 @respx.mock

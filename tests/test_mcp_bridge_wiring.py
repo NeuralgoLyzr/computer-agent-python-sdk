@@ -28,6 +28,7 @@ def build(agent_doc, **kw):
         "agent_id": AGENT_ID,
         "base_url": BASE,
         "api_key": KEY,
+        "engine": "claude-agent-sdk",
         "llm_proxy_url": "http://127.0.0.1:8786",
         "source": Path.cwd(),
     }

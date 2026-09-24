@@ -279,6 +279,7 @@ async def run_live(args: argparse.Namespace, workspace: Path) -> int:
             agent_id=args.agent_id,
             api_key=args.api_key,
             llm_proxy_url=args.llm_proxy_url,
+            engine="claude-agent-sdk",
             source=workspace,
         )
     except Exception as exc:  # noqa: BLE001

@@ -175,7 +175,7 @@ def _build_options(ctx: EngineContext) -> Any:
                 *allowed,
                 ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME,
             ]
-        logger.info("orchestration.dispatch_tool_enabled: session=%s", ctx.session_id)
+        logger.debug("orchestration.dispatch_tool_enabled: session=%s", ctx.session_id)
 
     if ctx.policy_decider is not None:
         bound = _bypass_control_plane_tools(_bind_session_id(ctx.policy_decider, ctx.session_id))
@@ -230,7 +230,7 @@ def _bypass_control_plane_tools(decider: Any) -> Any:
         if is_orchestration_internal_tool(tool_name):
             from claude_agent_sdk.types import PermissionResultAllow
 
-            logger.info("policy.control_plane_bypass: tool=%s", tool_name)
+            logger.debug("policy.control_plane_bypass: tool=%s", tool_name)
             return PermissionResultAllow(updated_input=tool_input)
         return await decider(tool_name, tool_input, context)
 
