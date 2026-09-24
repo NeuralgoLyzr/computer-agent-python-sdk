@@ -1380,7 +1380,20 @@ _DISPATCH: dict[str, Any] = {
 
 
 def _infer_exporter(endpoint: str | None) -> str:
-    return "otlp-http" if endpoint else "console"
+    """No endpoint configured ⇒ export NOWHERE, not to the console.
+
+    The old fallback was ``"console"``, which meant a default install with the
+    ``[otel]`` extra pretty-printed every span, every metric export cycle and
+    every log record as JSON to stderr — burying the program's own output in a
+    run nobody asked to trace. Console is a debugging choice you opt into with
+    ``exporter="console"``, not what you get for forgetting to set
+    ``OTEL_EXPORTER_OTLP_ENDPOINT``.
+
+    The providers are still built either way, so every instrumentation path
+    (spans, metrics, content events) runs unchanged and a caller who passes
+    their own provider is unaffected — only the exporters are omitted.
+    """
+    return "otlp-http" if endpoint else "none"
 
 
 def _signal_url(endpoint: str | None, signal: str) -> str | None:
@@ -1474,7 +1487,7 @@ def _build_tracer_provider(
             headers=headers or None,
         )
         provider.add_span_processor(BatchSpanProcessor(span_exporter))
-    else:
+    elif exporter == "console":
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
     return provider
 
@@ -1497,8 +1510,13 @@ def _build_meter_provider(
         if temporality == "delta":
             kwargs["preferred_temporality"] = _delta_temporality_map()
         metric_exporter = HttpMetricExporter(**kwargs)
-    else:
+    elif exporter == "console":
         metric_exporter = ConsoleMetricExporter()
+    else:
+        # No reader at all. A PeriodicExportingMetricReader with a no-op
+        # exporter still wakes every 5s for the life of the process and holds a
+        # daemon thread; omitting it is what actually makes the sink quiet.
+        return MeterProvider(resource=resource, metric_readers=[], views=_genai_views())
     reader = PeriodicExportingMetricReader(metric_exporter, export_interval_millis=5000)
     return MeterProvider(resource=resource, metric_readers=[reader], views=_genai_views())
 
@@ -1518,7 +1536,7 @@ def _build_logger_provider(
             headers=headers or None,
         )
         provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
-    else:
+    elif exporter == "console":
         provider.add_log_record_processor(SimpleLogRecordProcessor(ConsoleLogExporter()))
     return provider
 

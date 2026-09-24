@@ -6,7 +6,7 @@ For anyone changing the SDK. If you only want to *use* it, read
 ## The shape of a run
 
 ```
-ComputerAgent(base_url, agent_id, api_key, …)
+ComputerAgent(base_url, agent_id, api_key, engine, …)
         │
         │  constructor, synchronous — fails before anything boots
         ├─▶ agentos_agent.resolve_agent()   GET {base}/v1/agents/{id}   x-api-key

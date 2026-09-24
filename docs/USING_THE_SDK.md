@@ -9,8 +9,8 @@ environment, same permission mode — except the engine runs in this process ins
 That is the only run mode. There is no remote harness, no sandbox client, and no way to construct an
 agent without AgentOS resolving it first.
 
-Everything beyond the three required arguments is an override for something the agent document already
-answers.
+The four required arguments are `base_url`, `agent_id`, `api_key` and `engine`; everything else is an
+override for something the agent document already answers.
 
 ---
 
@@ -58,6 +58,7 @@ async def main():
         base_url="http://localhost:8788/agentos/api",
         agent_id="6aa93f1b3817a13d3103d2c1",
         api_key="<lyzr workspace key>",
+        engine="claude-agent-sdk",
         llm_proxy_url="http://127.0.0.1:8786",   # see §6 — needed for a gateway-bound agent
     ) as agent:
         result = await agent.chat("List the files in your working directory.")
@@ -76,11 +77,12 @@ async with ComputerAgent(
     base_url="http://localhost:8788/agentos/api",
     agent_id="6aa93f1b3817a13d3103d2c1",
     api_key=os.environ["LYZR_API_KEY"],
+    engine="claude-agent-sdk",
     llm_proxy_url="http://127.0.0.1:8786",
     source=Path("/path/to/local/checkout"),      # skip the clone, run against this directory
     options={
         "system_prompt": "You are terse.",
-        "allowed_tools": ["Read", "Glob"],
+        "disallowed_tools": ["Write", "Edit"],   # the lever that actually blocks — see §5
         "max_turns": 8,
     },
     session_store="memory",
@@ -139,10 +141,10 @@ All parameters are **keyword-only**.
 | `agent_id` | `str` | **yes** | — | 24-hex Mongo `_id`. |
 | `base_url` | `str` | **yes** | — | AgentOS API base; three spellings (§3). |
 | `api_key` | `str` | **yes** | — | Lyzr workspace key, sent as `x-api-key`. |
+| `engine` | `str \| EngineDriver` | **yes** | — | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. Also selects which gateway-env branch is built (§6) — which is why it is not inferred from the agent document. |
 | `llm_proxy_url` | `str \| None` | conditional | `None` | Required for an Anthropic-shaped engine against a native gateway (§6); unused otherwise. |
 | `git_token` | `str \| None` | conditional | `None` | Only for a **private** source. A PAT with read access to the repo. Without it the clone is unauthenticated and a private source fails. |
 | `source` | `Path \| str \| dict \| None` | no | agent document's `source` | Workspace override — see below. |
-| `engine` | `str \| EngineDriver \| None` | no | agent document's `harness` | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. An explicit value also selects which gateway-env branch is built. |
 | `options` | `Mapping[str, Any] \| None` | no | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
 | `envs` | `Mapping[str, str] \| None` | no | `None` | Extra environment for the engine subprocess. Gateway envs are layered **over** yours. |
 | `session_store` | `str \| SessionStore \| Mapping \| None` | no | `None` (no store) | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
@@ -204,7 +206,7 @@ an unknown key is silently dropped rather than attached. Commonly used:
 | Key | Type | What it does |
 |---|---|---|
 | `system_prompt` | `str` / preset dict | Replaces / sets the system prompt. |
-| `allowed_tools` | `list[str]` | A permission **pre-approval** list — under the `bypassPermissions` this SDK dispatches it restricts nothing, and the engine logs a warning if you set both. Use `disallowed_tools` to actually block a tool. |
+| `allowed_tools` | `list[str]` | A permission **pre-approval** list. It blocks nothing, in any mode — not a security boundary. See below. |
 | `disallowed_tools` | `list[str]` | Blacklist. |
 | `permission_mode` | `str` | `"bypassPermissions"` (the default this SDK sets), `"default"`, `"acceptEdits"`, `"dontAsk"`, `"auto"`. |
 | `max_turns` | `int` | Cap agentic turns. |
@@ -219,6 +221,77 @@ version), including `hooks`, `mcp_servers`, `skills`, `agents`, `settings`, `add
 
 For the `gitagent` engine the options actually read are `model` (**required** — it raises without one),
 `system_prompt`, `max_turns`, `tools`, and `constraints`.
+
+
+### Restricting tools: `allowed_tools`, `disallowed_tools`, `policy_decider`
+
+These are not three spellings of the same idea, and picking the wrong one is the most common way
+to believe you have a sandbox when you do not. Verified against a live agent.
+
+**`allowed_tools` is a pre-approval list, not a whitelist.** It names tools that may run *without
+prompting*; it never blocks anything. Under `permission_mode="bypassPermissions"` — what this SDK
+dispatches, matching AgentOS — nothing prompts at all, so it does nothing whatsoever. The engine
+logs a warning when it sees both:
+
+```
+allowed_tools is set alongside permission_mode='bypassPermissions', which skips permission
+prompts — the allowlist cannot restrict anything there and every tool stays available.
+```
+
+Switching to `permission_mode="default"` does **not** rescue it. In that mode `can_use_tool` fires
+only when the CLI's own permission rules evaluate to *ask*, and those rules read settings this SDK
+does not control. A live run with `permission_mode="default"`, `allowed_tools=["Read","Glob",
+"Grep"]` and a decider that denies everything else invoked `Bash` anyway and never consulted the
+decider once. **Do not use `allowed_tools` as a security boundary.**
+
+**`disallowed_tools` is a blacklist** and is enforced in every mode. For "stop this agent writing",
+it is one line and has no configuration that silently re-opens the tool:
+
+```python
+options={
+    "system_prompt": "You are terse.",
+    "disallowed_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+}
+```
+
+**`policy_decider` is the real gate.** Under a prompt-skipping mode the engine routes it through a
+`PreToolUse` hook, which fires for *every* tool call regardless of permission mode — so keep the
+default `bypassPermissions` and decide in code:
+
+```python
+from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+
+READ_ONLY = {"Read", "Glob", "Grep"}
+
+async def read_only(tool_name, tool_input, context):
+    if tool_name in READ_ONLY:
+        return PermissionResultAllow(
+            behavior="allow", updated_input=tool_input, updated_permissions=None
+        )
+    return PermissionResultDeny(
+        behavior="deny", message=f"{tool_name} is not read-only", interrupt=False
+    )
+
+async with ComputerAgent(
+    base_url=..., agent_id=..., api_key=...,
+    engine="claude-agent-sdk",
+    options={"system_prompt": "You are terse."},   # keep bypassPermissions
+    policy_decider=read_only,
+) as agent:
+    ...
+```
+
+Asked to run `whoami`, that agent attempted `Bash` eleven times and was denied every time; the
+decider saw all eleven calls — including one `Agent` call where the model tried to route around the
+denial through a sub-agent. It also sees `tool_input`, so it can decide on paths and arguments,
+which no tool-name list can.
+
+| You want | Use |
+|---|---|
+| Block specific tools | `disallowed_tools` — any mode, one line |
+| A read-only agent, enforced | `policy_decider` under the default `bypassPermissions` |
+| Decisions on paths or arguments | `policy_decider` — it sees `tool_input` |
+| Fewer prompts in an interactive run | `allowed_tools` — its actual purpose |
 
 ---
 
@@ -402,7 +475,7 @@ Note that `on_tool_call` only fires for engines that emit `permission_request` e
 | Env var | Effect |
 |---|---|
 | `COMPUTERAGENT_OTEL=disabled` | turn the OTel sink off (it is on whenever the `otel` extra is importable) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | standard OTLP config; no endpoint → console exporter |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | standard OTLP config. **No endpoint → nothing is exported** (spans and metrics are still collected). Console output is opt-in: `configure(exporter="console")`. |
 | `AGENTOS_DISCOVERY_URL` / `AGENTOS_INGEST_URL` | attach the AgentOS HTTP sink (needs `httpx`) |
 | `COMPUTERAGENT_HARNESS_TOKEN` / `AGENTOS_INGEST_TOKEN` | bearer for that sink |
 | `COMPUTERAGENT_CAPTURE_CONTENT`, `COMPUTERAGENT_CAPTURE_CONTENT_MODE`, `COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH`, `COMPUTERAGENT_OTEL_TEMPORALITY` | content capture and attribute limits |
@@ -467,7 +540,7 @@ source=Path('...') or register a source on the agent.")`.
 | `400 context_management: Extra inputs are not permitted` | The CLI injected Claude-Code-only experimental betas. | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set automatically on the gateway branch — if you see this, check nothing in `envs=` is being lost, and that you are on the gateway branch at all. |
 | **Empty completion** — the turn succeeds but no text comes back | Usually the missing betas flag above, or the proxy ordering a text block ahead of a `tool_result`. | Check the flag first, then the proxy's block ordering. |
 | `input_tokens` is **0** while `output_tokens` is not | Real and observed, and **not an SDK bug**: the gateway omits prompt tokens when **streaming** (the same call made non-streaming reports them), so there is nothing to map onto `input_tokens`. | Nothing to fix client-side. It does mean per-turn cost is understated. |
-| No tool calls at all | An `allowed_tools` list that excludes what the task needs, or a prompt the model can answer without the workspace. | Widen `allowed_tools`; check `permission_mode`. |
+| No tool calls at all | A `disallowed_tools` list that blocks what the task needs, or a prompt the model can answer without the workspace. | Narrow `disallowed_tools`; check `permission_mode`. |
 | `UnknownEngineError` / `UnknownSessionStoreError` | Typo, or a plugin you meant to register. | The message lists what *is* registered. |
 | Temp clone directories piling up | You skipped `async with` / `dispose()`. | Use `async with`. |
 
@@ -585,7 +658,12 @@ cooperative and cannot enforce a deadline on a wedged turn.
 
 `capture_content` defaults to **False**. To silence telemetry entirely for one agent, pass
 `telemetry_pipeline=Pipeline(sinks=[])` — `COMPUTERAGENT_OTEL=disabled` only stops the OTel sink. With
-the `otel` extra installed and no OTLP endpoint, the console exporter prints traces to stdout.
+
+Nothing is written to your console unless you ask for it. With the `otel` extra installed and no
+OTLP endpoint the sink resolves to `exporter="none"`: the providers are built and every
+instrumentation path runs, but no exporter is attached and no metric reader is started. Pass
+`configure(exporter="console")` to print spans, metrics and log records as JSON on stderr — useful
+when you are debugging the instrumentation itself, and very loud otherwise.
 
 
 ---

@@ -50,7 +50,6 @@ from .agentos_agent import (
     ResolvedAgent,
     UnsupportedAgentError,
     api_base,
-    require_runnable_harness,
     resolve_agent,
 )
 from .coordinator import HarnessCoordinator, _SessionState
@@ -247,10 +246,16 @@ class ComputerAgent:
     def __init__(
         self,
         *,
-        # ── required: which agent, where, and as whom ────────────────────
+        # ── required: which agent, where, as whom, and run by what ───────
         agent_id: str,
         base_url: str,
         api_key: str,
+        # Engine name ("claude-agent-sdk" / "gitagent") or an EngineDriver
+        # instance. Required: it selects the driver AND which gateway-env
+        # branch is built, so inferring it from the agent document meant a
+        # document change could silently re-shape ANTHROPIC_BASE_URL and the
+        # model string under a caller who never asked for either.
+        engine: str | EngineDriver,
         # ── needed only in specific cases ────────────────────────────────
         # The Anthropic-to-OpenAI translating proxy. Required when an
         # Anthropic-shaped engine runs against a native (OpenAI-shaped)
@@ -263,9 +268,6 @@ class ComputerAgent:
         # Use this workspace instead of cloning the agent's own source. A local
         # Path, a git URL, or an inline manifest dict.
         source: IdentitySource | None = None,
-        # Engine name or an EngineDriver instance. Defaults to the agent's
-        # `harness`; an explicit value also selects which env branch is built.
-        engine: str | EngineDriver | None = None,
         # Merged over whatever the identity loader resolves — caller wins.
         options: Mapping[str, Any] | None = None,
         envs: Mapping[str, str] | None = None,
@@ -289,16 +291,22 @@ class ComputerAgent:
             agent_id, base_url=base_url, api_key=api_key, client=_resolve_client
         )
 
-        # 2. Engine: the agent's harness unless the caller names another. The
-        #    harness check happens HERE, not during resolution, so bringing your
-        #    own engine genuinely rescues an unsupported harness.
-        require_runnable_harness(self.agent, engine_given=engine is not None)
-        resolved_engine = (
-            engine
-            if isinstance(engine, EngineDriver)
-            else resolve_engine(engine or self.agent.harness)
-        )
+        # 2. Engine: always the caller's, never inferred. `resolve_engine` is
+        #    the gate now — an unregistered name raises UnknownEngineError
+        #    naming what IS registered, which covers the "harness has no Python
+        #    implementation" case from the side that can actually fix it.
+        resolved_engine = engine if isinstance(engine, EngineDriver) else resolve_engine(engine)
         engine_name = resolved_engine.name
+        # A mismatch is legal — bringing your own engine is how an unsupported
+        # harness gets run — but it is worth a line in the log, because it also
+        # changes which gateway-env branch is built.
+        if engine_name != self.agent.harness:
+            logger.warning(
+                "engine=%r overrides agent %s harness=%r; gateway envs follow the ENGINE",
+                engine_name,
+                self.agent.agent_id,
+                self.agent.harness,
+            )
 
         # 3. Where the model calls go. Raises here, naming the missing
         #    parameter, rather than surfacing as a 405 mid-run.

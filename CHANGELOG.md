@@ -5,6 +5,49 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-09-24
+
+### Changed
+
+- **BREAKING: `engine` is now a required argument to `ComputerAgent`.** It used to default to the
+  agent document's `harness`. That default was more load-bearing than it looked: `engine` selects
+  the driver *and* which gateway-env branch `build_gateway_envs` produces, so a `harness` edit in
+  AgentOS could silently re-shape `ANTHROPIC_BASE_URL` and the model string under a caller who
+  never asked for either. Naming it makes the run reproducible from the call site.
+
+  Migration: pass `engine="claude-agent-sdk"` (the previous effective default for every agent whose
+  document did not say otherwise) or `engine="gitagent"`, or an `EngineDriver` instance.
+
+  `require_runnable_harness` is no longer called during construction — with the engine named by the
+  caller, `resolve_engine` is the gate, and it raises `UnknownEngineError` listing what *is*
+  registered. The function remains exported for callers who validate a document on their own. An
+  engine that differs from the agent's declared `harness` is still legal (that is how you run an
+  unsupported harness) and now logs a warning naming both, because it also moves the env branch.
+
+- **Telemetry no longer prints to the console by default.** With the `[otel]` extra installed and
+  no `OTEL_EXPORTER_OTLP_ENDPOINT` configured, `OtelSink` fell back to the OTel *console*
+  exporters — so every span, every 5-second metric cycle and every log record was pretty-printed
+  as JSON on stderr, burying the program's own output in a trace nobody asked for. It also left a
+  `PeriodicExportingMetricReader` ticking on a daemon thread, which produced
+  `Exception while exporting metrics: I/O operation on closed file` at interpreter shutdown.
+
+  No endpoint now means `exporter="none"`: providers are still built and every instrumentation
+  path runs unchanged, but nothing is exported and no metric reader is started. Console is opt-in
+  via `configure(exporter="console")`. Callers passing their own provider, or an OTLP endpoint,
+  see no change.
+
+### Documentation
+
+- **What actually restricts an agent's tools.** `allowed_tools` is a permission *pre-approval*
+  list and blocks nothing in any mode; the previous wording implied `permission_mode="default"`
+  would turn it into a whitelist. Verified against a live agent: under `default` the model invoked
+  a tool outside the list and the decider was never consulted. `policy_decider` under the default
+  `bypassPermissions` is the gate that holds — the engine routes it through a `PreToolUse` hook
+  that fires on every tool call. Documented in §5 with the case each lever is for.
+
+- Corrected two docstrings that still described the `runtime=` argument removed in 0.4.0
+  (`harness/errors.py`, `substrates/__init__.py`).
+
 ## [0.4.3] — 2026-09-16
 
 ### Removed
