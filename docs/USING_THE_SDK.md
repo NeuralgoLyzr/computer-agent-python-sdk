@@ -206,7 +206,7 @@ an unknown key is silently dropped rather than attached. Commonly used:
 | Key | Type | What it does |
 |---|---|---|
 | `system_prompt` | `str` / preset dict | Replaces / sets the system prompt. |
-| `allowed_tools` | `list[str]` | A permission **pre-approval** list — under the `bypassPermissions` this SDK dispatches it restricts nothing, and the engine logs a warning if you set both. Use `disallowed_tools` to actually block a tool. |
+| `allowed_tools` | `list[str]` | A permission **pre-approval** list. It blocks nothing, in any mode — not a security boundary. See below. |
 | `disallowed_tools` | `list[str]` | Blacklist. |
 | `permission_mode` | `str` | `"bypassPermissions"` (the default this SDK sets), `"default"`, `"acceptEdits"`, `"dontAsk"`, `"auto"`. |
 | `max_turns` | `int` | Cap agentic turns. |
@@ -221,6 +221,76 @@ version), including `hooks`, `mcp_servers`, `skills`, `agents`, `settings`, `add
 
 For the `gitagent` engine the options actually read are `model` (**required** — it raises without one),
 `system_prompt`, `max_turns`, `tools`, and `constraints`.
+
+### Restricting tools: `allowed_tools`, `disallowed_tools`, `policy_decider`
+
+These are not three spellings of the same idea, and picking the wrong one is the most common way
+to believe you have a sandbox when you do not. Verified against a live UAT agent.
+
+**`allowed_tools` is a pre-approval list, not a whitelist.** It names tools that may run *without
+prompting*; it never blocks anything. Under `permission_mode="bypassPermissions"` — what this SDK
+dispatches, matching AgentOS — nothing prompts at all, so it does nothing whatsoever. The engine
+logs a warning when it sees both:
+
+```
+allowed_tools is set alongside permission_mode='bypassPermissions', which skips permission
+prompts — the allowlist cannot restrict anything there and every tool stays available.
+```
+
+Switching to `permission_mode="default"` does **not** rescue it. In that mode `can_use_tool` fires
+only when the CLI's own permission rules evaluate to *ask*, and those rules read settings this SDK
+does not control. A live run with `permission_mode="default"`, `allowed_tools=["Read","Glob",
+"Grep"]` and a decider that denies everything else invoked `Bash` anyway and never consulted the
+decider once. **Do not use `allowed_tools` as a security boundary.**
+
+**`disallowed_tools` is a blacklist** and is enforced in every mode. For "stop this agent writing",
+it is one line and has no configuration that silently re-opens the tool:
+
+```python
+options={
+    "system_prompt": "You are terse.",
+    "disallowed_tools": ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"],
+}
+```
+
+**`policy_decider` is the real gate.** Under a prompt-skipping mode the engine routes it through a
+`PreToolUse` hook, which fires for *every* tool call regardless of permission mode — so keep the
+default `bypassPermissions` and decide in code:
+
+```python
+from claude_agent_sdk.types import PermissionResultAllow, PermissionResultDeny
+
+READ_ONLY = {"Read", "Glob", "Grep"}
+
+async def read_only(tool_name, tool_input, context):
+    if tool_name in READ_ONLY:
+        return PermissionResultAllow(
+            behavior="allow", updated_input=tool_input, updated_permissions=None
+        )
+    return PermissionResultDeny(
+        behavior="deny", message=f"{tool_name} is not read-only", interrupt=False
+    )
+
+async with ComputerAgent(
+    base_url=..., agent_id=..., api_key=...,
+    engine="claude-agent-sdk",
+    options={"system_prompt": "You are terse."},   # keep bypassPermissions
+    policy_decider=read_only,
+) as agent:
+    ...
+```
+
+Asked to run `whoami`, that agent attempted `Bash` twelve times and was denied every time; the
+decider saw all twelve calls. It also sees `tool_input`, so it can decide on paths and arguments,
+which no tool-name list can.
+
+| You want | Use |
+|---|---|
+| Block specific tools | `disallowed_tools` — any mode, one line |
+| A read-only agent, enforced | `policy_decider` under the default `bypassPermissions` |
+| Decisions on paths or arguments | `policy_decider` — it sees `tool_input` |
+| Restrict a worker sub-agent's writes to some paths | `scope.write` on its crew entry (§16) |
+| Fewer prompts in an interactive run | `allowed_tools` — its actual purpose |
 
 ---
 
