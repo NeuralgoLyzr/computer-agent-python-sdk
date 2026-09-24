@@ -19,6 +19,7 @@ No subprocess management lives here. ``claude-agent-sdk`` and
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import logging
 import os
@@ -63,9 +64,7 @@ class LocalSubstrate:
             # "run the agent here").
             return SubstrateHandle(workspace_path=Path.cwd(), close=_noop_close)
 
-        raise TypeError(
-            f"LocalSubstrate.boot: unsupported source type {type(source).__name__}"
-        )
+        raise TypeError(f"LocalSubstrate.boot: unsupported source type {type(source).__name__}")
 
 
 _KNOWN_GIT_HOSTS = (
@@ -136,7 +135,11 @@ async def _rev_parse(workspace: Path) -> str | None:
     """The cloned commit SHA, or None if it can't be read (best-effort)."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "-C", str(workspace), "rev-parse", "HEAD",
+            "git",
+            "-C",
+            str(workspace),
+            "rev-parse",
+            "HEAD",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -148,7 +151,9 @@ async def _rev_parse(workspace: Path) -> str | None:
     return None
 
 
-async def _git_clone(url: str, credential: Mapping[str, str] | None = None) -> tuple[Path, str | None]:
+async def _git_clone(
+    url: str, credential: Mapping[str, str] | None = None
+) -> tuple[Path, str | None]:
     workspace = Path(tempfile.mkdtemp(prefix="computeragent-substrate-"))
     proc = await asyncio.create_subprocess_exec(
         "git",
@@ -174,9 +179,32 @@ async def _git_clone(url: str, credential: Mapping[str, str] | None = None) -> t
     return workspace, revision
 
 
+_LIVE_TEMP_WORKSPACES: set[str] = set()
+
+
+def _reap_temp_workspaces() -> None:
+    """Last-resort cleanup for a process that never called ``dispose()``.
+
+    A caller who skips ``async with`` leaves the cloned workspace behind, and
+    there is no finalizer that could safely remove it — ``__del__`` runs at an
+    arbitrary point during async teardown. An atexit sweep is the honest net:
+    it cannot help a killed process, but it handles the common case of simply
+    forgetting.
+    """
+    for path in list(_LIVE_TEMP_WORKSPACES):
+        shutil.rmtree(path, ignore_errors=True)
+    _LIVE_TEMP_WORKSPACES.clear()
+
+
+atexit.register(_reap_temp_workspaces)
+
+
 def _make_rmtree_close(path: Path) -> Any:
+    _LIVE_TEMP_WORKSPACES.add(str(path))
+
     async def _close() -> None:
         shutil.rmtree(path, ignore_errors=True)
+        _LIVE_TEMP_WORKSPACES.discard(str(path))
 
     return _close
 

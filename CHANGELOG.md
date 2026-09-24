@@ -5,6 +5,180 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] — 2026-09-16
+
+### Removed
+
+- **The GitHub-App credential fallback.** The chain was `git_token=` →
+  AgentOS's `/git-credentials/resolve` → anonymous clone; the middle step is
+  gone. That route is App-only (`githubAppConfigured()` then
+  `mintInstallationToken()`), while these deployments authenticate with PATs —
+  held on the agent as `gitToken`, or in the Lyzr credential vault behind its
+  `credential_id`. The App route can return neither, so the fallback could not
+  succeed; it only turned a missing token into a slower, less legible failure,
+  since `resolve_git_credential` swallowed every outcome and a 403, a 404 and a
+  503 all surfaced as an anonymous clone failing on git auth.
+- `harness/git_credential_client.py`, the two coordinator parameters that
+  existed only to reach that route, and `test_git_credentials_integration.py` —
+  which had been failing continuously while exercising infrastructure these
+  deployments do not use. Integration is now green.
+
+The substrate's credential injection is unchanged: an explicit token is still
+handed over as a mapping and injected as an `http.<host>.extraHeader`, so it
+reaches neither argv nor `.git/config`.
+
+## [0.4.2] — 2026-09-16
+
+### Changed
+
+- **`claude-agent-sdk` pinned at `>=0.2.152`** (was `>=0.2`, resolving to
+  0.2.87 — sixty-six releases behind). Includes a zombie-CLI-subprocess fix,
+  argv-injection hardening, and MCP 2.x. The three behaviours that could have
+  broken were each checked live: GAP skill mirroring, the in-process
+  `gap_tools` MCP server, and the widened message union.
+- **`project_key` removed.** It never reached the engine — the session-store key
+  is the SDK's own, derived from the workspace cwd — so it was a knob wired to
+  nothing.
+- **`budget_max_usd` now means what its name says**, mapping to the
+  `max_budget_usd` option the Claude CLI actually enforces. An explicit option
+  still wins.
+- **The `sqlite` extra is gone.** It promised a session store that does not
+  exist.
+
+### Fixed
+
+- **Concurrent turns on one `ComputerAgent` are refused.** They used to
+  interleave silently; since turns now resume the previous engine session, two
+  at once would share one session, one workspace and one store key.
+- **Options the engine cannot accept are logged**, naming them and the upstream
+  version. Dropping them silently made a typo — or an option renamed upstream —
+  fail invisibly.
+- **A temp clone left by a process that skipped `dispose()` is reaped at exit.**
+  Not a finalizer: `__del__` runs at an arbitrary point in async teardown.
+- **An inline `dict` source carrying `files` is refused.** The files were not
+  materialised and the workspace fell back to the current directory, so the
+  agent ran against the caller's cwd instead of the files they listed.
+
+### Testing
+
+Five verification gaps closed. `gitagent` proven live against the gateway
+(445 in / 8 out, where it previously raised). Cross-process resume proven
+through the mongo store — one process writes, a separate interpreter recalls.
+The `git://` clone branch now covered with a local `git daemon`, needing no
+credential. The httpx-missing hint covered without venv surgery.
+
+## [0.4.1] — 2026-09-16
+
+A survey of ~180 usage combinations against the live stack found six things that
+did not work and a set of inputs that failed late or plausibly-and-wrong. All
+are fixed; each of the six was verified live.
+
+### Fixed
+
+- **Multi-turn conversation had no memory.** Every `chat()` started a fresh
+  engine session, so a session store's key differed each turn and nothing was
+  rehydrated. Turns after the first now `resume` the previous engine session.
+  (`resume`, not `session_id` — the CLI refuses an id that already exists,
+  which is why the previously documented workaround failed on turn two.)
+- **`gitagent` could not run at all.** It read four variables from
+  `os.environ` while the harness delivers them on `EngineContext.envs`, so
+  every value the gateway branch computed was invisible to it.
+- **Conversation usage was billed as its final turn.** `session_ended` was
+  built from the last `ResultMessage`; the lifecycle rollup now sums finished
+  turns.
+- **`chat()` after `dispose()` ran against a deleted workspace**, and emitted
+  no `session_ended`. It raises.
+- **`engine=` could not rescue an unsupported harness**, though the error said
+  to try it. That check moved out of document validation into construction.
+- **`allowed_tools` restricted nothing** under the `bypassPermissions` this SDK
+  dispatches; the engine now warns when both are set. The e2e example shipped
+  such an allowlist and called "Bash ran anyway" a pass.
+- **Inputs that used to fail late or silently** are refused at construction:
+  an empty `source` (which resolved to the process's cwd and pointed a
+  bypassPermissions agent at it), a nonexistent or non-directory source path, a
+  wrong-typed source, a malformed `llm_proxy_url`, and a non-string `base_url`
+  (a bare `AttributeError` before).
+- **A `base_url` typo is refused rather than appended to.** `…/agentos/apiv1`
+  became `…/agentos/apiv1/agentos/api/v1`, and the resulting 404 blamed the
+  caller's agent id.
+- **`engine=object()` / `session_store=object()`** said "unknown *name*"; they
+  now say the value is not a driver or store.
+- **`on_tool_call` is never consulted on the claude engine** — accepted in
+  silence, so a caller believed they had a tool gate. It warns.
+- **`cancel()` before the first iteration** was a no-op and the turn ran to
+  completion. It now prevents the run.
+- `__all__` listed `SessionStore` and `SessionStoreEntry` twice.
+
+### Documentation
+
+`docs/USING_THE_SDK.md` gains a public-API and import table, how to extract the
+assistant's reply (`messages[-1]` is a `ResultMessage`; the text is `.result`),
+the real `EngineEvent` shape, async/concurrency and timeout behaviour, and the
+telemetry defaults. Corrected: the Claude CLI ships **bundled** with
+`claude-agent-sdk` and needs no `npm install`.
+
+## [0.4.0] — 2026-09-16
+
+### Changed — BREAKING: one run mode
+
+`ComputerAgent` took eleven ways to start an agent and reliably delivered none of
+them against the live stack. It now takes one: name an agent registered in
+AgentOS and run it here.
+
+```python
+ComputerAgent(base_url=..., agent_id=..., api_key=...)
+```
+
+The SDK fetches the agent's definition and reproduces what the AgentOS dispatch
+path would have sent to a ComputerAgent server — same source, model, engine
+environment and permission mode — except the engine runs in this process.
+Everything beyond the three required arguments is an override for something the
+agent document already answers.
+
+### Removed
+
+- The bare `/v1` harness-protocol client, the CAS sandbox client, the remote
+  coordinator, process forking, and the old `POST /agents/resolve` client
+  (~1,600 lines), with their tests.
+- `run_task`, `ForkConfig`, `HarnessClient`, `ComputerAgentServerClient`,
+  `HarnessProtocolError`, and the `remote` extra.
+- Constructor parameters `runtime`, `identity_loader`, `harness*`, `fork_*`,
+  `parent_*`, `policy_id`.
+- Five examples built on the standalone `source=`/`engine=` constructor, and
+  `user-documentation.md` — superseded by `docs/USING_THE_SDK.md`.
+
+The drop-in `query` / `ClaudeSDKClient` surface is untouched. It is a different
+surface, not a run mode.
+
+### Added
+
+- `ComputerAgent(base_url=, agent_id=, api_key=)` — resolve an agent from
+  AgentOS by its Mongo `_id`, presenting the caller's Lyzr workspace key on
+  `x-api-key`. Unimplemented agent shapes (a generic gateway, bound MCP servers,
+  an orchestration block, an unknown harness) are refused **by field name**
+  rather than run as something quieter than they declare.
+- `llm_proxy_url=` and `git_token=`, each needed only in a specific case: the
+  first for an Anthropic-shaped engine against a native (OpenAI-shaped) gateway,
+  the second for a private source. Missing either where it is required is an
+  error at construction, not a failure mid-run.
+- **Session stores that work.** The axis was inert: a store could be configured
+  and no engine ever read it. It now targets the upstream
+  `claude_agent_sdk.SessionStore` contract, so a store reaches the engine and
+  resume actually happens. `mongo` and `http` ported from the TypeScript stores;
+  the registry now holds builders, so a kind can be configured per call.
+- `examples/e2e/live_agent_run.py` — a staged live run that prints pass/fail per
+  stage, including a preflight that separates a dead gateway from a stopped
+  proxy from a bad key.
+- `docs/USING_THE_SDK.md`, a developer reference, and design notes for the
+  deferred MCP and orchestration work in `docs/plans/`.
+
+### Fixed
+
+- `policy.srs` bound `httpx` at import time while `policy/__init__` documented
+  its engines as lazily imported. It is now lazy, as advertised.
+- The `mongo` session store built without a `url` raised a bare `TypeError`; it
+  now names the option to supply.
+
 ## [0.3.0] — 2026-08-21
 
 ### Added

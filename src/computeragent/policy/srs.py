@@ -21,7 +21,8 @@ Enforcement: fetch the RAI policy once (cache cedar + opa guardrails), then
 ``POST .../guardrails/evaluate-tool-call`` per tool — both through the agentos
 proxy. Fail-closed on SRS errors; fail-open if the binding can't be resolved.
 
-Only depends on ``httpx`` (a core dependency).
+Needs ``httpx``, imported lazily so that merely importing the package does not
+bind it — this module is reached eagerly from ``policy/__init__``.
 """
 
 from __future__ import annotations
@@ -29,8 +30,6 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any
-
-import httpx
 
 from .types import FailMode, PolicyDecision, PolicyInput, PolicyResult
 
@@ -80,7 +79,7 @@ class SrsPolicyEngine:
         agent_name: str = "",
         fail_mode: FailMode = "deny",
         timeout: float = 10.0,
-        client: httpx.AsyncClient | None = None,
+        client: Any | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/") if endpoint else None
         self._policy_id = policy_id
@@ -93,7 +92,11 @@ class SrsPolicyEngine:
         self._resolved = False
         self._inert = False  # no policy bound -> allow everything
         self._via_agentos = False  # set in _resolve_config: proxy vs direct SRS
-        self._client = client or httpx.AsyncClient(timeout=timeout)
+        if client is None:
+            import httpx
+
+            client = httpx.AsyncClient(timeout=timeout)
+        self._client = client
 
     @classmethod
     def from_env(cls, *, agent_name: str = "", **overrides: Any) -> SrsPolicyEngine:
@@ -102,7 +105,8 @@ class SrsPolicyEngine:
             api_key=overrides.pop("api_key", None) or os.environ.get("SRS_API_KEY", ""),
             policy_id=overrides.pop("policy_id", None) or os.environ.get("SRS_POLICY_ID"),
             agentos_base=overrides.pop("agentos_base", None) or _ingest_base(),
-            agentos_token=overrides.pop("agentos_token", None) or os.environ.get("AGENTOS_INGEST_TOKEN"),
+            agentos_token=overrides.pop("agentos_token", None)
+            or os.environ.get("AGENTOS_INGEST_TOKEN"),
             agent_name=agent_name,
             **overrides,
         )
@@ -188,9 +192,7 @@ class SrsPolicyEngine:
         try:
             await self._load_policy()
             if self._inert:
-                return PolicyResult(
-                    decision=PolicyDecision.ALLOW, engine="srs", outcome="allowed"
-                )
+                return PolicyResult(decision=PolicyDecision.ALLOW, engine="srs", outcome="allowed")
             assert self._guardrails is not None
             mode = self._mode()
             body = {
@@ -230,9 +232,7 @@ class SrsPolicyEngine:
         except Exception as exc:  # noqa: BLE001 - SRS errors fail per mode (default closed)
             logger.warning("SRS policy evaluation failed (%s mode): %s", self._fail_mode, exc)
             if self._fail_mode == "allow":
-                return PolicyResult(
-                    decision=PolicyDecision.ALLOW, engine="srs", outcome="error"
-                )
+                return PolicyResult(decision=PolicyDecision.ALLOW, engine="srs", outcome="error")
             return PolicyResult(
                 decision=PolicyDecision.DENY,
                 reason=f"SRS error (fail-closed): {exc}",

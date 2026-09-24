@@ -127,7 +127,7 @@ async def test_anthropic_backend_single_turn(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_anthropic_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -169,9 +169,7 @@ async def test_anthropic_backend_tool_use_routes_through_permission(monkeypatch)
         return {"behavior": "deny", "message": "no read"}
 
     first = _anthropic_response(
-        content_blocks=[
-            _tool_use_block("tu_1", "Read", {"file_path": "secret.txt"})
-        ],
+        content_blocks=[_tool_use_block("tu_1", "Read", {"file_path": "secret.txt"})],
         stop_reason="tool_use",
     )
     second = _anthropic_response(
@@ -183,7 +181,7 @@ async def test_anthropic_backend_tool_use_routes_through_permission(monkeypatch)
     fake_client.messages.create = AsyncMock(side_effect=[first, second])
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_anthropic_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -202,7 +200,8 @@ async def test_anthropic_backend_tool_use_routes_through_permission(monkeypatch)
     assert perm_log[0].tool_name == "Read"
     # A `tool` payload sdk_message landed for the deny.
     tool_msgs = [
-        e for e in events
+        e
+        for e in events
         if e.kind == "sdk_message"
         and isinstance(e.payload, dict)
         and e.payload.get("role") == "tool"
@@ -211,7 +210,8 @@ async def test_anthropic_backend_tool_use_routes_through_permission(monkeypatch)
     assert "denied" in tool_msgs[0].payload["content"]
     # Final assistant message landed too.
     assistant_msgs = [
-        e for e in events
+        e
+        for e in events
         if e.kind == "sdk_message"
         and not (isinstance(e.payload, dict) and e.payload.get("role") == "tool")
     ]
@@ -246,7 +246,7 @@ async def test_anthropic_multi_turn_carries_context(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_anthropic_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()

@@ -27,14 +27,19 @@ _REGISTRY: dict[str, EngineDriver] = {}
 def register_engine(name: str, engine: EngineDriver) -> None:
     if not isinstance(engine, EngineDriver):
         raise TypeError(
-            f"register_engine({name!r}): instance does not satisfy "
-            "the EngineDriver Protocol"
+            f"register_engine({name!r}): instance does not satisfy the EngineDriver Protocol"
         )
     _REGISTRY[name] = engine
     logger.debug("registered engine %r", name)
 
 
 def resolve_engine(name: str) -> EngineDriver:
+    if not isinstance(name, str):
+        raise UnknownEngineError(
+            f"engine must be a registered name or an EngineDriver instance, got "
+            f"{type(name).__name__}. An EngineDriver needs a `name`, `capabilities` and "
+            f"`start_session`; registered names: {sorted(_REGISTRY)!r}"
+        )
     try:
         return _REGISTRY[name]
     except KeyError as exc:

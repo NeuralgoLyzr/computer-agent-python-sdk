@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 import pytest
 
-from computeragent.harness.git_credential_client import resolve_git_credential
 from computeragent.substrates import LocalSubstrate
 from computeragent.substrates.local import _clone_env, _git_clone, _host_of
 
@@ -116,41 +115,6 @@ class _FakeClient:
 
 
 @pytest.mark.asyncio
-async def test_resolve_returns_credential_on_200(monkeypatch):
-    monkeypatch.setenv("AGENTOS_API_URL", "https://h/agentos/api/v1")
-    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_test")
-    _FakeClient.resp = _FakeResp(200, {"host": "github.com", "username": "x-access-token", "token": "ghp_resolved"})
-    with patch("httpx.AsyncClient", _FakeClient):
-        out = await resolve_git_credential("https://github.com/o/r")
-    assert out == {"host": "github.com", "username": "x-access-token", "token": "ghp_resolved"}
-    assert _FakeClient.last["url"] == "https://h/agentos/api/v1/git-credentials/resolve"
-    assert _FakeClient.last["headers"]["authorization"] == "Bearer cak_test"
-    assert _FakeClient.last["json"] == {"repoUrl": "https://github.com/o/r"}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("status", [404, 401, 403])
-async def test_resolve_returns_none_on_miss(monkeypatch, status):
-    monkeypatch.setenv("AGENTOS_API_URL", "https://h/agentos/api/v1")
-    monkeypatch.setenv("COMPUTERAGENT_HARNESS_TOKEN", "cak_test")
-    _FakeClient.resp = _FakeResp(status, {"error": {"code": "NO_CREDENTIAL"}})
-    with patch("httpx.AsyncClient", _FakeClient):
-        assert await resolve_git_credential("https://github.com/o/r") is None
-
-
-@pytest.mark.asyncio
-async def test_resolve_returns_none_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("AGENTOS_API_URL", raising=False)
-    monkeypatch.delenv("COMPUTERAGENT_HARNESS_TOKEN", raising=False)
-    monkeypatch.delenv("AGENTOS_INGEST_TOKEN", raising=False)
-    # No network call should happen — patch to explode if it does.
-    with patch("httpx.AsyncClient", side_effect=AssertionError("should not be called")):
-        assert await resolve_git_credential("https://github.com/o/r") is None
-
-
-# ── real git: the auth header we inject must be honored by the installed git ──
-# This is the load-bearing check — GIT_CONFIG_COUNT needs git >= 2.31, so a
-# silent no-op here (older git) is exactly the "PAT clone fails" failure mode.
 def test_installed_git_honors_injected_extra_header():
     cred = {"username": "x-access-token", "token": "ghp_dummytoken", "host": "github.com"}
     env = _clone_env("https://github.com/o/r.git", cred)
@@ -162,7 +126,7 @@ def test_installed_git_honors_injected_extra_header():
     )
     assert out.returncode == 0, (
         "installed git ignored GIT_CONFIG_* env injection — PAT auth won't apply "
-        f"(need git >= 2.31; have: {subprocess.run(['git','--version'],capture_output=True,text=True).stdout.strip()})"
+        f"(need git >= 2.31; have: {subprocess.run(['git', '--version'], capture_output=True, text=True).stdout.strip()})"
     )
     line = out.stdout.strip()
     assert line.startswith("Authorization: Basic ")
@@ -175,8 +139,10 @@ def _seed_bare_repo(tmp_path: Path) -> Path:
     work = tmp_path / "seed"
     env = {
         **os.environ,
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
     }
     run = lambda *a: subprocess.run(a, check=True, capture_output=True, env=env)  # noqa: E731
     run("git", "init", "--bare", "-q", str(origin))

@@ -20,8 +20,7 @@ def register_substrate(name: str, substrate: Substrate) -> None:
     """Register a substrate under ``name``. Replaces any prior entry."""
     if not isinstance(substrate, Substrate):
         raise TypeError(
-            f"register_substrate({name!r}): instance does not satisfy "
-            "the Substrate Protocol"
+            f"register_substrate({name!r}): instance does not satisfy the Substrate Protocol"
         )
     _REGISTRY[name] = substrate
     logger.debug("registered substrate %r", name)

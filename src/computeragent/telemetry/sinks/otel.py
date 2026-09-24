@@ -106,7 +106,6 @@ from .content import (
 Temporality = Literal["delta", "cumulative"]
 
 if TYPE_CHECKING:
-
     from ..event import TelemetryEvent
 
 logger = logging.getLogger("computeragent.telemetry")
@@ -167,14 +166,50 @@ MAX_TRACKED_SESSIONS = 10_000
 # packages/observability/src/semantic/attributes.ts. The OTel SDK's default
 # exponential histogram does not satisfy backends that expect explicit buckets.
 TOKEN_USAGE_BUCKETS: tuple[int, ...] = (
-    1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864,
+    1,
+    4,
+    16,
+    64,
+    256,
+    1024,
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864,
 )
 OPERATION_DURATION_BUCKETS: tuple[float, ...] = (
-    0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92,
+    0.01,
+    0.02,
+    0.04,
+    0.08,
+    0.16,
+    0.32,
+    0.64,
+    1.28,
+    2.56,
+    5.12,
+    10.24,
+    20.48,
+    40.96,
+    81.92,
 )
 # cost is not in the OTel spec; buckets tuned for typical per-call LLM cost.
 COST_USD_BUCKETS: tuple[float, ...] = (
-    0.0001, 0.001, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100,
+    0.0001,
+    0.001,
+    0.01,
+    0.05,
+    0.1,
+    0.5,
+    1,
+    5,
+    10,
+    50,
+    100,
 )
 
 
@@ -449,8 +484,8 @@ class _UsageAggregator:
                 t.cache_creation_input_tokens - base.get("cache_creation_input_tokens", 0)
             )
         if t.cache_read_input_tokens is not None:
-            out[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = (
-                t.cache_read_input_tokens - base.get("cache_read_input_tokens", 0)
+            out[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = t.cache_read_input_tokens - base.get(
+                "cache_read_input_tokens", 0
             )
         if t.cost_usd is not None:
             out[COMPUTERAGENT_USAGE_COST_USD] = t.cost_usd - base.get("cost_usd", 0.0)
@@ -1012,12 +1047,7 @@ class OtelSink:
         # Open this turn's root (marks the per-turn usage baseline).
         self._ensure_invoke_agent(sid)
         prompt = event.payload.get("prompt")
-        if (
-            self._capture_content
-            and isinstance(prompt, str)
-            and prompt
-            and prompt != "<streaming>"
-        ):
+        if self._capture_content and isinstance(prompt, str) and prompt and prompt != "<streaming>":
             self._content.record_user_text(sid, prompt)
 
     def _on_assistant_message(self, event: TelemetryEvent) -> None:
@@ -1286,7 +1316,9 @@ class OtelSink:
         if call_id:
             attrs[GEN_AI_TOOL_CALL_ID] = call_id
         # Parent = open execute_tool span if present, else the invoke_agent root.
-        parent = (self._spans.get_tool(sid, call_id) if call_id else None) or self._spans.get_invoke_agent(sid)
+        parent = (
+            self._spans.get_tool(sid, call_id) if call_id else None
+        ) or self._spans.get_invoke_agent(sid)
         ctx = trace.set_span_in_context(parent) if parent is not None else None
         end_ns = time.time_ns()
         start_ns = end_ns - int(latency_ms * 1e6) if latency_ms else end_ns

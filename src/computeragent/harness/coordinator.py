@@ -32,7 +32,7 @@ from ..protocol_types import (
 )
 from ..telemetry import TelemetryEvent, get_pipeline, new_session_id
 from ..telemetry.pipeline import Pipeline
-from .errors import HarnessProtocolError
+from .errors import HarnessError, HarnessProtocolError
 from .usage import UsageRollup
 
 logger = logging.getLogger("computeragent.harness")
@@ -92,12 +92,13 @@ class HarnessCoordinator:
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
-        # ── process-fork (opt-in; see harness/fork.py) ──────────────────────
+        # ── cloning a private source ────────────────────────────────────────
+        # The PAT used to clone a private source, when there is one.
+        git_token: str | None = None,
+        # Linkage for a child session spawned by a parent agent. Stamped onto
+        # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
         parent_agent_id: str | None = None,
-        fork_mode: str = "off",
-        fork_config: Any = None,
-        fork_depth: int = 0,
     ) -> None:
         self._engine = engine
         self._substrate = substrate
@@ -111,16 +112,8 @@ class HarnessCoordinator:
         # Stable agent identifier (telemetry/registry only — never affects
         # execution). Stamped onto every emitted event via ``_emit``.
         self._agent_id = agent_id
-        # Process-fork linkage + config. ``parent_*`` are stamped onto every
-        # emitted event (like ``agent_id``) so a forked child links to its
-        # parent. The fork server (mcp__fork__spawn) is injected into the run
-        # options in ``_ensure_booted`` when ``fork_mode != "off"``.
         self._parent_session_id = parent_session_id
         self._parent_agent_id = parent_agent_id
-        self._fork_mode = fork_mode
-        self._fork_config = fork_config
-        self._fork_depth = fork_depth
-        self._fork_context: Any = None
         self._policy_decider = policy_decider
         self._on_permission_request_user = on_permission_request
         self._budget_max_usd = budget_max_usd
@@ -130,6 +123,7 @@ class HarnessCoordinator:
         # / ``model=...``. Layered on top of whatever the identity loader
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
+        self._git_token = git_token
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -151,21 +145,59 @@ class HarnessCoordinator:
         self._lifecycle_usage: UsageRollup = UsageRollup()
         self._lifecycle_last_assistant_text: str = ""
         self._lifecycle_last_result_payload: Any = None
+        # The engine's own session id from the last turn. One ComputerAgent is
+        # one conversation, so each turn after the first resumes from this
+        # rather than starting a fresh engine session with no memory.
+        self._engine_session_id: str | None = None
+        # One ComputerAgent is one conversation, and since turns now resume the
+        # previous engine session, two in flight at once would interleave into
+        # the same session, the same workspace and the same session-store key.
+        # It used to "work" by luck; refuse it instead of corrupting a
+        # transcript.
+        self._turn_in_flight = False
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
+    def _git_credential(self) -> dict[str, str] | None:
+        """Auth for cloning the source, or ``None`` for an anonymous clone.
+
+        Just the explicit token now. There used to be a middle step that asked
+        AgentOS to mint a GitHub-App installation token, but that route is
+        App-only and these deployments authenticate with PATs — held either
+        directly on the agent or in the Lyzr credential vault behind its
+        `credential_id`, neither of which the App route can return. So the
+        fallback could not succeed, and all it did was turn a missing token
+        into a slower failure.
+
+        The token is handed to the substrate as a credential mapping, not
+        spliced into the clone URL, so it reaches neither argv nor the remote
+        recorded in ``.git/config``.
+        """
+        if not (isinstance(self._source, str) and self._git_token):
+            return None
+        from ..substrates.local import _host_of
+
+        return {
+            "host": _host_of(self._source),
+            "username": "x-access-token",
+            "token": self._git_token,
+        }
+
     async def _ensure_booted(self) -> None:
+        if self._disposed:
+            # `dispose()` closes the substrate handle but leaves it set, so
+            # without this the short-circuit below would sail past and run the
+            # turn with `cwd` pointing at a temp directory that has been
+            # removed — and because `_disposed` is already True, the closing
+            # `dispose()` would be a no-op, so that turn would emit no
+            # `session_ended` and clean nothing up.
+            raise HarnessError(
+                "this ComputerAgent has been disposed — build a new one rather than reusing it. "
+                "Its workspace is gone and its session is closed."
+            )
         if self._substrate_handle is not None:
             return
-        # Private GAP repos: ask AgentOS (with our API key) for a group-scoped
-        # PAT for this repo's host. Best-effort — a miss/!config leaves it None
-        # and the substrate clones unauthenticated (public-repo behavior).
-        git_credential = None
-        if isinstance(self._source, str):
-            from .git_credential_client import resolve_git_credential
-
-            with suppress(Exception):
-                git_credential = await resolve_git_credential(self._source)
+        git_credential = self._git_credential()
         self._substrate_handle = await self._substrate.boot(
             source=self._source, envs=self._envs, git_credential=git_credential
         )
@@ -201,43 +233,6 @@ class HarnessCoordinator:
                 hardened = harden(dict(loaded.options or {}))
                 if isinstance(hardened, dict):
                     loaded = replace(loaded, options=hardened)
-        # ── process-fork tool injection (opt-in) ─────────────────────────────
-        # Injected HERE (loader-agnostic, after overlay+harden) rather than via
-        # the caller overlay — the overlay is a shallow ``dict.update`` and would
-        # CLOBBER the loader's ``mcp_servers`` (e.g. gap_tools). We deep-merge so
-        # the fork server coexists with gap_tools + agents. A child only gets the
-        # tool while under the depth cap.
-        if (
-            self._fork_mode != "off"
-            and self._fork_config is not None
-            and self._fork_depth < getattr(self._fork_config, "max_depth", 0)
-        ):
-            from dataclasses import replace
-
-            from .fork import ForkContext, append_steer, build_fork_mcp_server
-
-            self._fork_context = ForkContext(
-                self, self._fork_config, self._fork_depth, self._fork_mode
-            )
-            server, tool_names = build_fork_mcp_server(self._fork_context)
-            opts = dict(loaded.options or {})
-            mcp = dict(opts.get("mcp_servers") or {})
-            mcp["fork"] = server
-            opts["mcp_servers"] = mcp
-            # Only extend an EXISTING allowlist — introducing one where there was
-            # none would restrict the agent to just the fork tool. When no
-            # allowlist is set, all tools (incl. the fork MCP tool) are available.
-            if opts.get("allowed_tools"):
-                opts["allowed_tools"] = list(opts["allowed_tools"]) + list(tool_names)
-            if self._fork_mode == "auto":
-                # Disable native in-process sub-agents; steer delegation to fork.
-                opts["agents"] = {}
-                dis = list(opts.get("disallowed_tools") or [])
-                if "Task" not in dis:
-                    dis.append("Task")
-                opts["disallowed_tools"] = dis
-                opts["system_prompt"] = append_steer(opts.get("system_prompt"))
-            loaded = replace(loaded, options=opts)
         self._manifest = loaded
 
     async def dispose(self) -> None:
@@ -250,12 +245,6 @@ class HarnessCoordinator:
         if self._lifecycle_started and self._lifecycle_session_id:
             with suppress(Exception):
                 await self._emit_lifecycle_session_ended()
-        # Tear down any still-running forked children first — the SDK's atexit
-        # net kills orphaned CLI processes but NOT the children's temp
-        # workspaces, so an explicit dispose here prevents leaks.
-        if self._fork_context is not None:
-            with suppress(Exception):
-                await self._fork_context.teardown()
         if self._substrate_handle is not None:
             with suppress(Exception):
                 await self._substrate_handle.close()
@@ -279,6 +268,17 @@ class HarnessCoordinator:
                 duration_ms=duration_ms,
                 last_assistant_text=self._lifecycle_last_assistant_text,
             )
+            # That payload is the LAST TURN's result message, so its usage
+            # describes one turn. This row describes the conversation, so the
+            # summed lifecycle totals replace it — otherwise every multi-turn
+            # run is billed as its final turn alone.
+            ev.payload["usage"] = {
+                "input_tokens": self._lifecycle_usage.input_tokens,
+                "output_tokens": self._lifecycle_usage.output_tokens,
+                "cache_creation_input_tokens": self._lifecycle_usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": self._lifecycle_usage.cache_read_input_tokens,
+            }
+            ev.payload["total_cost_usd"] = self._lifecycle_usage.cost_usd
         else:
             # Engine never yielded a ResultMessage (gitagent path) —
             # build a payload from the cumulative usage rollup instead.
@@ -318,6 +318,12 @@ class HarnessCoordinator:
         stream with its own ``session_started`` and ``session_ended``
         events at the boundaries.
         """
+        if self._turn_in_flight:
+            raise HarnessError(
+                "a chat turn is already in flight on this ComputerAgent. One instance is one "
+                "conversation with one workspace, so concurrent turns would interleave into the "
+                "same engine session — run concurrent work as separate ComputerAgent instances."
+            )
         await self._ensure_booted()
         assert self._workspace_path is not None
         assert self._manifest is not None
@@ -336,14 +342,10 @@ class HarnessCoordinator:
             pipeline=self._pipeline,
         )
 
-        # Pre-load any prior turns from the session store so the engine
-        # can wire them into context. Stored verbatim — the engine
-        # interprets them on its own terms.
-        if self._session_store is not None:
-            with suppress(Exception):
-                await self._session_store.create(
-                    project_key=self._project_key, session_id=session_id
-                )
+        # The session store is threaded into the engine's own options rather
+        # than read here: the SDK mirrors transcript batches to it and
+        # materialises prior entries itself before spawning the subprocess.
+        # Replaying it from this side as well would duplicate the transcript.
 
         await _enqueue_user_message(state.user_queue, message)
 
@@ -358,6 +360,7 @@ class HarnessCoordinator:
             session_store=self._session_store,
             policy_decider=self._policy_decider,
             budget_max_usd=self._budget_max_usd,
+            resume_session_id=self._engine_session_id,
         )
 
         # session_started fires ONCE per ComputerAgent lifecycle so AgentOS
@@ -368,6 +371,7 @@ class HarnessCoordinator:
         # user_message events so each new prompt appends to entries without
         # re-seeding. The OtelSink captures per-turn content via turn_started
         # (emitted below), not via session_started.
+        self._turn_in_flight = True
         prompt_str = _stringify_prompt(message)
         is_first_chat = not self._lifecycle_started
         if is_first_chat:
@@ -420,11 +424,20 @@ class HarnessCoordinator:
         first_token_emitted = False
         try:
             async for ev in self._engine.start_session(ctx):
+                if ev.kind == "sdk_message":
+                    # Remember the engine's own session id so the next turn can
+                    # resume this conversation. It appears on every message the
+                    # CLI emits; the first one we see is the one to keep.
+                    engine_sid = getattr(ev.payload, "session_id", None)
+                    if isinstance(engine_sid, str) and engine_sid:
+                        self._engine_session_id = engine_sid
                 if ev.kind == "usage_snapshot":
                     state.usage.absorb(ev)
-                    # Also roll into lifecycle totals for the eventual
-                    # session_ended row.
-                    self._lifecycle_usage.absorb(ev)
+                    # The LIFECYCLE total is summed from finished turns at the
+                    # bottom of this function, not from these snapshots: a
+                    # cumulative engine restarts its counters each turn, so
+                    # absorbing them here would leave the conversation billed
+                    # as its final turn alone.
                     # Forward as a synthetic ResultMessage-shaped telemetry
                     # event so the existing OTel sink picks it up.
                     await self._emit(
@@ -446,9 +459,7 @@ class HarnessCoordinator:
                     )
                 elif ev.kind == "sdk_message":
                     state.messages.append(ev.payload)
-                    last_assistant_text = _maybe_assistant_text(
-                        ev.payload, last_assistant_text
-                    )
+                    last_assistant_text = _maybe_assistant_text(ev.payload, last_assistant_text)
                     result_payload = _maybe_result_payload(ev.payload, result_payload)
                     # First, try the claude-agent-sdk-shape translator —
                     # for the Claude engine this yields tool_use /
@@ -529,11 +540,15 @@ class HarnessCoordinator:
                 self._lifecycle_last_assistant_text = last_assistant_text
             if result_payload is not None:
                 self._lifecycle_last_result_payload = result_payload
+            # This turn is over and `state.usage` is final — fold it into the
+            # conversation total that `session_ended` reports.
+            self._lifecycle_usage.add(state.usage)
             # Drain pending sink tasks for THIS chat so the next chat's
             # user_message lands AFTER this chat's assistant_message in
             # ``sessions[].entries``. ``Pipeline.emit`` schedules sink
             # writes as background tasks; without flushing here the
             # next chat's events race and entries land out-of-order.
+            self._turn_in_flight = False
             with suppress(Exception):
                 await self._pipeline.flush()
 
@@ -726,16 +741,12 @@ async def _enqueue_user_message(
             if isinstance(entry, str):
                 await queue.put({"role": "user", "content": entry})
             elif isinstance(entry, dict):
-                await queue.put(
-                    entry if "role" in entry else {"role": "user", "content": entry}
-                )
+                await queue.put(entry if "role" in entry else {"role": "user", "content": entry})
     elif isinstance(message, AsyncIterable):
         async for entry in message:
             await _enqueue_user_message(queue, entry)
     else:
-        raise TypeError(
-            f"unsupported chat message type: {type(message).__name__}"
-        )
+        raise TypeError(f"unsupported chat message type: {type(message).__name__}")
     # Single-shot mode — close the queue after one ChatInput is drained.
     # ``ComputerAgent.chat`` reopens for each call.
     await queue.put(None)
@@ -824,9 +835,8 @@ def _synthesise_telemetry(
                 _ev(
                     "tool_result",
                     {
-                        "tool_use_id": payload.get("tool_call_id") or payload.get(
-                            "tool_use_id", ""
-                        ),
+                        "tool_use_id": payload.get("tool_call_id")
+                        or payload.get("tool_use_id", ""),
                         "is_error": bool(payload.get("is_error", False)),
                         "content": str(payload.get("content", "")),
                     },
@@ -904,8 +914,7 @@ def _synthesise_telemetry(
                     "tool_use",
                     {
                         "tool_use_id": getattr(tc, "id", "") or "",
-                        "tool_name": (getattr(fn, "name", "") if fn is not None else "")
-                        or "",
+                        "tool_name": (getattr(fn, "name", "") if fn is not None else "") or "",
                         "tool_input": tool_input,
                     },
                 )

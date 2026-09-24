@@ -31,7 +31,9 @@ async def test_tool_name_allowlist_literal():
 
 @pytest.mark.asyncio
 async def test_tool_name_allowlist_glob():
-    g = GuardrailFilter(max_attribute_length=None, tool_name_allowlist={"mcp__acme-assist-tools__*"})
+    g = GuardrailFilter(
+        max_attribute_length=None, tool_name_allowlist={"mcp__acme-assist-tools__*"}
+    )
     a = await g(
         _ev("tool_use", {"tool_name": "mcp__acme-assist-tools__lookup_team", "tool_use_id": "1"})
     )

@@ -138,7 +138,11 @@ async def _run_hook(
         await proc.wait()
         return proc.returncode or 0, "", ""
 
-    return proc.returncode or 0, stdout_b.decode("utf-8", "replace"), stderr_b.decode("utf-8", "replace")
+    return (
+        proc.returncode or 0,
+        stdout_b.decode("utf-8", "replace"),
+        stderr_b.decode("utf-8", "replace"),
+    )
 
 
 def _parse_hook_output(stdout: str) -> dict[str, Any]:

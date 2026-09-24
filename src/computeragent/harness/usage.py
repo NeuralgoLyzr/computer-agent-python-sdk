@@ -36,6 +36,21 @@ class UsageRollup:
     cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
 
+    def add(self, other: UsageRollup) -> None:
+        """Accumulate a completed turn's totals into a running total.
+
+        Distinct from :meth:`absorb`, which folds in one engine *snapshot*.
+        A cumulative engine restarts its counters every turn, so absorbing its
+        snapshots into a conversation-level rollup leaves only the last turn —
+        the whole conversation would be billed as its final turn. Summing
+        finished turns is the only thing that means "the conversation".
+        """
+        self.input_tokens += other.input_tokens
+        self.output_tokens += other.output_tokens
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens
+        self.cache_read_input_tokens += other.cache_read_input_tokens
+        self.cost_usd += other.cost_usd
+
     def absorb(self, event: EngineEvent) -> None:
         if event.kind != "usage_snapshot":
             return

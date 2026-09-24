@@ -56,9 +56,7 @@ def _stub_response(*, choices: list[Any], usage: dict[str, int]) -> Any:
     return _Resp()
 
 
-def _stub_tool_call(
-    *, call_id: str, name: str, arguments: str
-) -> Any:
+def _stub_tool_call(*, call_id: str, name: str, arguments: str) -> Any:
     class _Func:
         def __init__(self) -> None:
             self.name = name
@@ -161,7 +159,7 @@ async def test_single_turn_happy_path(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -199,9 +197,7 @@ async def test_tool_call_routes_through_permission_hook(monkeypatch):
         choices=[
             _stub_choice(
                 content=None,
-                tool_calls=[
-                    _stub_tool_call(call_id="tc1", name="Read", arguments='{"file": "x"}')
-                ],
+                tool_calls=[_stub_tool_call(call_id="tc1", name="Read", arguments='{"file": "x"}')],
             )
         ],
         usage={"prompt_tokens": 5, "completion_tokens": 5},
@@ -215,7 +211,7 @@ async def test_tool_call_routes_through_permission_hook(monkeypatch):
     fake_client.chat.completions.create = AsyncMock(side_effect=[first, second])
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -259,7 +255,7 @@ async def test_multi_turn_carries_context(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()
@@ -276,9 +272,7 @@ async def test_multi_turn_carries_context(monkeypatch):
 
     # Two completions fired, one per user message.
     assert fake_client.chat.completions.create.await_count == 2
-    second_call_messages = fake_client.chat.completions.create.await_args_list[1].kwargs[
-        "messages"
-    ]
+    second_call_messages = fake_client.chat.completions.create.await_args_list[1].kwargs["messages"]
     # Second-turn system prompt must include the prior assistant output.
     sys_msg = next(m for m in second_call_messages if m["role"] == "system")
     assert "reply-1" in sys_msg["content"]
@@ -298,7 +292,7 @@ async def test_cancel_event_short_circuits_loop(monkeypatch):
     )
     monkeypatch.setattr(
         "computeragent.engines.git_agent._build_openai_client",
-        lambda: fake_client,
+        lambda envs=None: fake_client,
     )
 
     engine = GitAgentEngine()

@@ -114,7 +114,7 @@ def ingest_url() -> str | None:
 
 
 def api_url() -> str | None:
-    """Dashboard v1 API base — agent resolve + git-credentials
+    """Dashboard v1 API base — agent resolve
     (``AGENTOS_API_URL`` override → discovery)."""
     return _resolve("api", "AGENTOS_API_URL")
 
@@ -199,8 +199,9 @@ def bind_policy(
             "bind_policy needs AgentOS — set AGENTOS_DISCOVERY_URL (or AGENTOS_API_URL) "
             "and a cak_ key (COMPUTERAGENT_HARNESS_TOKEN)."
         )
-    import httpx
     from urllib.parse import quote
+
+    import httpx
 
     resp = httpx.put(
         f"{base}/agents/{quote(agent_id, safe='')}/policy",

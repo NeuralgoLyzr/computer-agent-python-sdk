@@ -143,3 +143,21 @@ def fake_upstream_client(monkeypatch):
     _FakeClient.messages = []
     monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", _FakeClient)
     return _FakeClient
+
+
+# ── AgentOS agent document ───────────────────────────────────────────────────
+# The real `GET /v1/agents/:id` payload, kept in tests/fixtures/agent_doc.json
+# so resolver and env tests start from what the server actually returns rather
+# than a hand-rolled approximation. (Only the gateway's `models` allowlist is
+# trimmed — the SDK never reads it.) The fixture hands back a deep copy so a
+# test can null the gateway or add an mcp_server without the literal drifting.
+
+
+@pytest.fixture
+def agent_doc() -> dict:
+    import copy
+    import json
+    from pathlib import Path as _Path
+
+    raw = (_Path(__file__).parent / "fixtures" / "agent_doc.json").read_text(encoding="utf-8")
+    return copy.deepcopy(json.loads(raw))

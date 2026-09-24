@@ -42,7 +42,7 @@ _upstream_all = [n for n in getattr(_cas, "__all__", []) if n != "__version__"]
 for _name in _upstream_all:
     globals()[_name] = getattr(_cas, _name)
 
-__version__ = "0.3.0"
+__version__ = "0.4.3"
 upstream_version = getattr(_cas, "__version__", "unknown")
 
 # Override the two entry points with the proxied versions. Same signatures,
@@ -56,19 +56,20 @@ from ._proxy.query import query  # noqa: E402
 # loader as a side effect — that's intentional so string-label
 # resolution works without an explicit ``register_*`` call.
 from .harness import (  # noqa: E402
+    AgentResolveError,
     ChatHandle,
     ChatInput,
     ChatResult,
     ComputerAgent,
-    ForkConfig,
+    GatewayConfigError,
     HarnessError,
-    HarnessProtocolError,
+    ResolvedAgent,
     UnknownEngineError,
     UnknownIdentityLoaderError,
     UnknownSessionStoreError,
     UnknownSubstrateError,
+    UnsupportedAgentError,
     UsageRollup,
-    run_task,
 )
 
 # Policy surface (v0.2 — tool-use authorization). Engines themselves
@@ -114,7 +115,10 @@ from .telemetry import (  # noqa: E402
     shutdown,
 )
 
-__all__ = sorted({*_upstream_all, "__version__"}) + [
+# Our own additions, minus anything upstream already exports — `SessionStore`
+# and `SessionStoreEntry` are re-exported from `claude_agent_sdk.types`, so
+# listing them here too put them in `__all__` twice.
+_own = [
     # telemetry + policy add-ons (alphabetical at the tail so the public
     # symbol list stays scannable when grepped against `claude_agent_sdk.__all__`)
     "GuardrailFilter",
@@ -128,7 +132,6 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "PolicyResource",
     "PolicyResult",
     "PolicyToolAuthorizer",
-    "ForkConfig",
     "TelemetryEvent",
     "TelemetryMiddleware",
     "TelemetrySink",
@@ -141,15 +144,15 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "ChatInput",
     "ChatResult",
     "ComputerAgent",
-    # remote-harness clients (0.3.0; lazy — require the [remote] extra)
-    "ComputerAgentServerClient",
-    "HarnessClient",
+    "AgentResolveError",
+    "GatewayConfigError",
+    "ResolvedAgent",
+    "UnsupportedAgentError",
     "EngineCapabilities",
     "EngineContext",
     "EngineDriver",
     "EngineEvent",
     "HarnessError",
-    "HarnessProtocolError",
     "IdentityLoader",
     "IdentitySource",
     "PermissionDecision",
@@ -164,20 +167,5 @@ __all__ = sorted({*_upstream_all, "__version__"}) + [
     "UnknownSessionStoreError",
     "UnknownSubstrateError",
     "UsageRollup",
-    "run_task",
 ]
-
-
-def __getattr__(name: str):  # type: ignore[no-untyped-def]
-    """Lazy exports for the optional ``[remote]`` extra — so a local-only
-    install never imports ``httpx`` at package import time. Raises a clean
-    ImportError (with an install hint) only when actually accessed."""
-    if name == "HarnessClient":
-        from .harness.protocol import HarnessClient
-
-        return HarnessClient
-    if name == "ComputerAgentServerClient":
-        from .harness.cas_client import ComputerAgentServerClient
-
-        return ComputerAgentServerClient
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+__all__ = sorted({*_upstream_all, "__version__"}) + [n for n in _own if n not in set(_upstream_all)]

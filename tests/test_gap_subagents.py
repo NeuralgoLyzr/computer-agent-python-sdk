@@ -48,9 +48,7 @@ def test_nested_subagent_soul_required(tmp_path: Path):
     nested.mkdir(parents=True)
     (nested / "SOUL.md").write_text("You research topics deeply.\n")
     (nested / "agent.yaml").write_text(
-        "description: Research sub-agent\n"
-        "model:\n  preferred: sonnet\n"
-        "tools: [WebSearch]\n"
+        "description: Research sub-agent\nmodel:\n  preferred: sonnet\ntools: [WebSearch]\n"
     )
     # A dir without SOUL.md is skipped.
     bare = tmp_path / "agents" / "empty"

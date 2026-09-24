@@ -76,8 +76,7 @@ class GapIdentityLoader:
         raw = _load_yaml(manifest_path)
         if not isinstance(raw, dict):
             raise ValueError(
-                f"{_MANIFEST_FILENAME} must be a YAML mapping at the root; "
-                f"got {type(raw).__name__}"
+                f"{_MANIFEST_FILENAME} must be a YAML mapping at the root; got {type(raw).__name__}"
             )
 
         name = raw.get("name") or workspace_path.name or "gap-agent"
@@ -91,9 +90,7 @@ class GapIdentityLoader:
         model_block = raw.get("model") or {}
         runtime_block = raw.get("runtime") or {}
         constraints = (
-            (model_block.get("constraints") or {})
-            if isinstance(model_block, dict)
-            else {}
+            (model_block.get("constraints") or {}) if isinstance(model_block, dict) else {}
         )
 
         harden: Callable[[dict[str, Any]], dict[str, Any]] | None = None
@@ -240,9 +237,7 @@ def _gitagent_options(
     if max_turns := runtime_block.get("max_turns"):
         out["max_turns"] = int(max_turns)
     if constraints:
-        out["constraints"] = {
-            k: v for k, v in constraints.items() if v is not None
-        }
+        out["constraints"] = {k: v for k, v in constraints.items() if v is not None}
     if tool_names:
         # 0.2.0 gitagent treats this as a hint — actual tool execution
         # is deferred to 0.3.0. The engine's MCP-only stub will surface
@@ -323,10 +318,7 @@ def _claude_agent_options(
         url = cfg.get("url")
         if not (isinstance(url, str) and url):
             continue
-        headers = {
-            str(k): _substitute_env(str(v))
-            for k, v in (cfg.get("headers") or {}).items()
-        }
+        headers = {str(k): _substitute_env(str(v)) for k, v in (cfg.get("headers") or {}).items()}
         mcp_servers[server_name] = {
             "type": "http",
             "url": url,

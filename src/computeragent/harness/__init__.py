@@ -1,55 +1,67 @@
-"""Public harness surface — :class:`ComputerAgent`, :func:`run_task`,
-:class:`ChatHandle`, :class:`ChatResult`.
+"""Public harness surface — :class:`ComputerAgent`, :class:`ChatHandle`,
+:class:`ChatResult`.
 
-Mirrors the TypeScript ``@open-gitagent/sdk`` shape one-for-one so prior
-TS users have zero translation cost when moving to Python::
+One run mode: name an agent registered in AgentOS, and run it **locally**::
 
     async with ComputerAgent(
-        source=Path.cwd(),
-        engine="claude-agent-sdk",
-        runtime="local",
+        base_url="http://localhost:8788/agentos/api",
+        agent_id="6aa93f1b3817a13d3103d2c1",
+        api_key="<lyzr workspace key>",
+        llm_proxy_url="http://127.0.0.1:8786",
     ) as agent:
-        result = await agent.chat("Hello")
-        print(result.messages)
+        result = await agent.chat("List the files in your working directory.")
 
-This module is strictly additive vs 0.1.3: none of the legacy
-``query`` / ``ClaudeSDKClient`` exports are touched.
+The SDK fetches the agent's definition from AgentOS and reproduces what the
+server's own dispatch path would have sent to a ComputerAgent server — same
+source, same model, same engine environment, same permission mode — except the
+engine runs in this process instead of in a sandbox.
+
+Everything beyond the three required arguments is an override for something the
+agent document already answers. Two are needed only in specific cases:
+``llm_proxy_url`` for an Anthropic-shaped engine against a native (OpenAI-shaped)
+gateway, and ``git_token`` for a private source.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, Protocol, cast
 
 from ..engines import resolve_engine
-from ..identity import resolve_identity_loader
 from ..protocol_types import (
+    AgentManifest,
     EngineDriver,
-    IdentityLoader,
     IdentitySource,
     PermissionRequest,
     PolicyDecider,
     SessionStore,
-    Substrate,
 )
-from ..session_stores import resolve_session_store
-from ..substrates import resolve_substrate
+from ..session_stores import is_session_store, resolve_session_store
+from ..substrates import LocalSubstrate
 from ..telemetry.pipeline import Pipeline
+from .agentos_agent import (
+    AgentResolveError,
+    ResolvedAgent,
+    UnsupportedAgentError,
+    api_base,
+    require_runnable_harness,
+    resolve_agent,
+)
 from .coordinator import HarnessCoordinator, _SessionState
 from .errors import (
     HarnessError,
-    HarnessProtocolError,
     UnknownEngineError,
     UnknownIdentityLoaderError,
     UnknownSessionStoreError,
     UnknownSubstrateError,
 )
+from .gateway_envs import GatewayConfigError, build_gateway_envs, build_options, merge_envs
 from .usage import UsageRollup
 
 logger = logging.getLogger("computeragent.harness")
@@ -68,9 +80,7 @@ class ChatResult:
 
 
 class _CoordinatorLike(Protocol):
-    """The slice of a coordinator that :class:`ChatHandle` drives. Both the
-    local :class:`HarnessCoordinator` and the remote ``RemoteCoordinator``
-    satisfy it structurally."""
+    """The slice of a coordinator that :class:`ChatHandle` drives."""
 
     async def run_chat(self, message: Any) -> tuple[_SessionState, AsyncIterator[Any]]: ...
     async def dispose(self) -> None: ...
@@ -79,34 +89,29 @@ class _CoordinatorLike(Protocol):
 class ChatHandle:
     """Live handle to one in-flight chat session.
 
-    ``async for ev in handle`` streams events in order — :class:`EngineEvent`s
-    in local mode, raw ``HarnessEvent``s (``ca_*``) in remote mode.
-    ``await handle`` drains the stream and returns a :class:`ChatResult`.
-    Both forms compose: a partial iteration before ``await`` resumes
-    where iteration left off.
+    ``async for ev in handle`` streams :class:`EngineEvent`s in order;
+    ``await handle`` drains the stream and returns a :class:`ChatResult`. Both
+    forms compose: a partial iteration before ``await`` resumes where iteration
+    left off.
 
-    The actual run is launched lazily on first iteration — calling
-    ``chat()`` itself does not block, mirroring the TS surface.
+    The run is launched lazily on first iteration — calling ``chat()`` itself
+    does not block.
     """
 
-    def __init__(
-        self,
-        *,
-        coordinator: _CoordinatorLike,
-        message: Any,
-    ) -> None:
+    def __init__(self, *, coordinator: _CoordinatorLike, message: Any) -> None:
         self._coordinator = coordinator
         self._message = message
         self._state: _SessionState | None = None
         self._stream: AsyncIterator[Any] | None = None
         self._drained = False
+        self._cancelled = False
         self._result: ChatResult | None = None
 
     def __aiter__(self) -> AsyncIterator[Any]:
         return self._iterate()
 
     async def _iterate(self) -> AsyncIterator[Any]:
-        if self._drained:
+        if self._drained or self._cancelled:
             return
         if self._stream is None:
             self._state, self._stream = await self._coordinator.run_chat(self._message)
@@ -115,7 +120,7 @@ class ChatHandle:
         self._drained = True
         self._result = self._finalize_result()
 
-    def __await__(self):
+    def __await__(self) -> Any:
         return self.result().__await__()
 
     async def result(self) -> ChatResult:
@@ -137,8 +142,15 @@ class ChatHandle:
         return self._state.usage
 
     async def cancel(self) -> None:
-        """Signal the engine to stop iterating at its next checkpoint."""
+        """Signal the engine to stop at its next checkpoint.
+
+        Cancelling before the first iteration marks the handle so the run never
+        starts — previously it was a silent no-op and the turn then ran to
+        completion, which is the opposite of what was asked.
+        """
+        self._cancelled = True
         if self._state is None:
+            self._drained = True
             return
         self._state.cancel_event.set()
         with suppress(asyncio.QueueFull):
@@ -155,261 +167,204 @@ class ChatHandle:
         )
 
 
-class ComputerAgent:
-    """The top-level harness client.
+def _validate_source(source: IdentitySource) -> None:
+    """Reject a source that cannot possibly work, while we can still say why.
 
-    Wires an engine + substrate + session store + identity loader together
-    and exposes a multi-chat interface. ``async with`` is recommended so
-    the substrate handle (and thus any temp workspace) closes deterministically.
+    Only three argument shapes fail at construction otherwise; a bad `source`
+    used to sail through and surface much later from inside the engine, or —
+    worse — not at all. An empty string is the dangerous one: `Path("")` is
+    `Path(".")`, so a config value that read as blank quietly pointed a
+    bypassPermissions agent at whatever directory the process happened to be in.
+    """
+    if isinstance(source, dict):
+        if source.get("files"):
+            raise AgentResolveError(
+                "an inline source with `files` is not supported: the files are not materialised "
+                "and the workspace falls back to the current working directory, so the agent "
+                "would run against your cwd rather than the files you listed. Write them to a "
+                "directory and pass source=Path(...)."
+            )
+        return
+    if isinstance(source, str):
+        if not source.strip():
+            raise AgentResolveError(
+                "source is an empty string, which would resolve to the current working directory "
+                "and run the agent against it. Pass a real path, a git URL, or omit it to use the "
+                "agent's own source."
+            )
+        return
+    if isinstance(source, Path):
+        if not source.exists():
+            raise AgentResolveError(
+                f"source path does not exist: {source}. The workspace is materialised on the first "
+                "chat, so this would otherwise surface from inside the engine."
+            )
+        if not source.is_dir():
+            raise AgentResolveError(f"source path is not a directory: {source}")
+        return
+    raise AgentResolveError(
+        f"source must be a Path, a git URL/path string, or an inline dict — got "
+        f"{type(source).__name__}."
+    )
+
+
+class _AutoIdentityLoader:
+    """GAP when the workspace is a GAP repo, passthrough when it isn't.
+
+    The choice can only be made after the source has been materialised, since it
+    turns on whether ``agent.yaml`` is at the workspace root — and
+    :class:`~computeragent.identity.gap.GapIdentityLoader` raises rather than
+    degrading when it isn't. Deciding here keeps a plain (non-GAP) repo runnable
+    instead of making the loader a thing callers must get right by hand.
+    """
+
+    name = "auto"
+
+    async def load(
+        self, *, source: IdentitySource, target_engine: str, workspace_path: Path
+    ) -> AgentManifest:
+        from ..identity import resolve_identity_loader
+
+        is_gap = (workspace_path / "agent.yaml").is_file()
+        loader = resolve_identity_loader("gap" if is_gap else "passthrough")
+        logger.debug(
+            "identity loader: %s (agent.yaml %s)", loader.name, "found" if is_gap else "absent"
+        )
+        return await loader.load(
+            source=source, target_engine=target_engine, workspace_path=workspace_path
+        )
+
+
+class ComputerAgent:
+    """Run an AgentOS-registered agent locally.
+
+    One instance is one logical session: ``session_started`` fires on the first
+    chat and ``session_ended`` on dispose, so N chats collapse into one
+    conversation. Use ``async with`` so the workspace (and any temp clone)
+    closes deterministically.
     """
 
     def __init__(
         self,
         *,
+        # ── required: which agent, where, and as whom ────────────────────
+        agent_id: str,
+        base_url: str,
+        api_key: str,
+        # ── needed only in specific cases ────────────────────────────────
+        # The Anthropic-to-OpenAI translating proxy. Required when an
+        # Anthropic-shaped engine runs against a native (OpenAI-shaped)
+        # gateway, and unused otherwise — see `gateway_envs`.
+        llm_proxy_url: str | None = None,
+        # Only a PRIVATE source needs one. Without it the clone is
+        # unauthenticated, which fails for a private repo.
+        git_token: str | None = None,
+        # ── overrides for what the agent document already answers ────────
+        # Use this workspace instead of cloning the agent's own source. A local
+        # Path, a git URL, or an inline manifest dict.
         source: IdentitySource | None = None,
-        engine: str | EngineDriver = "claude-agent-sdk",
-        runtime: str | Substrate = "local",
-        session_store: str | SessionStore | None = None,
-        identity_loader: str | IdentityLoader = "passthrough",
+        # Engine name or an EngineDriver instance. Defaults to the agent's
+        # `harness`; an explicit value also selects which env branch is built.
+        engine: str | EngineDriver | None = None,
+        # Merged over whatever the identity loader resolves — caller wins.
+        options: Mapping[str, Any] | None = None,
         envs: Mapping[str, str] | None = None,
+        session_store: str | SessionStore | Mapping[str, Any] | None = None,
         session_id: str | None = None,
         agent_name: str | None = None,
         agent_description: str | None = None,
-        # Stable agent identifier (telemetry/registry key). Decoupled from
-        # agent_name so renaming the agent doesn't re-register it. Falls back to
-        # the COMPUTERAGENT_AGENT_ID env var. Also a HANDLE: when set with no
-        # `source`, the SDK resolves the agent's source/harness/model from
-        # AgentOS (run-an-existing-agent by reference). Never rides the harness
-        # wire body — resolution is a separate construction-time call.
-        agent_id: str | None = None,
-        model: str | None = None,
-        options: Mapping[str, Any] | None = None,
         policy_decider: PolicyDecider | None = None,
         on_tool_call: Callable[[PermissionRequest], Awaitable[dict[str, Any]]] | None = None,
         budget_max_usd: float | None = None,
         telemetry_pipeline: Pipeline | None = None,
-        project_key: str = "default",
-        # ── remote harness mode ──────────────────────────────────────────
-        # When ``harness_url`` is set, the engine runs on a REMOTE harness
-        # server (the engine/substrate/loader run there, not locally).
-        harness_url: str | None = None,
-        harness: str | None = None,
-        harness_kind: str = "protocol",
-        harness_auth: tuple[str, str] | str | None = None,
-        # API key for the remote server, sent as `Authorization: Bearer`.
-        # Falls back to the COMPUTERAGENT_HARNESS_TOKEN env var when omitted.
-        harness_token: str | None = None,
-        # SRS policy id (the `_id` shown in the AgentOS Policies UI). When set,
-        # it is used directly — no AgentOS binding lookup — so you can copy the
-        # id from the UI and paste it here. When omitted, the policy bound to
-        # `agent_name` in AgentOS (the UI's Policy tab) is fetched and used.
-        policy_id: str | None = None,
-        # ── process-fork (opt-in; OFF by default) ───────────────────────────
-        # ``fork_mode="manual"`` exposes the ``mcp__fork__spawn`` tool so the
-        # agent can spawn SEPARATE child ComputerAgent processes (each its own
-        # session/agent id). ``"auto"`` additionally disables the native
-        # in-process Task sub-agent and steers all delegation to the fork tool.
-        # ``"off"`` (default) = today's behavior, untouched.
-        fork_mode: str = "off",
-        fork_config: Any = None,
-        # Internal — set by the fork tool when THIS agent is itself a child.
-        parent_session_id: str | None = None,
-        parent_agent_id: str | None = None,
-        _fork_depth: int = 0,
+        # Injection point for tests — an httpx-like client for the resolve call.
+        _resolve_client: Any | None = None,
     ) -> None:
-        from .. import agentos as _agentos
+        self._api_key = api_key
+        self._api_base = api_base(base_url)
 
-        # Stable agent identifier: explicit kwarg wins, else the env var. When
-        # still None the server falls back to keying on agent_name (legacy).
-        agent_id = agent_id or os.environ.get("COMPUTERAGENT_AGENT_ID")
-        # Remote-harness URL: explicit kwarg wins, else the COMPUTERAGENT_HARNESS_URL
-        # env (the harness/CAS is a separate service — always a full URL, never
-        # discovered).
-        harness_url = harness_url or _agentos.harness_url()
+        # 1. Ask AgentOS what this agent is. Fails fast and by field name, so a
+        #    shape this run mode can't honour never reaches a boot.
+        self.agent: ResolvedAgent = resolve_agent(
+            agent_id, base_url=base_url, api_key=api_key, client=_resolve_client
+        )
 
-        # ── agent_id semantics: ingest guarantee + run-by-reference ──────────
-        if agent_id is not None:
-            # (a) No event-loss holes: an AgentOS-backed run (agent_id set) MUST
-            # ship its telemetry. Require an ingest sink — either a resolvable
-            # ingest URL (AGENTOS_DISCOVERY_URL / AGENTOS_INGEST_URL, which
-            # auto-attaches AgentOSHttpSink) or a caller-supplied pipeline.
-            # Skipped in harness mode (harness_url set): there the remote
-            # ComputerAgent server owns persistence + telemetry, so the SDK
-            # client emits nothing of its own (see the remote path below).
-            if (
-                harness_url is None
-                and telemetry_pipeline is None
-                and _agentos.ingest_url() is None
-            ):
-                raise ValueError(
-                    "agent_id is set but no AgentOS ingest is configured — set "
-                    "AGENTOS_DISCOVERY_URL (or pass telemetry_pipeline=) so the run's "
-                    "events aren't dropped."
-                )
-            # (b) Run-by-reference: agent_id + no source → fetch the agent's
-            # source/harness/model from AgentOS. Explicit kwargs override the
-            # resolved values; a miss (unregistered) is a hard, explicit error.
-            if source is None:
-                from .agent_resolve_client import resolve_agent
+        # 2. Engine: the agent's harness unless the caller names another. The
+        #    harness check happens HERE, not during resolution, so bringing your
+        #    own engine genuinely rescues an unsupported harness.
+        require_runnable_harness(self.agent, engine_given=engine is not None)
+        resolved_engine = (
+            engine
+            if isinstance(engine, EngineDriver)
+            else resolve_engine(engine or self.agent.harness)
+        )
+        engine_name = resolved_engine.name
 
-                resolved = resolve_agent(
-                    agent_id,
-                    token=harness_token or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN"),
-                )
-                if resolved is None:
-                    raise ValueError(
-                        f"agent_id {agent_id!r} is not registered in AgentOS — register "
-                        "it (or pass source=… to define it on first run)."
-                    )
-                source = resolved.get("source")
-                if harness is None and isinstance(resolved.get("harness"), str):
-                    harness = resolved["harness"]
-                if model is None and isinstance(resolved.get("model"), str):
-                    model = resolved["model"]
-                # Capture the registry display name so the run is attributed to
-                # the right agent in the dashboard session index (the CAS writes
-                # chat_sessions.agent from this — without it the session is
-                # invisible in the list, which filters by agent name).
-                if agent_name is None and isinstance(resolved.get("name"), str):
-                    agent_name = resolved["name"]
+        # 3. Where the model calls go. Raises here, naming the missing
+        #    parameter, rather than surfacing as a 405 mid-run.
+        gateway_envs = build_gateway_envs(
+            self.agent,
+            engine_name=engine_name,
+            api_key=api_key,
+            llm_proxy_url=llm_proxy_url,
+        )
+        merged_envs = merge_envs(envs, gateway_envs)
+        merged_options = build_options(self.agent, engine_name=engine_name, caller_options=options)
+        # `budget_max_usd` used to be carried to the engine context and read by
+        # nothing. The Claude CLI enforces `max_budget_usd` itself, so map it
+        # there and let the parameter mean what its name says. An explicit
+        # option from the caller still wins.
+        if budget_max_usd is not None:
+            merged_options.setdefault("max_budget_usd", budget_max_usd)
 
-        if source is None:
-            raise ValueError("source or agent_id is required")
-
-        if harness_url is not None:
-            # The API key the remote harness/ComputerAgent server validates.
-            # Explicit harness_token= wins; otherwise fall back to the env var
-            # (mirrors AgentOSHttpSink reading AGENTOS_INGEST_TOKEN). Sent as
-            # `Authorization: Bearer <token>` by the remote clients.
-            harness_token = harness_token or os.environ.get("COMPUTERAGENT_HARNESS_TOKEN")
-            _engine_src = harness if harness is not None else engine
-            remote_engine: str = (
-                _engine_src if isinstance(_engine_src, str) else getattr(_engine_src, "name", "claude-agent-sdk")
+        # 4. What the agent runs against: the caller's workspace if they gave
+        #    one, else the source the agent document names.
+        effective_source = source if source is not None else self.agent.source
+        if effective_source is None:
+            raise AgentResolveError(
+                f"agent {self.agent.agent_id} has no source and none was passed — give the run a "
+                "workspace with source=Path('...') or register a source on the agent."
             )
-            # In harness mode the remote ComputerAgent server OWNS persistence +
-            # telemetry: the session store writes the transcript, the server
-            # writes the dashboard session index, and its OtelAuditSink emits the
-            # spans (tagged via the `identity` we forward). So the SDK client
-            # emits NOTHING by default — otherwise its events would race the
-            # server's session store and double-write the `sessions` transcript.
-            # An explicit telemetry_pipeline= still wins for callers who want
-            # client-side telemetry on purpose.
-            remote_pipeline = telemetry_pipeline if telemetry_pipeline is not None else Pipeline(sinks=[])
-            # SRS policy parity with the AgentOS UI: the UI's chat-sandbox route
-            # looks up the agent's bound policy and attaches it; talking to the CAS
-            # directly skips that. An explicit `policy_id=` kwarg wins (copy the id
-            # from the Policies UI); otherwise resolve the binding (by agent name)
-            # from AgentOS. Either way only {policyId, principalId} is forwarded —
-            # the CAS fills the SRS endpoint/key from its own env.
-            if policy_id:
-                remote_policy: dict[str, str] | None = {
-                    "kind": "srs",
-                    "policyId": policy_id,
-                    "principalId": agent_name or "agent",
-                }
+
+        _validate_source(effective_source)
+
+        resolved_store: SessionStore | None = None
+        if session_store is not None:
+            if is_session_store(session_store):
+                resolved_store = cast("SessionStore", session_store)
             else:
-                remote_policy = (
-                    _agentos.fetch_policy_binding(agent_name, token=harness_token)
-                    if agent_name
-                    else None
+                resolved_store = resolve_session_store(
+                    cast("str | Mapping[str, Any]", session_store)
                 )
-            self._coordinator: _CoordinatorLike = _build_remote_coordinator_from_kwargs(
-                harness_url=harness_url,
-                harness_kind=harness_kind,
-                engine=remote_engine,
-                identity_loader=identity_loader,
-                source=source,
-                runtime=runtime,
-                envs=dict(envs or {}),
-                options=dict(options or {}),
-                model=model,
-                session_id=session_id,
-                agent_name=agent_name,
-                agent_description=agent_description,
-                agent_id=agent_id,
-                on_tool_call=on_tool_call,
-                harness_auth=harness_auth,
-                harness_token=harness_token,
-                telemetry_pipeline=remote_pipeline,
-                policy=remote_policy,
+
+        # `on_tool_call` is only consulted by engines that emit permission
+        # requests. On claude-agent-sdk gating runs through `policy_decider`,
+        # so a caller who passes only this believes they have a tool gate and
+        # has none — too dangerous to leave silent.
+        if on_tool_call is not None and engine_name == "claude-agent-sdk":
+            logger.warning(
+                "on_tool_call is set but the %r engine never emits permission requests, so it will "
+                "not be consulted. Use policy_decider= to gate tool calls on this engine.",
+                engine_name,
             )
-            return
 
-        resolved_engine = engine if isinstance(engine, EngineDriver) else resolve_engine(engine)
-        resolved_substrate = (
-            runtime if isinstance(runtime, Substrate) else resolve_substrate(runtime)
-        )
-        resolved_loader = (
-            identity_loader
-            if isinstance(identity_loader, IdentityLoader)
-            else resolve_identity_loader(identity_loader)
-        )
-        resolved_store: SessionStore | None
-        if session_store is None:
-            resolved_store = None
-        elif isinstance(session_store, SessionStore):
-            resolved_store = session_store
-        else:
-            resolved_store = resolve_session_store(session_store)
-
-        merged_options: dict[str, Any] = dict(options or {})
-        if model is not None and "model" not in merged_options:
-            merged_options["model"] = model
-
-        # ``source`` may already be a dict-manifest. Merge any kwargs-supplied
-        # options into it so the identity loader sees a single shape.
-        normalised_source: IdentitySource
-        if isinstance(source, dict):
-            patched = dict(source)
-            existing_opts = dict(patched.get("options") or {})
-            existing_opts.update(merged_options)
-            if existing_opts:
-                patched["options"] = existing_opts
-            normalised_source = patched
-        else:
-            normalised_source = source
-
-        # Auto-wire SRS-backed policy enforcement from env when the caller
-        # didn't pass one and SRS is configured (SRS_BASE_URL + SRS_POLICY_ID).
-        # Keeps library-mode Python agents on the same centrally-managed RAI
-        # policies (OPA + Cedar) as the TS stack — "just pass the env".
-        if policy_decider is None:
-            from ..policy.srs import srs_authorizer_from_env
-
-            policy_decider = srs_authorizer_from_env(agent_name or "")
-
-        # Fork config: default one in when a mode is on but none supplied.
-        if fork_mode != "off" and fork_config is None:
-            from .fork import ForkConfig
-
-            fork_config = ForkConfig()
-
-        self._coordinator = HarnessCoordinator(
+        self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
-            substrate=resolved_substrate,
-            identity_loader=resolved_loader,
-            source=normalised_source,
-            envs=dict(envs or {}),
+            substrate=LocalSubstrate(),
+            identity_loader=_AutoIdentityLoader(),
+            source=effective_source,
+            envs=merged_envs,
             session_store=resolved_store,
             session_id=session_id,
-            agent_name=agent_name,
+            agent_name=agent_name or self.agent.name,
             agent_description=agent_description,
-            agent_id=agent_id,
+            agent_id=self.agent.agent_id,
             policy_decider=policy_decider,
             on_permission_request=on_tool_call,
             budget_max_usd=budget_max_usd,
             telemetry_pipeline=telemetry_pipeline,
-            project_key=project_key,
-            # Pass merged_options through as an overlay — the coordinator
-            # layers these on top of whatever the identity loader resolves
-            # so explicit caller kwargs always win.
             options_overlay=merged_options,
-            # Process-fork wiring (opt-in).
-            parent_session_id=parent_session_id,
-            parent_agent_id=parent_agent_id,
-            fork_mode=fork_mode,
-            fork_config=fork_config,
-            fork_depth=_fork_depth,
+            git_token=git_token,
         )
 
     async def __aenter__(self) -> ComputerAgent:
@@ -419,142 +374,28 @@ class ComputerAgent:
         await self.dispose()
 
     async def dispose(self) -> None:
-        """Tear down the substrate handle and flush telemetry."""
+        """Tear down the workspace and flush telemetry."""
         await self._coordinator.dispose()
 
     def chat(self, message: ChatInput) -> ChatHandle:
-        """Start one chat turn. Returns immediately; iterate / await the
+        """Start one chat turn. Returns immediately; iterate or await the
         returned :class:`ChatHandle` to consume the engine output."""
         return ChatHandle(coordinator=self._coordinator, message=message)
 
 
-def _build_remote_coordinator_from_kwargs(
-    *,
-    harness_url: str,
-    harness_kind: str,
-    engine: str,
-    identity_loader: str | IdentityLoader,
-    source: IdentitySource,
-    runtime: str | Substrate,
-    envs: Mapping[str, str],
-    options: Mapping[str, Any],
-    model: str | None,
-    session_id: str | None,
-    agent_name: str | None,
-    agent_description: str | None,
-    agent_id: str | None,
-    on_tool_call: Callable[[PermissionRequest], Awaitable[dict[str, Any]]] | None,
-    harness_auth: tuple[str, str] | str | None,
-    harness_token: str | None,
-    telemetry_pipeline: Pipeline | None,
-    policy: Mapping[str, Any] | None = None,
-) -> _CoordinatorLike:
-    """Map ``ComputerAgent`` kwargs → a ``RemoteCoordinator``. Imported lazily
-    so the ``[remote]`` extra (httpx) is only required in remote mode."""
-    from .remote import build_remote_coordinator
-
-    loader = identity_loader if isinstance(identity_loader, str) else getattr(
-        identity_loader, "name", "gitagentprotocol"
-    )
-    # Remote harness servers register "gitagentprotocol"; the local default
-    # "passthrough" isn't registered there, so map it across.
-    if loader == "passthrough":
-        loader = "gitagentprotocol"
-    runtime_name = runtime if isinstance(runtime, str) else None
-    if harness_kind == "protocol":
-        # Bare /v1 protocol: the substrate is server-side; runtime is N/A.
-        runtime_name = None
-    return build_remote_coordinator(
-        harness_url=harness_url,
-        harness_kind=harness_kind,
-        engine=engine,
-        loader=loader,
-        source=source,
-        runtime=runtime_name,
-        envs=envs,
-        options=options,
-        model=model,
-        session_id=session_id,
-        agent_name=agent_name,
-        agent_description=agent_description,
-        agent_id=agent_id,
-        on_tool_call=on_tool_call,
-        auth=harness_auth,
-        token=harness_token,
-        telemetry_pipeline=telemetry_pipeline,
-        policy=policy,
-    )
-
-
-async def run_task(
-    *,
-    message: ChatInput,
-    source: IdentitySource | None = None,
-    engine: str | EngineDriver = "claude-agent-sdk",
-    runtime: str | Substrate = "local",
-    session_store: str | SessionStore | None = None,
-    identity_loader: str | IdentityLoader = "passthrough",
-    envs: Mapping[str, str] | None = None,
-    session_id: str | None = None,
-    agent_name: str | None = None,
-    agent_description: str | None = None,
-    agent_id: str | None = None,
-    model: str | None = None,
-    options: Mapping[str, Any] | None = None,
-    policy_decider: PolicyDecider | None = None,
-    on_tool_call: Callable[[PermissionRequest], Awaitable[dict[str, Any]]] | None = None,
-    budget_max_usd: float | None = None,
-    telemetry_pipeline: Pipeline | None = None,
-    project_key: str = "default",
-    harness_url: str | None = None,
-    harness: str | None = None,
-    harness_kind: str = "protocol",
-    harness_auth: tuple[str, str] | str | None = None,
-    harness_token: str | None = None,
-) -> ChatResult:
-    """One-shot convenience: spin up :class:`ComputerAgent`, send one
-    message, drain, dispose, return the :class:`ChatResult`."""
-    async with ComputerAgent(
-        source=source,
-        engine=engine,
-        runtime=runtime,
-        session_store=session_store,
-        identity_loader=identity_loader,
-        envs=envs,
-        session_id=session_id,
-        agent_name=agent_name,
-        agent_description=agent_description,
-        agent_id=agent_id,
-        model=model,
-        options=options,
-        policy_decider=policy_decider,
-        on_tool_call=on_tool_call,
-        budget_max_usd=budget_max_usd,
-        telemetry_pipeline=telemetry_pipeline,
-        project_key=project_key,
-        harness_url=harness_url,
-        harness=harness,
-        harness_kind=harness_kind,
-        harness_auth=harness_auth,
-        harness_token=harness_token,
-    ) as agent:
-        return await agent.chat(message)
-
-
-from .fork import ForkConfig  # noqa: E402  (re-exported for callers)
-
 __all__ = [
+    "AgentResolveError",
     "ChatHandle",
     "ChatInput",
     "ChatResult",
     "ComputerAgent",
-    "ForkConfig",
+    "GatewayConfigError",
     "HarnessError",
-    "HarnessProtocolError",
+    "ResolvedAgent",
     "UnknownEngineError",
     "UnknownIdentityLoaderError",
     "UnknownSessionStoreError",
     "UnknownSubstrateError",
+    "UnsupportedAgentError",
     "UsageRollup",
-    "run_task",
 ]
