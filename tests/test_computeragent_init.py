@@ -209,6 +209,61 @@ def test_no_source_anywhere_is_refused(agent_doc):
         build(agent_doc, source=None)
 
 
+@respx.mock
+def test_without_cloning_the_current_directory_is_the_workspace(agent_doc):
+    """The agent's own git source is not read, so nothing is cloned."""
+    agent = build(agent_doc, source=None, clone_source=False)
+
+    assert agent._coordinator._source == Path.cwd()  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_without_cloning_a_local_source_is_used(agent_doc, tmp_path):
+    agent = build(agent_doc, source=str(tmp_path), clone_source=False)
+
+    assert agent._coordinator._source == tmp_path  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_without_cloning_an_agent_with_no_source_runs(agent_doc):
+    agent_doc["source"] = None
+    agent_doc["sourceUrl"] = None
+
+    agent = build(agent_doc, source=None, clone_source=False)
+
+    assert agent._coordinator._source == Path.cwd()  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_without_cloning_a_git_url_is_refused(agent_doc):
+    with pytest.raises(AgentResolveError, match="git URL"):
+        build(agent_doc, source="https://github.com/acme/agent.git", clone_source=False)
+
+
+@respx.mock
+def test_without_cloning_an_inline_manifest_is_refused(agent_doc):
+    with pytest.raises(AgentResolveError, match="inline manifest"):
+        build(agent_doc, source={"files": {}}, clone_source=False)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_without_cloning_the_substrate_clones_nothing(agent_doc, tmp_path, monkeypatch):
+    """End to end through boot: the substrate is handed a Path and never runs git."""
+    import computeragent.substrates.local as local
+
+    async def no_clone(*_a, **_k):
+        raise AssertionError("git clone was attempted")
+
+    monkeypatch.setattr(local, "_git_clone", no_clone)
+    engine = FakeEngine()
+
+    async with build(agent_doc, source=tmp_path, clone_source=False, engine=engine) as agent:
+        await agent.chat("hi")
+
+    assert engine.contexts[0].workspace_path == tmp_path
+
+
 # ── what the coordinator is handed ───────────────────────────────────────────
 
 

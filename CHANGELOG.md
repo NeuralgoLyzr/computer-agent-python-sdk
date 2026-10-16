@@ -5,6 +5,15 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`clone_source=False` on `ComputerAgent`.** Turns the source clone off: the workspace is `source`
+  (a local directory) or the current working directory, and the agent document's `source` is not
+  read, so an agent registered with no source can run. A git URL or an inline manifest as `source`
+  is refused rather than cloned or ignored. The default, `True`, keeps today's behaviour.
+
 ## [0.5.0] — 2026-09-24
 
 ### Changed
