@@ -144,8 +144,8 @@ All parameters are **keyword-only**.
 | `engine` | `str \| EngineDriver` | **yes** | — | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. Also selects which gateway-env branch is built (§6) — which is why it is not inferred from the agent document. |
 | `llm_proxy_url` | `str \| None` | conditional | `None` | Required for an Anthropic-shaped engine against a native gateway (§6); unused otherwise. |
 | `git_token` | `str \| None` | conditional | `None` | Only for a **private** source. A PAT with read access to the repo. Without it the clone is unauthenticated and a private source fails. |
-| `source` | `Path \| str \| dict \| None` | no | agent document's `source` | Workspace override — see below. |
-| `clone_source` | `bool` | no | `True` | `False` never clones: the workspace is `source` (a local directory) or the current working directory, and the agent's registered source is not read. See below. |
+| `source` | `Path \| str \| dict \| None` | no | the current working directory (agent document's `source` with `clone_source=True`) | Workspace override — see below. |
+| `clone_source` | `bool` | no | `False` | `False` never clones: the workspace is `source` (a local directory) or the current working directory, and the agent's registered source is not read. `True` clones the agent's registered git source when no `source` is passed. See below. |
 | `options` | `Mapping[str, Any] \| None` | no | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
 | `envs` | `Mapping[str, str] \| None` | no | `None` | Extra environment for the engine subprocess. Gateway envs are layered **over** yours. |
 | `session_store` | `str \| SessionStore \| Mapping \| None` | no | `None` (no store) | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
@@ -167,11 +167,12 @@ All parameters are **keyword-only**.
 | any other `str` | Treated as a filesystem path and coerced to `Path`. A private-host git URL that matches neither rule lands here — append `.git` to force the clone branch. |
 | `dict` | Inline manifest (`name`, `version`, `options`, `sha`). The workspace is the **current process's cwd** — inline file materialisation is not implemented. |
 
-### `clone_source=False` — no clone at all
+### `clone_source` — off by default
 
-For code that carries its agent with it — an agent baked into the container image it runs in —
-pass `clone_source=False`. Nothing is cloned and the agent document's `source` is not read, so an
-agent registered with no source runs too.
+By default nothing is cloned and the agent document's `source` is not read, so an agent registered
+with no source runs too. This suits code that carries its agent with it, such as an agent baked
+into the container image it runs in. The `source` table above applies only with
+`clone_source=True`.
 
 | You pass | Workspace |
 |---|---|
@@ -180,7 +181,7 @@ agent registered with no source runs too.
 | a git URL | refused with `AgentResolveError` — it would be cloned |
 | a `dict` | refused with `AgentResolveError` |
 
-`git_token` has nothing to do with `clone_source=False` and is ignored, with a warning.
+Without `clone_source=True`, `git_token` has nothing to clone and is ignored, with a warning.
 
 After construction, `agent.agent` is the `ResolvedAgent` — useful for asserting what you got:
 
@@ -535,10 +536,10 @@ All of these are raised **from the constructor**, before anything boots.
 
 A **null** gateway is *not* an error — that is a direct-Anthropic run.
 
-One more resolve-time failure: if the agent document has no `source` and you passed no `source=`, you get
-`AgentResolveError("agent … has no source and none was passed — give the run a workspace with
-source=Path('...'), register a source on the agent, or pass clone_source=False to run in the current
-directory.")`.
+One more resolve-time failure: with `clone_source=True`, if the agent document has no `source` and you
+passed no `source=`, you get `AgentResolveError("agent … has no source and none was passed — give the run
+a workspace with source=Path('...'), register a source on the agent, or leave clone_source off to run in
+the current directory.")`.
 
 ---
 

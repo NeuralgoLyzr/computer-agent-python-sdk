@@ -187,26 +187,34 @@ def test_engine_can_be_an_instance(agent_doc):
 
 
 @respx.mock
-def test_source_defaults_to_the_agents_own(agent_doc):
+def test_nothing_is_cloned_by_default(agent_doc):
+    """Without clone_source the agent's own git source is not read."""
     agent = build(agent_doc, source=None)
+
+    assert agent._coordinator._source == Path.cwd()  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_cloning_uses_the_agents_own_source(agent_doc):
+    agent = build(agent_doc, source=None, clone_source=True)
 
     assert agent._coordinator._source == agent_doc["source"]  # type: ignore[attr-defined]
 
 
 @respx.mock
 def test_caller_source_overrides_the_agents(agent_doc, tmp_path):
-    agent = build(agent_doc, source=tmp_path)
+    agent = build(agent_doc, source=tmp_path, clone_source=True)
 
     assert agent._coordinator._source == tmp_path  # type: ignore[attr-defined]
 
 
 @respx.mock
-def test_no_source_anywhere_is_refused(agent_doc):
+def test_cloning_with_no_source_anywhere_is_refused(agent_doc):
     agent_doc["source"] = None
     agent_doc["sourceUrl"] = None
 
     with pytest.raises(AgentResolveError, match="no source"):
-        build(agent_doc, source=None)
+        build(agent_doc, source=None, clone_source=True)
 
 
 @respx.mock

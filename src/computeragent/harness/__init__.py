@@ -21,9 +21,10 @@ agent document already answers. Two are needed only in specific cases:
 ``llm_proxy_url`` for an Anthropic-shaped engine against a native (OpenAI-shaped)
 gateway, and ``git_token`` for a private source.
 
-``clone_source=False`` turns the clone off: the run uses ``source`` (a local
-directory) or the current working directory, never the agent's registered git
-source. That is the shape for an agent baked into the image it runs in.
+Nothing is cloned by default: the run uses ``source`` (a local directory) or the
+current working directory, never the agent's registered git source. That is the
+shape for an agent baked into the image it runs in. ``clone_source=True`` turns
+the clone on.
 """
 
 from __future__ import annotations
@@ -180,10 +181,10 @@ def _effective_source(
 ) -> IdentitySource:
     """The workspace a run gets.
 
-    With ``clone_source`` (the default): the caller's ``source``, else the
-    agent's registered one, which is cloned when it is a git URL.
+    With ``clone_source``: the caller's ``source``, else the agent's registered
+    one, which is cloned when it is a git URL.
 
-    Without it nothing is cloned: the caller's ``source`` when it is a local
+    Without it (the default) nothing is cloned: the caller's ``source`` when it is a local
     path, else the current working directory. A git URL is refused rather than
     cloned, and the agent's registered source is not read, so an agent with
     none can run.
@@ -193,24 +194,28 @@ def _effective_source(
         if effective is None:
             raise AgentResolveError(
                 f"agent {agent.agent_id} has no source and none was passed — give the run a "
-                "workspace with source=Path('...'), register a source on the agent, or pass "
-                "clone_source=False to run in the current directory."
+                "workspace with source=Path('...'), register a source on the agent, or leave "
+                "clone_source off to run in the current directory."
             )
         return effective
 
     if isinstance(source, str) and _looks_like_git_url(source):
         raise AgentResolveError(
-            "clone_source=False but source is a git URL, which would be cloned. Pass a local "
-            "directory as source=Path('...'), or leave source unset to run in the current "
-            "directory."
+            "source is a git URL, which would be cloned, and clone_source is off. Pass "
+            "clone_source=True to clone it, a local directory as source=Path('...'), or leave "
+            "source unset to run in the current directory."
         )
     if isinstance(source, dict):
         raise AgentResolveError(
-            "clone_source=False takes a local directory as source, not an inline manifest."
+            "without clone_source=True, source must be a local directory, not an inline manifest."
         )
     if git_token:
-        logger.warning("git_token is set but clone_source=False, so nothing is cloned with it")
-    return Path(source) if source is not None else Path.cwd()
+        logger.warning("git_token is set but clone_source is off, so nothing is cloned with it")
+    if source is None:
+        return Path.cwd()
+    # Only a non-empty path string is coerced; anything else is returned as is
+    # so _validate_source refuses it.
+    return Path(source) if isinstance(source, str) and source else source
 
 
 def _validate_source(source: IdentitySource) -> None:
@@ -319,7 +324,7 @@ class ComputerAgent:
         # path only), else the current working directory, and the agent's own
         # registered source is not read. For code that ships its agent with
         # it, such as an agent baked into a container image.
-        clone_source: bool = True,
+        clone_source: bool = False,
         # Merged over whatever the identity loader resolves — caller wins.
         options: Mapping[str, Any] | None = None,
         envs: Mapping[str, str] | None = None,
@@ -377,9 +382,9 @@ class ComputerAgent:
         if budget_max_usd is not None:
             merged_options.setdefault("max_budget_usd", budget_max_usd)
 
-        # 4. What the agent runs against: the caller's workspace if they gave
-        #    one, else the source the agent document names — or, with
-        #    clone_source=False, the caller's workspace or the current directory.
+        # 4. What the agent runs against: by default the caller's workspace or
+        #    the current directory; with clone_source=True, the caller's
+        #    workspace else the source the agent document names.
         effective_source = _effective_source(
             source, agent=self.agent, clone_source=clone_source, git_token=git_token
         )

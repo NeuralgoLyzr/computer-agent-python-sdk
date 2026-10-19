@@ -106,7 +106,7 @@ def test_source_of_the_wrong_type_is_refused_at_construction(agent_doc):
 @respx.mock
 def test_a_git_url_source_is_accepted_without_touching_the_network(agent_doc):
     """Validation must not try to reach a remote — the clone happens later."""
-    build(agent_doc, source="https://github.com/org/repo.git")
+    build(agent_doc, source="https://github.com/org/repo.git", clone_source=True)
 
 
 # ── llm_proxy_url ────────────────────────────────────────────────────────────
@@ -204,12 +204,12 @@ def test_an_inline_source_with_files_is_refused(agent_doc):
     """The files are not materialised and the workspace falls back to cwd, so
     the agent would run against the caller's directory instead."""
     with pytest.raises(AgentResolveError, match="files"):
-        build(agent_doc, source={"name": "x", "version": "1", "files": {"a.txt": "hi"}})
+        build(agent_doc, source={"name": "x", "version": "1", "files": {"a.txt": "hi"}}, clone_source=True)
 
 
 @respx.mock
 def test_an_inline_source_without_files_is_still_accepted(agent_doc):
-    build(agent_doc, source={"name": "x", "version": "1"})
+    build(agent_doc, source={"name": "x", "version": "1"}, clone_source=True)
 
 
 # ── one conversation, one turn at a time ─────────────────────────────────────

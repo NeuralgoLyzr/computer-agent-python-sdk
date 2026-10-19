@@ -9,10 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`clone_source=False` on `ComputerAgent`.** Turns the source clone off: the workspace is `source`
-  (a local directory) or the current working directory, and the agent document's `source` is not
+- **`clone_source` on `ComputerAgent`, off by default.** Without it the workspace is `source` (a
+  local directory) or the current working directory, and the agent document's `source` is not
   read, so an agent registered with no source can run. A git URL or an inline manifest as `source`
-  is refused rather than cloned or ignored. The default, `True`, keeps today's behaviour.
+  is refused rather than cloned or ignored. `clone_source=True` restores the previous behaviour.
+
+### Changed
+
+- **`ComputerAgent` no longer clones the agent's registered git source by default.** Code that
+  relied on the clone must pass `clone_source=True`.
 
 ## [0.5.0] — 2026-09-24
 

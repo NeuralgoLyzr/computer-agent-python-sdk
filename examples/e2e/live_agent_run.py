@@ -88,6 +88,8 @@ async def main(args: argparse.Namespace) -> int:
             llm_proxy_url=args.llm_proxy_url,
             git_token=args.git_token,
             source=source,
+            # No --source: clone the agent's registered source, as this check expects.
+            clone_source=source is None,
             engine=args.engine,
             # NOT `allowed_tools`: the dispatch permission mode is
             # `bypassPermissions`, where an allowlist restricts nothing.
