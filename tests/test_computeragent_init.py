@@ -18,6 +18,7 @@ from computeragent.harness import ComputerAgent
 from computeragent.harness.agentos_agent import AgentResolveError
 from computeragent.harness.errors import UnknownEngineError
 from computeragent.harness.gateway_envs import GatewayConfigError
+from computeragent.harness.settings import SettingsError
 from computeragent.protocol_types import EngineCapabilities, EngineContext, EngineEvent
 
 AGENT_ID = "6aa93f1b3817a13d3103d2c1"
@@ -107,10 +108,8 @@ def test_engine_is_required():
     """Not inferred from the agent document: `engine` also selects which
     gateway-env branch is built, so a document change must not be able to
     re-shape ANTHROPIC_BASE_URL under a caller who never asked."""
-    with pytest.raises(TypeError, match="engine"):
-        ComputerAgent(  # type: ignore[call-arg]
-            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_proxy_url=PROXY
-        )
+    with pytest.raises(SettingsError, match="engine"):
+        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_proxy_url=PROXY)
 
 
 @respx.mock

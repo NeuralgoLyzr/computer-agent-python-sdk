@@ -21,6 +21,12 @@ def _reset_pipeline(monkeypatch):
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("AGENTOS_INGEST_URL", raising=False)
     monkeypatch.delenv("AGENTOS_INGEST_TOKEN", raising=False)
+    # ComputerAgent settings fall back to these; a developer's shell must not
+    # leak into a test that relies on a setting being unset.
+    from computeragent.harness.settings import ENV_VARS
+
+    for name in ENV_VARS.values():
+        monkeypatch.delenv(name, raising=False)
 
     from computeragent.telemetry import config as _cfg
 

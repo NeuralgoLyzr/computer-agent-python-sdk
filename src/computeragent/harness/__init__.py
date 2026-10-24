@@ -63,6 +63,7 @@ from .errors import (
     UnknownSubstrateError,
 )
 from .gateway_envs import GatewayConfigError, build_gateway_envs, build_options, merge_envs
+from .settings import SettingsError, resolve_settings
 from .usage import UsageRollup
 
 logger = logging.getLogger("computeragent.harness")
@@ -206,15 +207,17 @@ class ComputerAgent:
         self,
         *,
         # ── required: which agent, where, as whom, and run by what ───────
-        agent_id: str,
-        base_url: str,
-        api_key: str,
+        # Each comes from its argument or, when that is unset, its environment
+        # variable (see `settings.ENV_VARS`); missing ones fail together.
+        agent_id: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
         # Engine name ("claude-agent-sdk" / "gitagent") or an EngineDriver
         # instance. Required: it selects the driver AND which gateway-env
         # branch is built, so inferring it from the agent document meant a
         # document change could silently re-shape ANTHROPIC_BASE_URL and the
         # model string under a caller who never asked for either.
-        engine: str | EngineDriver,
+        engine: str | EngineDriver | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # The Anthropic-to-OpenAI translating proxy. Required when an
         # Anthropic-shaped engine runs against a native (OpenAI-shaped)
@@ -238,13 +241,21 @@ class ComputerAgent:
         # Injection point for tests — an httpx-like client for the resolve call.
         _resolve_client: Any | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._api_base = api_base(base_url)
+        # 0. Every setting from its argument or its environment variable.
+        self._settings = resolve_settings(
+            agent_id=agent_id, engine=engine, base_url=base_url, api_key=api_key, gap_dir=gap_dir
+        )
+        engine = self._settings.engine
+        gap_dir = self._settings.gap_dir
+        self._api_base = api_base(self._settings.base_url)
 
         # 1. Ask AgentOS what this agent is. Fails fast and by field name, so a
         #    shape this run mode can't honour never reaches a boot.
         self.agent: ResolvedAgent = resolve_agent(
-            agent_id, base_url=base_url, api_key=api_key, client=_resolve_client
+            self._settings.agent_id,
+            base_url=self._settings.base_url,
+            api_key=self._settings.api_key(),
+            client=_resolve_client,
         )
 
         # 2. Engine: always the caller's, never inferred. `resolve_engine` is
@@ -269,7 +280,7 @@ class ComputerAgent:
         gateway_envs = build_gateway_envs(
             self.agent,
             engine_name=engine_name,
-            api_key=api_key,
+            api_key=self._settings.api_key(),
             llm_proxy_url=llm_proxy_url,
         )
         merged_envs = merge_envs(envs, gateway_envs)
@@ -356,6 +367,7 @@ __all__ = [
     "GatewayConfigError",
     "HarnessError",
     "ResolvedAgent",
+    "SettingsError",
     "UnknownEngineError",
     "UnknownIdentityLoaderError",
     "UnknownSessionStoreError",
