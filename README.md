@@ -1,43 +1,56 @@
 # computer-agent-py
 
-Run an agent that is **registered in AgentOS** on your own machine, in your own process.
+Run an agent that is **registered in AgentOS** in your own process — typically a sandbox built from an
+image the agent is baked into.
 
-You name the agent by id. The SDK fetches its definition from AgentOS and reproduces what the
-AgentOS dispatch path would have sent to a ComputerAgent server — same source, same model, same
-engine environment, same permission mode — except the engine runs here instead of in a sandbox.
+You name the agent by id. The SDK fetches its definition from AgentOS and reproduces what the AgentOS
+dispatch path would have sent to a ComputerAgent server — same model, same engine environment, same
+permission mode — except the engine runs here.
+
+**Every call goes through an egress proxy.** The agent config, the global RAI policies, SRS, the
+model, MCP and telemetry are each reached at a URL you configure, with no direct path to any of them.
+
+```bash
+export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
+export COMPUTERAGENT_ENGINE=claude-agent-sdk
+export COMPUTERAGENT_BASE_URL=http://egress/agentos/api     # agent config, local policy, MCP bindings
+export COMPUTERAGENT_AGENT_API_URL=http://egress/agent-api  # global (org) RAI policies
+export COMPUTERAGENT_SRS_URL=http://egress/srs              # guardrail checks
+export COMPUTERAGENT_LLM_URL=http://egress/llm              # every model call
+export COMPUTERAGENT_MCP_URL=http://egress/mcp              # MCP servers bound in AgentOS
+export LYZR_API_KEY=...                                     # sent as x-api-key; swapped by the proxy
+# optional: COMPUTERAGENT_TELEMETRY_URL (OTLP), COMPUTERAGENT_EVENTS_URL (dashboard events),
+#           COMPUTERAGENT_GAP_DIR (GAP mode)
+```
 
 ```python
 import asyncio
 from computeragent import ComputerAgent
 
 async def main():
-    async with ComputerAgent(
-        base_url="http://localhost:8788/agentos/api",
-        agent_id="6aa93f1b3817a13d3103d2c1",
-        api_key="<lyzr workspace key>",
-        engine="claude-agent-sdk",
-        llm_proxy_url="http://127.0.0.1:8786",   # only for a gateway-bound agent
-    ) as agent:
+    async with ComputerAgent() as agent:
         result = await agent.chat("List the files in your working directory.")
         print(result.usage)
 
 asyncio.run(main())
 ```
 
-That is the only run mode. The four required arguments are `base_url`, `agent_id`, `api_key` and
-`engine`; everything else is an override for something the agent document already answers.
+Every setting can also be passed as a constructor argument of the same name (`base_url=`,
+`srs_url=`, …), which wins over its environment variable. Missing settings are reported together, in
+one `SettingsError`, before any request is made.
 
-`engine` is required rather than inferred from the agent's registered `harness` because it also
-selects how the model is routed — see the three cases in the reference. Letting the document pick
-meant an edit in AgentOS could silently re-shape `ANTHROPIC_BASE_URL` under a caller who never
-asked.
+## Guardrails
 
-## Telemetry
+Each turn combines the org (global) RAI policies, read from `agent_api_url`, with the agent's own
+(local) policy from its AgentOS config. Against that one set, SRS checks the user's message before the
+turn (`llm_input`: block or mask) and every tool call before it runs (a content check, then Cedar/OPA).
+No policy ids come from the environment.
 
-Every run emits OpenTelemetry spans and metrics. Set `OTEL_EXPORTER_OTLP_ENDPOINT` and they go to
-your collector; leave it unset and they are collected but exported nowhere. Nothing is printed to
-your console unless you ask for it with `configure(exporter="console")`, and
-`COMPUTERAGENT_OTEL=disabled` drops the sink entirely.
+## The agent
+
+The agent is baked into the image; nothing is cloned. By default the engine runs in the working
+directory with the agent defined by your `options`. Set `gap_dir` to load a GAP agent
+(`agent.yaml`, `SOUL.md`, skills, tools) from a directory instead.
 
 ## Install
 
@@ -45,15 +58,13 @@ your console unless you ask for it with `configure(exporter="console")`, and
 pip install 'computer-agent-py[agentos]'
 ```
 
-`[agentos]` is not optional in practice — resolving an agent is an HTTP call. The
-`claude-agent-sdk` engine also needs the Claude Code CLI on `PATH`, and a cloned source needs
-`git`.
+`[agentos]` is not optional in practice — every call the SDK makes is HTTP. Add `[otel]` for OTLP
+telemetry and `[gap]` for GAP mode.
 
 ## Documentation
 
-**[`docs/USING_THE_SDK.md`](docs/USING_THE_SDK.md)** is the developer reference: every constructor
-parameter with its legal values and where to obtain it, the three model-routing cases, session
-stores, error handling, and a troubleshooting table.
+**[`docs/USING_THE_SDK.md`](docs/USING_THE_SDK.md)** is the developer reference: every setting and
+the requests made from it, the guardrail flow, MCP, session stores, errors and troubleshooting.
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) covers how the pieces fit together, for anyone
 changing the SDK rather than using it.
@@ -63,8 +74,8 @@ changing the SDK rather than using it.
 A **drop-in proxy** for `claude-agent-sdk`. Replace `from claude_agent_sdk import …` with
 `from computeragent import …` and every `query()` / `ClaudeSDKClient` call flows through the
 telemetry pipeline (PII redaction, guardrails, OpenTelemetry and AgentOS sinks) with no call-site
-changes. Every upstream symbol is re-exported identity-preserving, so `isinstance` checks keep
-working. This is a separate surface from `ComputerAgent`, not a run mode.
+changes. This is a separate surface from `ComputerAgent`, not a run mode, and it keeps its own
+environment-driven telemetry configuration.
 
 ## Development
 
@@ -75,15 +86,13 @@ uv run ruff check src tests
 uv run mypy src
 ```
 
-`examples/e2e/live_agent_run.py` runs one turn against a live AgentOS and prints a pass/fail line
-per stage, so a failure localises itself. Integration-marked tests need real services and are
-skipped unless their environment variables are set.
+`examples/e2e/live_agent_run.py` runs one turn against live services with every setting taken from
+the environment, and prints a pass/fail line per stage, so a failure localises itself.
 
 ## Not supported
 
-MCP servers and sub-agent orchestration. An agent declaring either is **refused at resolve time**
-rather than run as something quieter than it declares. Design notes for both live in
-[`docs/plans/`](docs/plans/).
+Sub-agent orchestration: an agent declaring it is **refused at resolve time** rather than run as
+something quieter than it declares.
 
 ## License
 
