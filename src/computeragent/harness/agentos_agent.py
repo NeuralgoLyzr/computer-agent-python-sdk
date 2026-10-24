@@ -79,6 +79,9 @@ class ResolvedAgent:
     mcp_mode: str = DEFAULT_MCP_MODE
     #: MCP servers bound to the agent, as AgentOS resolved them for the caller.
     mcp_bindings: tuple[McpBinding, ...] = ()
+    #: The agent's own (local) SRS RAI policy, combined each turn with the
+    #: org's (global) ones.
+    rai_policy_id: str | None = None
 
     @property
     def has_native_gateway(self) -> bool:
@@ -266,6 +269,7 @@ def resolve_agent(
     except McpBindingError as exc:
         raise UnsupportedAgentError(f"agent {agent_id}: {exc}") from None
     mcp_mode = doc.get("mcp_mode")
+    rai_policy_id = doc.get("rai_policy_id")
 
     gateway = doc.get("model_gateway") if isinstance(doc.get("model_gateway"), dict) else None
     resolved = ResolvedAgent(
@@ -279,6 +283,9 @@ def resolve_agent(
         agent_type=doc.get("type"),
         mcp_mode=mcp_mode if isinstance(mcp_mode, str) and mcp_mode else DEFAULT_MCP_MODE,
         mcp_bindings=mcp_bindings,
+        rai_policy_id=rai_policy_id.strip()
+        if isinstance(rai_policy_id, str) and rai_policy_id.strip()
+        else None,
     )
     logger.debug(
         "resolved agent %s name=%r harness=%s gateway=%s model=%s",

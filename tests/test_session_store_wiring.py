@@ -47,6 +47,9 @@ class OptionsCapturingEngine:
 
 def build(agent_doc, **kwargs) -> ComputerAgent:
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+    respx.get("http://egress.internal/agent-api/v3/org/rai-policy").mock(
+        return_value=httpx.Response(200, json={"policies": []})
+    )
     params: dict = {
         "agent_id": AGENT_ID,
         "base_url": BASE,
@@ -54,6 +57,8 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "engine": "claude-agent-sdk",
         "llm_url": "http://egress.internal/llm",
         "mcp_url": "http://egress.internal/mcp",
+        "agent_api_url": "http://egress.internal/agent-api",
+        "srs_url": "http://egress.internal/srs",
     }
     params.update(kwargs)
     return ComputerAgent(**params)

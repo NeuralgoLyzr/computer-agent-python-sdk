@@ -28,6 +28,8 @@ FULL_ENV = {
     "LYZR_API_KEY": "env-key",
     "COMPUTERAGENT_LLM_URL": LLM_URL,
     "COMPUTERAGENT_MCP_URL": "http://egress.internal/mcp",
+    "COMPUTERAGENT_AGENT_API_URL": "http://egress.internal/agent-api",
+    "COMPUTERAGENT_SRS_URL": "http://egress.internal/srs",
 }
 
 
@@ -39,6 +41,8 @@ def resolve(env, **kw):
         api_key=None,
         llm_url=None,
         mcp_url=None,
+        agent_api_url=None,
+        srs_url=None,
         gap_dir=None,
     )
     params.update(kw)
@@ -53,6 +57,8 @@ def test_every_setting_has_an_env_var():
         "api_key": "LYZR_API_KEY",
         "llm_url": "COMPUTERAGENT_LLM_URL",
         "mcp_url": "COMPUTERAGENT_MCP_URL",
+        "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
+        "srs_url": "COMPUTERAGENT_SRS_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
 
@@ -66,6 +72,8 @@ def test_env_vars_alone_are_enough():
     assert settings.api_key() == "env-key"
     assert settings.llm_url == LLM_URL
     assert settings.mcp_url == "http://egress.internal/mcp"
+    assert settings.agent_api_url == "http://egress.internal/agent-api"
+    assert settings.srs_url == "http://egress.internal/srs"
     assert settings.gap_dir is None
 
 

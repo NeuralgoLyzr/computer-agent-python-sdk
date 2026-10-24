@@ -178,6 +178,11 @@ class SrsToolGate:
             policy_id=violation.policy_id or turn.policy_ids[0],
         )
 
+    async def aclose(self) -> None:
+        """Nothing to release: each check opens its own client unless one was
+        injected, and an injected client is the caller's to close."""
+        return
+
     def _no_verdict(self, turn: TurnPolicy, exc: SrsUnavailable) -> PolicyResult:
         fail_open = turn.fail_open is True and exc.status != 422
         if fail_open:

@@ -26,6 +26,9 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
 MCP_URL = "http://egress.internal/mcp"
+AGENT_API = "http://egress.internal/agent-api"
+SRS = "http://egress.internal/srs"
+ORG_URL = f"{AGENT_API}/v3/org/rai-policy"
 
 
 class FakeEngine:
@@ -56,12 +59,15 @@ class FakeEngine:
 def build(agent_doc, **kwargs) -> ComputerAgent:
     """Construct against a mocked AgentOS, with sensible defaults."""
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+    respx.get(ORG_URL).mock(return_value=httpx.Response(200, json={"policies": []}))
     params: dict = {
         "agent_id": AGENT_ID,
         "base_url": BASE,
         "api_key": KEY,
         "llm_url": LLM_URL,
         "mcp_url": MCP_URL,
+        "agent_api_url": AGENT_API,
+        "srs_url": SRS,
         "engine": FakeEngine(),
     }
     params.update(kwargs)
@@ -117,7 +123,13 @@ def test_engine_is_required():
     re-shape ANTHROPIC_BASE_URL under a caller who never asked."""
     with pytest.raises(SettingsError, match="engine"):
         ComputerAgent(
-            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_url=LLM_URL, mcp_url=MCP_URL
+            agent_id=AGENT_ID,
+            base_url=BASE,
+            api_key=KEY,
+            llm_url=LLM_URL,
+            mcp_url=MCP_URL,
+            agent_api_url=AGENT_API,
+            srs_url=SRS,
         )
 
 
@@ -131,6 +143,8 @@ def test_a_named_engine_resolves_to_the_registered_driver(agent_doc):
         api_key=KEY,
         llm_url=LLM_URL,
         mcp_url=MCP_URL,
+        agent_api_url=AGENT_API,
+        srs_url=SRS,
         engine="claude-agent-sdk",
     )
 
@@ -150,6 +164,8 @@ def test_an_unregistered_engine_name_is_refused(agent_doc):
             api_key=KEY,
             llm_url=LLM_URL,
             mcp_url=MCP_URL,
+            agent_api_url=AGENT_API,
+            srs_url=SRS,
             engine="langgraph",
         )
 
@@ -166,6 +182,8 @@ def test_an_engine_that_differs_from_the_harness_is_logged(agent_doc, caplog):
             engine="gitagent",
             llm_url=LLM_URL,
             mcp_url=MCP_URL,
+            agent_api_url=AGENT_API,
+            srs_url=SRS,
         )
 
     assert any("overrides agent" in r.getMessage() for r in caplog.records)
@@ -183,6 +201,8 @@ def test_engine_can_be_named(agent_doc):
         engine="gitagent",
         llm_url=LLM_URL,
         mcp_url=MCP_URL,
+        agent_api_url=AGENT_API,
+        srs_url=SRS,
     )
 
     assert agent._coordinator._engine.name == "gitagent"  # type: ignore[attr-defined]

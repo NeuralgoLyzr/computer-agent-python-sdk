@@ -62,6 +62,31 @@ class _SessionState:
         self.started_at = time.monotonic()
 
 
+class _RefusalEngine:
+    """Stands in for the engine on a turn whose message was blocked: the turn
+    ends with the reply as its result, and the real engine never starts."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    async def start_session(self, ctx: EngineContext) -> AsyncIterator[EngineEvent]:  # noqa: ARG002
+        from claude_agent_sdk.types import ResultMessage
+
+        yield EngineEvent(
+            kind="sdk_message",
+            payload=ResultMessage(
+                subtype="success",
+                duration_ms=0,
+                duration_api_ms=0,
+                is_error=False,
+                num_turns=0,
+                session_id="",
+                stop_reason="end_turn",
+                result=self._reply,
+            ),
+        )
+
+
 class HarnessCoordinator:
     """Single-session coordinator.
 
@@ -97,6 +122,10 @@ class HarnessCoordinator:
         # `gap_tools` server stays), before the caller overlay.
         mcp_servers: dict[str, Any] | None = None,
         mcp_allowed_tools: list[str] | None = None,
+        # Runs at the start of every turn: resolves the turn's policies and
+        # checks the user's message (see `guardrails.SrsTurnGuard`). A blocked
+        # message ends the turn with its reply and the engine never runs.
+        turn_guard: Any | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
@@ -127,6 +156,7 @@ class HarnessCoordinator:
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
         self._mcp_servers: dict[str, Any] = dict(mcp_servers or {})
         self._mcp_allowed_tools: list[str] = list(mcp_allowed_tools or [])
+        self._turn_guard = turn_guard
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -326,7 +356,13 @@ class HarnessCoordinator:
         # materialises prior entries itself before spawning the subprocess.
         # Replaying it from this side as well would duplicate the transcript.
 
-        await _enqueue_user_message(state.user_queue, message)
+        start = None
+        if self._turn_guard is not None:
+            start = await self._turn_guard.start_turn(message, session_id=session_id)
+            message = start.message
+        blocked_reply = start.blocked_reply if start is not None else None
+        if blocked_reply is None:
+            await _enqueue_user_message(state.user_queue, message)
 
         ctx = EngineContext(
             session_id=session_id,
@@ -387,13 +423,23 @@ class HarnessCoordinator:
                 model=turn_model,
             )
         )
+        if start is not None and start.telemetry is not None:
+            await self._emit(
+                TelemetryEvent(
+                    kind="policy_decision",
+                    session_id=session_id,
+                    agent_name=state.agent_name,
+                    payload=dict(start.telemetry),
+                )
+            )
 
-        return state, self._stream_engine_events(state, ctx)
+        engine = _RefusalEngine(blocked_reply) if blocked_reply is not None else None
+        return state, self._stream_engine_events(state, ctx, engine=engine)
 
     # ── event translation ──────────────────────────────────────────────────
 
     async def _stream_engine_events(
-        self, state: _SessionState, ctx: EngineContext
+        self, state: _SessionState, ctx: EngineContext, *, engine: Any | None = None
     ) -> AsyncIterator[EngineEvent]:
         """Iterate the engine, translate each event, push telemetry."""
         last_assistant_text = ""
@@ -402,7 +448,7 @@ class HarnessCoordinator:
         # time-to-first-token. Only the OtelSink consumes it.
         first_token_emitted = False
         try:
-            async for ev in self._engine.start_session(ctx):
+            async for ev in (engine or self._engine).start_session(ctx):
                 if ev.kind == "sdk_message":
                     # Remember the engine's own session id so the next turn can
                     # resume this conversation. It appears on every message the

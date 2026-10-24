@@ -39,6 +39,9 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from ..engines import resolve_engine
+from ..policy.authorizer import PolicyToolAuthorizer
+from ..policy.srs_gate import SrsToolGate
+from ..policy.types import PolicyPrincipal, PolicyResource
 from ..protocol_types import (
     EngineDriver,
     PermissionRequest,
@@ -70,6 +73,7 @@ from .gateway_envs import (
     build_options,
     merge_envs,
 )
+from .guardrails import SrsTurnGuard
 from .mcp import build_mcp_servers
 from .settings import SettingsError, resolve_settings
 from .usage import UsageRollup
@@ -250,6 +254,11 @@ class ComputerAgent:
         # The egress route for MCP: each server bound to the agent in AgentOS
         # becomes `{mcp_url}/{server_id}`.
         mcp_url: str | None = None,
+        # The egress routes for guardrails: the org (global) RAI policies are
+        # read from `{agent_api_url}/v3/org/rai-policy` every turn, and every
+        # check is made against SRS at `srs_url`.
+        agent_api_url: str | None = None,
+        srs_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
@@ -277,6 +286,8 @@ class ComputerAgent:
             api_key=api_key,
             llm_url=llm_url,
             mcp_url=mcp_url,
+            agent_api_url=agent_api_url,
+            srs_url=srs_url,
             gap_dir=gap_dir,
         )
         engine = self._settings.engine
@@ -364,6 +375,41 @@ class ComputerAgent:
             anthropic_shaped=engine_name in ANTHROPIC_SHAPED,
         )
 
+        # 6. SRS guardrails. Each turn combines the org (global) policies with
+        #    the agent's own (local) one; the user's message and every tool
+        #    call are checked against that set. A caller's own policy_decider
+        #    replaces the tool-call gate; the input check always runs.
+        policy_agent_name = self.agent.name
+        self._srs_gate = SrsToolGate(
+            srs_url=self._settings.srs_url,
+            api_key=self._settings.api_key,
+            agent_name=policy_agent_name,
+            engine_name=engine_name,
+            mcp_server_names=list(mcp_servers),
+        )
+        if policy_decider is None:
+            policy_decider = PolicyToolAuthorizer(
+                engine=self._srs_gate,
+                principal_resolver=lambda _ctx: PolicyPrincipal(id=policy_agent_name),
+                resource_resolver=lambda ctx: PolicyResource(
+                    type="agent",
+                    agent_name=policy_agent_name,
+                    session_id=str(
+                        getattr(ctx, "session_id", None)
+                        or (ctx.get("session_id") if isinstance(ctx, dict) else "")
+                        or ""
+                    ),
+                ),
+            )
+        turn_guard = SrsTurnGuard(
+            agent_api_url=self._settings.agent_api_url,
+            srs_url=self._settings.srs_url,
+            api_key=self._settings.api_key,
+            agent_name=policy_agent_name,
+            local_policy_ids=[self.agent.rai_policy_id] if self.agent.rai_policy_id else [],
+            gate=self._srs_gate,
+        )
+
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
             substrate=LocalSubstrate(),
@@ -382,6 +428,7 @@ class ComputerAgent:
             options_overlay=merged_options,
             mcp_servers=mcp_servers,
             mcp_allowed_tools=mcp_allowed_tools,
+            turn_guard=turn_guard,
         )
 
     async def __aenter__(self) -> ComputerAgent:
