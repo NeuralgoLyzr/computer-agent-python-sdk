@@ -60,7 +60,6 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "base_url": BASE,
         "api_key": KEY,
         "llm_proxy_url": PROXY,
-        "source": Path.cwd(),
         "engine": FakeEngine(),
     }
     params.update(kwargs)
@@ -89,7 +88,6 @@ def test_resolution_failure_surfaces_at_construction(agent_doc):
             agent_id=AGENT_ID,
             base_url=BASE,
             api_key=KEY,
-            source=Path.cwd(),
             engine=FakeEngine(),
         )
 
@@ -99,9 +97,7 @@ def test_missing_proxy_is_refused_at_construction(agent_doc):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     with pytest.raises(GatewayConfigError, match="llm_proxy_url"):
-        ComputerAgent(
-            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, source=Path.cwd(), engine=FakeEngine()
-        )
+        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine=FakeEngine())
 
 
 # ── engine selection ─────────────────────────────────────────────────────────
@@ -126,7 +122,6 @@ def test_a_named_engine_resolves_to_the_registered_driver(agent_doc):
         base_url=BASE,
         api_key=KEY,
         llm_proxy_url=PROXY,
-        source=Path.cwd(),
         engine="claude-agent-sdk",
     )
 
@@ -145,7 +140,6 @@ def test_an_unregistered_engine_name_is_refused(agent_doc):
             base_url=BASE,
             api_key=KEY,
             llm_proxy_url=PROXY,
-            source=Path.cwd(),
             engine="langgraph",
         )
 
@@ -155,9 +149,7 @@ def test_an_engine_that_differs_from_the_harness_is_logged(agent_doc, caplog):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     with caplog.at_level("WARNING", logger="computeragent.harness"):
-        ComputerAgent(
-            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, source=Path.cwd(), engine="gitagent"
-        )
+        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent")
 
     assert any("overrides agent" in r.getMessage() for r in caplog.records)
 
@@ -168,9 +160,7 @@ def test_engine_can_be_named(agent_doc):
     follows the ENGINE rather than the agent's declared harness."""
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    agent = ComputerAgent(
-        agent_id=AGENT_ID, base_url=BASE, api_key=KEY, source=Path.cwd(), engine="gitagent"
-    )
+    agent = ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent")
 
     assert agent._coordinator._engine.name == "gitagent"  # type: ignore[attr-defined]
 
@@ -183,30 +173,42 @@ def test_engine_can_be_an_instance(agent_doc):
     assert agent._coordinator._engine is engine  # type: ignore[attr-defined]
 
 
-# ── source ───────────────────────────────────────────────────────────────────
+# ── workspace ────────────────────────────────────────────────────────────────
 
 
 @respx.mock
-def test_source_defaults_to_the_agents_own(agent_doc):
-    agent = build(agent_doc, source=None)
+def test_the_workspace_is_the_working_directory(agent_doc):
+    """The agent is baked into the image: nothing is cloned, and the agent
+    document's own source is never read."""
+    agent = build(agent_doc)
 
-    assert agent._coordinator._source == agent_doc["source"]  # type: ignore[attr-defined]
+    assert agent._coordinator._source == Path.cwd()  # type: ignore[attr-defined]
 
 
 @respx.mock
-def test_caller_source_overrides_the_agents(agent_doc, tmp_path):
-    agent = build(agent_doc, source=tmp_path)
+def test_source_and_git_token_are_gone(agent_doc):
+    with pytest.raises(TypeError, match="source"):
+        build(agent_doc, source=Path.cwd())
+    with pytest.raises(TypeError, match="git_token"):
+        build(agent_doc, git_token="ghp_x")
+
+
+@respx.mock
+def test_gap_dir_is_the_workspace_in_gap_mode(agent_doc, tmp_path):
+    (tmp_path / "agent.yaml").write_text("name: fixture\n", encoding="utf-8")
+
+    agent = build(agent_doc, gap_dir=tmp_path)
 
     assert agent._coordinator._source == tmp_path  # type: ignore[attr-defined]
 
 
 @respx.mock
-def test_no_source_anywhere_is_refused(agent_doc):
-    agent_doc["source"] = None
-    agent_doc["sourceUrl"] = None
+def test_gap_dir_as_a_string_is_accepted(agent_doc, tmp_path):
+    (tmp_path / "agent.yaml").write_text("name: fixture\n", encoding="utf-8")
 
-    with pytest.raises(AgentResolveError, match="no source"):
-        build(agent_doc, source=None)
+    agent = build(agent_doc, gap_dir=str(tmp_path))
+
+    assert agent._coordinator._source == tmp_path  # type: ignore[attr-defined]
 
 
 # ── what the coordinator is handed ───────────────────────────────────────────
@@ -295,11 +297,11 @@ def test_no_session_store_by_default(agent_doc):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_gap_loader_is_used_when_the_workspace_has_an_agent_yaml(agent_doc, tmp_path):
+async def test_gap_mode_loads_the_agent_yaml(agent_doc, tmp_path):
     (tmp_path / "agent.yaml").write_text("name: fixture\nversion: '1.0.0'\n", encoding="utf-8")
     engine = FakeEngine()
 
-    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+    async with build(agent_doc, gap_dir=tmp_path, engine=engine) as agent:
         await agent.chat("hi")
 
     assert engine.contexts[0].manifest.name == "fixture"
@@ -307,12 +309,16 @@ async def test_gap_loader_is_used_when_the_workspace_has_an_agent_yaml(agent_doc
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_passthrough_loader_is_used_for_a_plain_workspace(agent_doc, tmp_path):
-    """The GAP loader raises on a missing agent.yaml, so without the fallback a
-    plain (non-GAP) repo would be unrunnable."""
+async def test_without_gap_dir_an_agent_yaml_in_the_cwd_is_ignored(
+    agent_doc, tmp_path, monkeypatch
+):
+    """GAP mode is explicit: an agent.yaml that happens to sit in the working
+    directory does not switch it on."""
+    (tmp_path / "agent.yaml").write_text("name: fixture\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     engine = FakeEngine()
 
-    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+    async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hi")
 
     assert engine.contexts[0].manifest.name == tmp_path.name
@@ -324,7 +330,7 @@ async def test_passthrough_loader_is_used_for_a_plain_workspace(agent_doc, tmp_p
 @pytest.mark.asyncio
 @respx.mock
 async def test_one_chat_returns_a_result(agent_doc, tmp_path):
-    async with build(agent_doc, source=tmp_path) as agent:
+    async with build(agent_doc) as agent:
         result = await agent.chat("hello")
 
     assert result.session_id
@@ -336,7 +342,7 @@ async def test_one_chat_returns_a_result(agent_doc, tmp_path):
 async def test_the_resolved_model_reaches_the_engine_context(agent_doc, tmp_path):
     engine = FakeEngine()
 
-    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+    async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hello")
 
     assert engine.contexts[0].manifest.options["model"] == "6aa93f1a75ce74c4e6772b20"

@@ -34,7 +34,6 @@ def build(agent_doc, **kw):
         "api_key": KEY,
         "engine": "claude-agent-sdk",
         "llm_proxy_url": PROXY,
-        "source": Path.cwd(),
     }
     params.update(kw)
     return ComputerAgent(**params)
@@ -71,42 +70,44 @@ def test_the_supported_spellings_still_normalise(given):
     assert api_base(given) == "http://h:8788/agentos/api/v1"
 
 
-# ── source ───────────────────────────────────────────────────────────────────
+# ── gap_dir ──────────────────────────────────────────────────────────────────
 
 
 @respx.mock
-def test_empty_source_is_refused(agent_doc):
-    """`Path("") == Path(".")`, so a blank config value silently pointed a
-    bypassPermissions agent at whatever directory the process was in."""
+def test_empty_gap_dir_is_refused(agent_doc):
+    """`Path("") == Path(".")`, so a blank config value would silently run GAP
+    mode against whatever directory the process was in."""
     with pytest.raises(AgentResolveError, match="empty string"):
-        build(agent_doc, source="")
+        build(agent_doc, gap_dir="")
 
 
 @respx.mock
-def test_nonexistent_source_path_is_refused_at_construction(agent_doc):
+def test_nonexistent_gap_dir_is_refused_at_construction(agent_doc):
     with pytest.raises(AgentResolveError, match="does not exist"):
-        build(agent_doc, source=Path("/no/such/directory/anywhere"))
+        build(agent_doc, gap_dir=Path("/no/such/directory/anywhere"))
 
 
 @respx.mock
-def test_source_that_is_a_file_is_refused(agent_doc, tmp_path):
+def test_gap_dir_that_is_a_file_is_refused(agent_doc, tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("x", encoding="utf-8")
 
     with pytest.raises(AgentResolveError, match="not a directory"):
-        build(agent_doc, source=f)
+        build(agent_doc, gap_dir=f)
 
 
 @respx.mock
-def test_source_of_the_wrong_type_is_refused_at_construction(agent_doc):
-    with pytest.raises(AgentResolveError, match="source must be"):
-        build(agent_doc, source=42)
+def test_gap_dir_without_agent_yaml_is_refused(agent_doc, tmp_path):
+    """GAP mode was asked for explicitly, so it never falls back to running the
+    agent as a plain one."""
+    with pytest.raises(AgentResolveError, match="no agent.yaml"):
+        build(agent_doc, gap_dir=tmp_path)
 
 
 @respx.mock
-def test_a_git_url_source_is_accepted_without_touching_the_network(agent_doc):
-    """Validation must not try to reach a remote — the clone happens later."""
-    build(agent_doc, source="https://github.com/org/repo.git")
+def test_gap_dir_of_the_wrong_type_is_refused_at_construction(agent_doc):
+    with pytest.raises(AgentResolveError, match="gap_dir must be"):
+        build(agent_doc, gap_dir=42)
 
 
 # ── llm_proxy_url ────────────────────────────────────────────────────────────
@@ -164,7 +165,7 @@ async def test_cancelling_before_iteration_prevents_the_run(agent_doc, tmp_path)
     from test_computeragent_init import FakeEngine
 
     engine = FakeEngine()
-    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+    async with build(agent_doc, engine=engine) as agent:
         handle = agent.chat("do not run")
         await handle.cancel()
         events = [e async for e in handle]
@@ -199,19 +200,6 @@ def test_project_key_is_gone(agent_doc):
         build(agent_doc, project_key="anything")
 
 
-@respx.mock
-def test_an_inline_source_with_files_is_refused(agent_doc):
-    """The files are not materialised and the workspace falls back to cwd, so
-    the agent would run against the caller's directory instead."""
-    with pytest.raises(AgentResolveError, match="files"):
-        build(agent_doc, source={"name": "x", "version": "1", "files": {"a.txt": "hi"}})
-
-
-@respx.mock
-def test_an_inline_source_without_files_is_still_accepted(agent_doc):
-    build(agent_doc, source={"name": "x", "version": "1"})
-
-
 # ── one conversation, one turn at a time ─────────────────────────────────────
 
 
@@ -235,7 +223,7 @@ async def test_concurrent_turns_on_one_instance_are_refused(agent_doc, tmp_path)
                 kind="sdk_message", payload={"type": "assistant"}
             )
 
-    async with build(agent_doc, source=tmp_path, engine=SlowEngine()) as agent:
+    async with build(agent_doc, engine=SlowEngine()) as agent:
         first = asyncio.create_task(agent.chat("one").result())
         await asyncio.sleep(0.05)
 
@@ -252,7 +240,7 @@ async def test_sequential_turns_are_unaffected(agent_doc, tmp_path):
     from test_computeragent_init import FakeEngine
 
     engine = FakeEngine()
-    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+    async with build(agent_doc, engine=engine) as agent:
         await agent.chat("one")
         await agent.chat("two")
 

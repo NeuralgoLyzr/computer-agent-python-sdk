@@ -65,7 +65,7 @@ async def test_the_store_reaches_the_engines_options(agent_doc, tmp_path):
     engine = OptionsCapturingEngine()
     store = InMemorySessionStore()
 
-    async with build(agent_doc, source=tmp_path, engine=engine, session_store=store) as agent:
+    async with build(agent_doc, engine=engine, session_store=store) as agent:
         await agent.chat("hi")
 
     assert engine.options[0].session_store is store
@@ -76,7 +76,7 @@ async def test_the_store_reaches_the_engines_options(agent_doc, tmp_path):
 async def test_no_store_leaves_the_option_unset(agent_doc, tmp_path):
     engine = OptionsCapturingEngine()
 
-    async with build(agent_doc, source=tmp_path, engine=engine) as agent:
+    async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hi")
 
     assert engine.options[0].session_store is None
@@ -87,9 +87,7 @@ async def test_no_store_leaves_the_option_unset(agent_doc, tmp_path):
 async def test_the_flush_mode_the_sdk_defaults_to_is_preserved(agent_doc, tmp_path):
     engine = OptionsCapturingEngine()
 
-    async with build(
-        agent_doc, source=tmp_path, engine=engine, session_store=InMemorySessionStore()
-    ) as agent:
+    async with build(agent_doc, engine=engine, session_store=InMemorySessionStore()) as agent:
         await agent.chat("hi")
 
     assert engine.options[0].session_store_flush == "batched"
@@ -102,7 +100,6 @@ async def test_a_caller_supplied_flush_mode_wins(agent_doc, tmp_path):
 
     async with build(
         agent_doc,
-        source=tmp_path,
         engine=engine,
         session_store=InMemorySessionStore(),
         options={"session_store_flush": "immediate"},
@@ -126,9 +123,7 @@ async def test_the_harness_does_not_replay_the_store_itself(agent_doc, tmp_path)
             return await super().load(key)
 
     engine = OptionsCapturingEngine()
-    async with build(
-        agent_doc, source=tmp_path, engine=engine, session_store=CountingStore()
-    ) as agent:
+    async with build(agent_doc, engine=engine, session_store=CountingStore()) as agent:
         await agent.chat("hi")
 
     assert loads == []
@@ -153,7 +148,7 @@ async def test_a_duck_typed_store_is_accepted(agent_doc, tmp_path):
     store = Minimal()
     engine = OptionsCapturingEngine()
 
-    async with build(agent_doc, source=tmp_path, engine=engine, session_store=store) as agent:
+    async with build(agent_doc, engine=engine, session_store=store) as agent:
         await agent.chat("hi")
 
     assert engine.options[0].session_store is store
@@ -165,4 +160,4 @@ async def test_an_object_that_is_not_a_store_is_refused(agent_doc, tmp_path):
     from computeragent.harness.errors import UnknownSessionStoreError
 
     with pytest.raises((UnknownSessionStoreError, TypeError, AttributeError)):
-        build(agent_doc, source=tmp_path, session_store=object())
+        build(agent_doc, session_store=object())

@@ -13,13 +13,17 @@ One run mode: name an agent registered in AgentOS, and run it **locally**::
 
 The SDK fetches the agent's definition from AgentOS and reproduces what the
 server's own dispatch path would have sent to a ComputerAgent server — same
-source, same model, same engine environment, same permission mode — except the
-engine runs in this process instead of in a sandbox.
+model, same engine environment, same permission mode — except the engine runs in
+this process instead of in a sandbox.
 
-Everything beyond the three required arguments is an override for something the
-agent document already answers. Two are needed only in specific cases:
-``llm_proxy_url`` for an Anthropic-shaped engine against a native (OpenAI-shaped)
-gateway, and ``git_token`` for a private source.
+The agent itself is baked into the image: nothing is cloned. The engine runs in
+the process's working directory (``options={"cwd": ...}`` overrides it), and the
+agent is defined by the caller's ``options``. With ``gap_dir`` set, the SDK runs
+in GAP mode instead and loads the agent from that directory's ``agent.yaml``.
+
+Everything beyond the required arguments is an override for something the agent
+document already answers. ``llm_proxy_url`` is needed only for an
+Anthropic-shaped engine against a native (OpenAI-shaped) gateway.
 """
 
 from __future__ import annotations
@@ -35,9 +39,7 @@ from typing import Any, Protocol, cast
 
 from ..engines import resolve_engine
 from ..protocol_types import (
-    AgentManifest,
     EngineDriver,
-    IdentitySource,
     PermissionRequest,
     PolicyDecider,
     SessionStore,
@@ -166,72 +168,30 @@ class ChatHandle:
         )
 
 
-def _validate_source(source: IdentitySource) -> None:
-    """Reject a source that cannot possibly work, while we can still say why.
+def _validate_gap_dir(gap_dir: str | Path) -> Path:
+    """Resolve ``gap_dir`` to the GAP directory, or refuse it naming why.
 
-    Only three argument shapes fail at construction otherwise; a bad `source`
-    used to sail through and surface much later from inside the engine, or —
-    worse — not at all. An empty string is the dangerous one: `Path("")` is
-    `Path(".")`, so a config value that read as blank quietly pointed a
-    bypassPermissions agent at whatever directory the process happened to be in.
+    GAP mode is chosen explicitly, so a directory that is missing, is a file,
+    or has no ``agent.yaml`` fails here rather than quietly running the agent
+    as something other than the GAP agent the caller asked for.
     """
-    if isinstance(source, dict):
-        if source.get("files"):
-            raise AgentResolveError(
-                "an inline source with `files` is not supported: the files are not materialised "
-                "and the workspace falls back to the current working directory, so the agent "
-                "would run against your cwd rather than the files you listed. Write them to a "
-                "directory and pass source=Path(...)."
-            )
-        return
-    if isinstance(source, str):
-        if not source.strip():
-            raise AgentResolveError(
-                "source is an empty string, which would resolve to the current working directory "
-                "and run the agent against it. Pass a real path, a git URL, or omit it to use the "
-                "agent's own source."
-            )
-        return
-    if isinstance(source, Path):
-        if not source.exists():
-            raise AgentResolveError(
-                f"source path does not exist: {source}. The workspace is materialised on the first "
-                "chat, so this would otherwise surface from inside the engine."
-            )
-        if not source.is_dir():
-            raise AgentResolveError(f"source path is not a directory: {source}")
-        return
-    raise AgentResolveError(
-        f"source must be a Path, a git URL/path string, or an inline dict — got "
-        f"{type(source).__name__}."
-    )
-
-
-class _AutoIdentityLoader:
-    """GAP when the workspace is a GAP repo, passthrough when it isn't.
-
-    The choice can only be made after the source has been materialised, since it
-    turns on whether ``agent.yaml`` is at the workspace root — and
-    :class:`~computeragent.identity.gap.GapIdentityLoader` raises rather than
-    degrading when it isn't. Deciding here keeps a plain (non-GAP) repo runnable
-    instead of making the loader a thing callers must get right by hand.
-    """
-
-    name = "auto"
-
-    async def load(
-        self, *, source: IdentitySource, target_engine: str, workspace_path: Path
-    ) -> AgentManifest:
-        from ..identity import resolve_identity_loader
-
-        is_gap = (workspace_path / "agent.yaml").is_file()
-        loader = resolve_identity_loader("gap" if is_gap else "passthrough")
-        logger.debug(
-            "identity loader: %s (agent.yaml %s)", loader.name, "found" if is_gap else "absent"
+    if isinstance(gap_dir, str):
+        if not gap_dir.strip():
+            raise AgentResolveError("gap_dir is an empty string — pass the GAP directory's path.")
+        gap_dir = Path(gap_dir)
+    if not isinstance(gap_dir, Path):
+        raise AgentResolveError(
+            f"gap_dir must be a path (str or Path), got {type(gap_dir).__name__}."
         )
-        return await loader.load(
-            source=source, target_engine=target_engine, workspace_path=workspace_path
+    if not gap_dir.exists():
+        raise AgentResolveError(f"gap_dir does not exist: {gap_dir}")
+    if not gap_dir.is_dir():
+        raise AgentResolveError(f"gap_dir is not a directory: {gap_dir}")
+    if not (gap_dir / "agent.yaml").is_file():
+        raise AgentResolveError(
+            f"gap_dir has no agent.yaml: {gap_dir}. GAP mode loads the agent from that file."
         )
+    return gap_dir
 
 
 class ComputerAgent:
@@ -239,8 +199,7 @@ class ComputerAgent:
 
     One instance is one logical session: ``session_started`` fires on the first
     chat and ``session_ended`` on dispose, so N chats collapse into one
-    conversation. Use ``async with`` so the workspace (and any temp clone)
-    closes deterministically.
+    conversation. Use ``async with`` so the session closes deterministically.
     """
 
     def __init__(
@@ -261,13 +220,10 @@ class ComputerAgent:
         # Anthropic-shaped engine runs against a native (OpenAI-shaped)
         # gateway, and unused otherwise — see `gateway_envs`.
         llm_proxy_url: str | None = None,
-        # Only a PRIVATE source needs one. Without it the clone is
-        # unauthenticated, which fails for a private repo.
-        git_token: str | None = None,
+        # GAP mode: load the agent from this directory's agent.yaml (baked
+        # into the image). Unset, the agent is the caller's `options`.
+        gap_dir: str | Path | None = None,
         # ── overrides for what the agent document already answers ────────
-        # Use this workspace instead of cloning the agent's own source. A local
-        # Path, a git URL, or an inline manifest dict.
-        source: IdentitySource | None = None,
         # Merged over whatever the identity loader resolves — caller wins.
         options: Mapping[str, Any] | None = None,
         envs: Mapping[str, str] | None = None,
@@ -325,16 +281,17 @@ class ComputerAgent:
         if budget_max_usd is not None:
             merged_options.setdefault("max_budget_usd", budget_max_usd)
 
-        # 4. What the agent runs against: the caller's workspace if they gave
-        #    one, else the source the agent document names.
-        effective_source = source if source is not None else self.agent.source
-        if effective_source is None:
-            raise AgentResolveError(
-                f"agent {self.agent.agent_id} has no source and none was passed — give the run a "
-                "workspace with source=Path('...') or register a source on the agent."
-            )
+        # 4. What the agent runs against. The agent is baked into the image:
+        #    GAP mode reads it from `gap_dir`, otherwise the engine runs in the
+        #    process's working directory with the caller's options.
+        from ..identity import resolve_identity_loader
 
-        _validate_source(effective_source)
+        if gap_dir is not None:
+            workspace = _validate_gap_dir(gap_dir)
+            identity_loader = resolve_identity_loader("gap")
+        else:
+            workspace = Path.cwd()
+            identity_loader = resolve_identity_loader("passthrough")
 
         resolved_store: SessionStore | None = None
         if session_store is not None:
@@ -359,8 +316,8 @@ class ComputerAgent:
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
             substrate=LocalSubstrate(),
-            identity_loader=_AutoIdentityLoader(),
-            source=effective_source,
+            identity_loader=identity_loader,
+            source=workspace,
             envs=merged_envs,
             session_store=resolved_store,
             session_id=session_id,
@@ -372,7 +329,6 @@ class ComputerAgent:
             budget_max_usd=budget_max_usd,
             telemetry_pipeline=telemetry_pipeline,
             options_overlay=merged_options,
-            git_token=git_token,
         )
 
     async def __aenter__(self) -> ComputerAgent:

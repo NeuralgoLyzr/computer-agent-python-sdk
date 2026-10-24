@@ -34,12 +34,10 @@ def agent(**overrides) -> ResolvedAgent:
         agent_id="6aa93f1b3817a13d3103d2c1",
         name="private git test with client",
         harness="claude-agent-sdk",
-        source="https://github.com/vrajp-lyzr/general-agent-private",
         model=STUDIO_ID,
         gateway_type="native",
         gateway_base_url=GATEWAY,
         gateway_completions_url=f"{GATEWAY}/v4/chat/completions",
-        credential_id=None,
         agent_type="client",
     )
     defaults.update(overrides)

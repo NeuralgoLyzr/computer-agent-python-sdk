@@ -92,9 +92,6 @@ class HarnessCoordinator:
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
-        # ── cloning a private source ────────────────────────────────────────
-        # The PAT used to clone a private source, when there is one.
-        git_token: str | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
@@ -123,7 +120,6 @@ class HarnessCoordinator:
         # / ``model=...``. Layered on top of whatever the identity loader
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
-        self._git_token = git_token
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -158,31 +154,6 @@ class HarnessCoordinator:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
-    def _git_credential(self) -> dict[str, str] | None:
-        """Auth for cloning the source, or ``None`` for an anonymous clone.
-
-        Just the explicit token now. There used to be a middle step that asked
-        AgentOS to mint a GitHub-App installation token, but that route is
-        App-only and these deployments authenticate with PATs — held either
-        directly on the agent or in the Lyzr credential vault behind its
-        `credential_id`, neither of which the App route can return. So the
-        fallback could not succeed, and all it did was turn a missing token
-        into a slower failure.
-
-        The token is handed to the substrate as a credential mapping, not
-        spliced into the clone URL, so it reaches neither argv nor the remote
-        recorded in ``.git/config``.
-        """
-        if not (isinstance(self._source, str) and self._git_token):
-            return None
-        from ..substrates.local import _host_of
-
-        return {
-            "host": _host_of(self._source),
-            "username": "x-access-token",
-            "token": self._git_token,
-        }
-
     async def _ensure_booted(self) -> None:
         if self._disposed:
             # `dispose()` closes the substrate handle but leaves it set, so
@@ -197,23 +168,13 @@ class HarnessCoordinator:
             )
         if self._substrate_handle is not None:
             return
-        git_credential = self._git_credential()
-        self._substrate_handle = await self._substrate.boot(
-            source=self._source, envs=self._envs, git_credential=git_credential
-        )
+        self._substrate_handle = await self._substrate.boot(source=self._source, envs=self._envs)
         self._workspace_path = self._substrate_handle.workspace_path
         loaded = await self._identity_loader.load(
             source=self._source,
             target_engine=self._engine.name,
             workspace_path=self._workspace_path,
         )
-        # Stamp the cloned commit SHA onto the manifest (if the loader didn't
-        # already provide one) so it rides session_started → server SHA sync.
-        revision = getattr(self._substrate_handle, "revision", None)
-        if revision and not getattr(loaded, "sha", None):
-            from dataclasses import replace
-
-            loaded = replace(loaded, sha=revision)
         # Overlay caller-supplied options (from ComputerAgent kwargs) on
         # top of whatever the loader resolved. Caller intent wins.
         if self._options_overlay:
@@ -588,8 +549,8 @@ class HarnessCoordinator:
         # Signal harness-mode to the AgentOS server's ingest projection, which
         # then writes ``source.type = "library"`` (no server-runnable source →
         # the UI hides live chat). We set it for sources the AgentOS harness
-        # can't reconstruct on its own (a git URL or a local path that only
-        # exists on this machine). We deliberately do NOT set it for an INLINE
+        # can't reconstruct on its own (a local path that only exists on this
+        # machine). We deliberately do NOT set it for an INLINE
         # source: the server's ``inlineSourceFor`` rebuilds a runnable
         # ``agent.yaml`` + ``CLAUDE.md`` from this event's payload
         # (system_prompt / allowed_tools / max_turns / permission_mode / model),

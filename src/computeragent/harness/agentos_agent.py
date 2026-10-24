@@ -2,8 +2,9 @@
 
 The single entry point for the SDK's one run mode: give it an AgentOS API base,
 an agent id, and a Lyzr workspace key, and it returns everything needed to run
-that agent locally — source, harness, the effective model, and the model
-gateway it is bound to.
+that agent locally — harness, the effective model, and the model gateway it is
+bound to. The agent itself is baked into the image, so the document's source is
+not read.
 
     GET {base_url}/v1/agents/{agent_id}      header: x-api-key: <lyzr key>
 
@@ -61,9 +62,6 @@ class ResolvedAgent:
     agent_id: str
     name: str
     harness: str
-    #: String URL / path, or an inline identity source. ``None`` when the agent
-    #: has no resolvable source (the caller must then pass ``source=``).
-    source: Any | None
     #: The model string to put on the wire. For a native gateway this is the
     #: backing Lyzr Studio agent id, NOT the catalog name — see `model_of`.
     model: str | None
@@ -73,11 +71,6 @@ class ResolvedAgent:
     #: The server's own ``{baseUrl}{LYZR_UPSTREAM_PATH}``. Preferred over
     #: reconstructing the path client-side.
     gateway_completions_url: str | None
-    #: Lyzr provider-credential id bound for cloning a private source. Echoed so
-    #: a client knows auth is needed; the SDK cannot resolve it to a token
-    #: (that needs an operator service token), so it only ever appears in the
-    #: error message when a private clone fails.
-    credential_id: str | None
     agent_type: str | None
 
     @property
@@ -274,12 +267,10 @@ def resolve_agent(
         agent_id=str(doc.get("id") or agent_id),
         name=str(doc.get("name") or agent_id),
         harness=str(doc.get("harness") or "claude-agent-sdk"),
-        source=doc.get("source") or doc.get("sourceUrl"),
         model=model_of(doc),
         gateway_type=(gateway or {}).get("type"),
         gateway_base_url=(gateway or {}).get("baseUrl"),
         gateway_completions_url=(gateway or {}).get("completionsUrl"),
-        credential_id=doc.get("credential_id"),
         agent_type=doc.get("type"),
     )
     logger.debug(
