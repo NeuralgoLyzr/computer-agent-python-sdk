@@ -38,7 +38,7 @@ the image, and the SRS guardrails CAS's harness applies run in the SDK.
   No verdict denies, unless the org policies' `fail_open` allows it (a 422 never fails open); org
   policies that cannot be read block the turn. Decisions are emitted as `policy_decision` events,
   never with content. A caller's own `policy_decider` replaces the tool gate; the input check always
-  runs. A streaming input is refused while any policy applies.
+  runs. A streamed (async-iterable) message is checked entry by entry before the engine starts.
 - **GAP mode** through `gap_dir` (`COMPUTERAGENT_GAP_DIR`): the agent is loaded from that directory's
   `agent.yaml`. The directory must exist and hold an `agent.yaml`.
 - `ResolvedAgent.rai_policy_id`, `.mcp_mode` and `.mcp_bindings`.

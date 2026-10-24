@@ -13,8 +13,9 @@ A port of CAS harness-server ``session.ts`` (``redactUserMessage`` /
   (``fail_open`` is False); otherwise the text goes through unchanged. A turn
   whose policies could not be resolved blocks.
 
-A streaming (async-iterable) message cannot be checked before the turn, so it
-is refused while any policy applies rather than sent on unchecked.
+A streamed (async-iterable) message is read entry by entry and every entry is
+checked, as CAS checks each message ``pushUserMessage`` receives; the engine is
+handed the checked, masked entries, so nothing unchecked reaches it.
 """
 
 from __future__ import annotations
@@ -35,10 +36,6 @@ logger = logging.getLogger("computeragent.policy.srs")
 DEFAULT_BLOCK_REPLY = "Your message was blocked by the content policy."
 
 _RANK = {"clean": 0, "redacted": 1, "blocked": 2, "error": 3}
-
-
-class StreamingInputNotCheckable(TypeError):
-    """An async-iterable message arrived while policies apply."""
 
 
 def blocked_no_verdict_reply(reason: str) -> str:
@@ -130,16 +127,23 @@ async def check_user_message(
     if not turn.policy_ids:
         return InputDecision(message=message, outcome="clean")
     if isinstance(message, AsyncIterable):
-        raise StreamingInputNotCheckable(
-            "a streaming (async-iterable) message cannot be checked by the RAI policies before "
-            "the turn starts; pass the message whole (a string, a message dict or a list)"
-        )
+        # The turn starts only after its input is read in full, so the entries
+        # are collected here and checked like a list of messages.
+        message = [entry async for entry in message]
 
     if isinstance(message, str):
         holder: dict[str, Any] = {"content": message}
         slots = _text_slots(holder)
     else:
-        holder = {"value": copy.deepcopy(message)}
+        value = copy.deepcopy(message)
+        if isinstance(value, list):
+            # A bare string entry is a user message (as the coordinator
+            # enqueues it), so it is checked like one.
+            value = [
+                {"role": "user", "content": entry} if isinstance(entry, str) else entry
+                for entry in value
+            ]
+        holder = {"value": value}
         slots = _text_slots(holder["value"])
     slots = [(container, key) for container, key in slots if container[key]]
     if not slots:
@@ -215,7 +219,6 @@ async def check_user_message(
 __all__ = [
     "DEFAULT_BLOCK_REPLY",
     "InputDecision",
-    "StreamingInputNotCheckable",
     "blocked_no_verdict_reply",
     "check_user_message",
 ]

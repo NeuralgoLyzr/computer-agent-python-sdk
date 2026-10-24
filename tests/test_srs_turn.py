@@ -265,12 +265,33 @@ async def test_a_callers_policy_decider_replaces_the_tool_gate_but_not_the_input
 
 
 @respx.mock
-async def test_streaming_input_is_refused_while_policies_apply(agent_doc):
+async def test_a_streamed_message_is_checked_before_the_engine_sees_it(agent_doc):
     org_policies()
+    srs = masking_srs()
+    engine = RecordingEngine()
 
     async def stream():
-        yield {"role": "user", "content": "hi"}
+        yield {"role": "user", "content": "mail a@b.com"}
 
-    async with build(agent_doc) as agent:
-        with pytest.raises(TypeError, match="streaming"):
-            await agent.chat(stream())
+    async with build(agent_doc, engine=engine) as agent:
+        await agent.chat(stream())
+
+    assert srs.call_count == 1
+    assert engine.messages[0]["content"] == "mail <EMAIL_1>"
+
+
+@respx.mock
+async def test_a_blocked_streamed_message_never_starts_the_engine(agent_doc):
+    org_policies()
+    masking_srs()
+    engine = RecordingEngine()
+
+    async def stream():
+        yield {"role": "user", "content": "fine"}
+        yield {"role": "user", "content": "BLOCKME"}
+
+    async with build(agent_doc, engine=engine) as agent:
+        result = await agent.chat(stream())
+
+    assert engine.starts == 0
+    assert result.messages[0].result == "nope"

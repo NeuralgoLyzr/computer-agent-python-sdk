@@ -15,7 +15,6 @@ import respx
 from computeragent.policy.srs_gate import TurnPolicy
 from computeragent.policy.srs_input import (
     DEFAULT_BLOCK_REPLY,
-    StreamingInputNotCheckable,
     check_user_message,
 )
 
@@ -231,17 +230,54 @@ async def test_the_worst_outcome_wins():
     assert decision.message["content"][1]["text"] == "w"
 
 
-async def test_streaming_input_is_refused_while_policies_apply():
+@respx.mock
+async def test_a_streamed_message_is_checked_entry_by_entry():
+    route = masking_srs()
+
+    async def stream():
+        yield {"role": "user", "content": "mail a@b.com"}
+        yield "and a@b.com"
+
+    decision = await check(stream())
+
+    assert route.call_count == 2
+    assert decision.message == [
+        {"role": "user", "content": "mail <EMAIL_ADDRESS_1>"},
+        {"role": "user", "content": "and <EMAIL_ADDRESS_1>"},
+    ]
+    assert decision.outcome == "redacted"
+
+
+@respx.mock
+async def test_one_blocked_entry_in_a_stream_blocks_the_turn():
+    masking_srs()
+
+    async def stream():
+        yield {"role": "user", "content": "fine"}
+        yield {"role": "user", "content": "BLOCKME"}
+
+    decision = await check(stream())
+
+    assert decision.blocked is True
+    assert decision.reply == "nope"
+
+
+@respx.mock
+async def test_bare_string_entries_in_a_list_are_checked():
+    route = masking_srs()
+
+    decision = await check(["a@b.com", {"role": "user", "content": "hi"}])
+
+    assert route.call_count == 2
+    assert decision.message[0] == {"role": "user", "content": "<EMAIL_ADDRESS_1>"}
+
+
+async def test_a_stream_is_left_unread_with_no_policies():
     async def stream():
         yield {"role": "user", "content": "hi"}
 
-    with pytest.raises(StreamingInputNotCheckable):
-        await check(stream())
+    message = stream()
+    decision = await check(message, TurnPolicy(policy_ids=(), fail_open=None, timeout_s=5))
 
-
-async def test_streaming_input_is_fine_with_no_policies():
-    async def stream():
-        yield {"role": "user", "content": "hi"}
-
-    decision = await check(stream(), TurnPolicy(policy_ids=(), fail_open=None, timeout_s=5))
     assert decision.outcome == "clean"
+    assert decision.message is message

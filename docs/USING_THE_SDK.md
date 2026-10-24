@@ -486,8 +486,8 @@ call per policy. Policy ids never come from the environment.
   slowest org policy's, else 5 s.
 - **Org policies cannot be read:** every check in the turn blocks.
 - **No policies anywhere:** no SRS call is made.
-- A **streaming** (async-iterable) message cannot be checked before the turn, so it is refused while
-  any policy applies.
+- A **streamed** (async-iterable) message is read entry by entry and every entry is checked before
+  the engine starts; one blocked entry blocks the turn.
 
 Every decision is emitted as a `policy_decision` telemetry event (input checks with
 `stage: "llm_input"`) carrying the outcome and the policy that acted — never the text.
@@ -574,7 +574,6 @@ turn, tool calls, the reply — so a failure localises itself.
 - **Only `native` gateways (or none).** Generic gateways are refused.
 - **Only two harnesses run in-process:** `claude-agent-sdk` and `gitagent`.
 - **Model calls inside a turn are not checked by the SDK**; see §9.
-- **Streaming input is refused while policies apply**; see §9.
 - **Concurrent `chat()`s on one instance are refused.** Run concurrent work as separate instances.
 - **A turn has no timeout and nothing retries.** Impose your own with `asyncio.wait_for`.
 - **`cancel()` is cooperative**, not a kill.
