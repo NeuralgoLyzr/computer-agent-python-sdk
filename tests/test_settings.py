@@ -43,6 +43,8 @@ def resolve(env, **kw):
         mcp_url=None,
         agent_api_url=None,
         srs_url=None,
+        telemetry_url=None,
+        events_url=None,
         gap_dir=None,
     )
     params.update(kw)
@@ -59,6 +61,8 @@ def test_every_setting_has_an_env_var():
         "mcp_url": "COMPUTERAGENT_MCP_URL",
         "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
         "srs_url": "COMPUTERAGENT_SRS_URL",
+        "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
+        "events_url": "COMPUTERAGENT_EVENTS_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
 
@@ -121,7 +125,7 @@ def test_every_missing_setting_is_reported_at_once():
 
     message = str(exc.value)
     for name, var in ENV_VARS.items():
-        if name == "gap_dir":
+        if name in ("gap_dir", "telemetry_url", "events_url"):
             assert name not in message
             continue
         assert f"{name} (or {var})" in message
@@ -203,3 +207,28 @@ def test_llm_url_argument_wins_and_loses_its_trailing_slash():
 def test_a_url_setting_must_be_http(bad):
     with pytest.raises(SettingsError, match="http\\(s\\) URLs: llm_url"):
         resolve({**FULL_ENV, "COMPUTERAGENT_LLM_URL": bad})
+
+
+def test_the_telemetry_urls_are_optional():
+    settings = resolve(FULL_ENV)
+
+    assert settings.telemetry_url is None
+    assert settings.events_url is None
+
+
+def test_the_telemetry_urls_come_from_their_env_vars():
+    settings = resolve(
+        {
+            **FULL_ENV,
+            "COMPUTERAGENT_TELEMETRY_URL": "http://egress/otlp/",
+            "COMPUTERAGENT_EVENTS_URL": "http://egress/ingest",
+        }
+    )
+
+    assert settings.telemetry_url == "http://egress/otlp"
+    assert settings.events_url == "http://egress/ingest"
+
+
+def test_an_optional_url_must_still_be_http_when_set():
+    with pytest.raises(SettingsError, match="events_url"):
+        resolve({**FULL_ENV, "COMPUTERAGENT_EVENTS_URL": "egress/ingest"})

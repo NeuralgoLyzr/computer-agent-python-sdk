@@ -32,11 +32,17 @@ ENV_VARS: dict[str, str] = {
     "mcp_url": "COMPUTERAGENT_MCP_URL",
     "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
     "srs_url": "COMPUTERAGENT_SRS_URL",
+    "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
+    "events_url": "COMPUTERAGENT_EVENTS_URL",
     "gap_dir": "COMPUTERAGENT_GAP_DIR",
 }
 
 #: Egress routes: required, and each must be an http(s) URL.
 URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url", "agent_api_url", "srs_url")
+
+#: Egress routes that may be unset (the feature is then off), but must be
+#: http(s) URLs when set.
+OPTIONAL_URL_SETTINGS: tuple[str, ...] = ("telemetry_url", "events_url")
 
 
 class SettingsError(AgentResolveError):
@@ -55,6 +61,10 @@ def _env(env: Mapping[str, str], name: str) -> str | None:
     return value if value and value.strip() else None
 
 
+def _optional_url(value: object) -> str | None:
+    return str(value).rstrip("/") if value is not None else None
+
+
 def _spelling(name: str) -> str:
     return f"{name} (or {ENV_VARS[name]})"
 
@@ -71,6 +81,8 @@ class Settings:
     mcp_url: str
     agent_api_url: str
     srs_url: str
+    telemetry_url: str | None
+    events_url: str | None
     gap_dir: str | Path | None
     _explicit_api_key: str | None
     _env: Mapping[str, str]
@@ -90,6 +102,7 @@ class Settings:
             f"Settings(agent_id={self.agent_id!r}, engine={self.engine!r}, "
             f"base_url={self.base_url!r}, llm_url={self.llm_url!r}, mcp_url={self.mcp_url!r}, "
             f"agent_api_url={self.agent_api_url!r}, srs_url={self.srs_url!r}, "
+            f"telemetry_url={self.telemetry_url!r}, events_url={self.events_url!r}, "
             f"gap_dir={self.gap_dir!r}, api_key=<hidden>)"
         )
 
@@ -104,6 +117,8 @@ def resolve_settings(
     mcp_url: str | None,
     agent_api_url: str | None,
     srs_url: str | None,
+    telemetry_url: str | None,
+    events_url: str | None,
     gap_dir: str | Path | None,
     env: Mapping[str, str] | None = None,
 ) -> Settings:
@@ -124,10 +139,12 @@ def resolve_settings(
         "mcp_url": mcp_url,
         "agent_api_url": agent_api_url,
         "srs_url": srs_url,
+        "telemetry_url": telemetry_url,
+        "events_url": events_url,
     }
     urls = {
         name: given_urls[name] if _given(given_urls[name]) else _env(source, name)
-        for name in URL_SETTINGS
+        for name in (*URL_SETTINGS, *OPTIONAL_URL_SETTINGS)
     }
     explicit_key = api_key if _given(api_key) else None
     resolved_gap_dir: str | Path | None = (
@@ -141,7 +158,7 @@ def resolve_settings(
             ("engine", resolved_engine),
             ("base_url", resolved_base_url),
             ("api_key", explicit_key or _env(source, "api_key")),
-            *urls.items(),
+            *((name, urls[name]) for name in URL_SETTINGS),
         )
         if value is None
     ]
@@ -150,7 +167,7 @@ def resolve_settings(
     malformed = [
         f"{_spelling(name)}={value!r}"
         for name, value in urls.items()
-        if not str(value).startswith(("http://", "https://"))
+        if value is not None and not str(value).startswith(("http://", "https://"))
     ]
     if malformed:
         raise SettingsError("settings must be http(s) URLs: " + ", ".join(malformed))
@@ -166,10 +183,19 @@ def resolve_settings(
         mcp_url=str(urls["mcp_url"]).rstrip("/"),
         agent_api_url=str(urls["agent_api_url"]).rstrip("/"),
         srs_url=str(urls["srs_url"]).rstrip("/"),
+        telemetry_url=_optional_url(urls["telemetry_url"]),
+        events_url=_optional_url(urls["events_url"]),
         gap_dir=resolved_gap_dir,
         _explicit_api_key=explicit_key,
         _env=source,
     )
 
 
-__all__ = ["ENV_VARS", "URL_SETTINGS", "Settings", "SettingsError", "resolve_settings"]
+__all__ = [
+    "ENV_VARS",
+    "OPTIONAL_URL_SETTINGS",
+    "URL_SETTINGS",
+    "Settings",
+    "SettingsError",
+    "resolve_settings",
+]

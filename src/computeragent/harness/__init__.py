@@ -76,6 +76,7 @@ from .gateway_envs import (
 from .guardrails import SrsTurnGuard
 from .mcp import build_mcp_servers
 from .settings import SettingsError, resolve_settings
+from .telemetry import build_pipeline
 from .usage import UsageRollup
 
 logger = logging.getLogger("computeragent.harness")
@@ -259,6 +260,10 @@ class ComputerAgent:
         # check is made against SRS at `srs_url`.
         agent_api_url: str | None = None,
         srs_url: str | None = None,
+        # Optional egress routes for telemetry: OTLP to `telemetry_url`, the
+        # AgentOS dashboard events to `{events_url}/events`. Unset is off.
+        telemetry_url: str | None = None,
+        events_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
@@ -288,6 +293,8 @@ class ComputerAgent:
             mcp_url=mcp_url,
             agent_api_url=agent_api_url,
             srs_url=srs_url,
+            telemetry_url=telemetry_url,
+            events_url=events_url,
             gap_dir=gap_dir,
         )
         engine = self._settings.engine
@@ -410,6 +417,17 @@ class ComputerAgent:
             gate=self._srs_gate,
         )
 
+        # 7. Telemetry through its egress routes, unless the caller brought a
+        #    pipeline of their own. One this agent builds, it also closes.
+        self._owned_pipeline: Pipeline | None = None
+        if telemetry_pipeline is None:
+            self._owned_pipeline = build_pipeline(
+                telemetry_url=self._settings.telemetry_url,
+                events_url=self._settings.events_url,
+                api_key=self._settings.api_key,
+            )
+            telemetry_pipeline = self._owned_pipeline
+
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
             substrate=LocalSubstrate(),
@@ -439,7 +457,13 @@ class ComputerAgent:
 
     async def dispose(self) -> None:
         """Tear down the workspace and flush telemetry."""
-        await self._coordinator.dispose()
+        try:
+            await self._coordinator.dispose()
+        finally:
+            if self._owned_pipeline is not None:
+                with suppress(Exception):
+                    await self._owned_pipeline.aclose()
+                self._owned_pipeline = None
 
     def chat(self, message: ChatInput) -> ChatHandle:
         """Start one chat turn. Returns immediately; iterate or await the
