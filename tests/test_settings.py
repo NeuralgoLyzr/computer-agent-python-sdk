@@ -27,12 +27,19 @@ FULL_ENV = {
     "COMPUTERAGENT_BASE_URL": BASE,
     "LYZR_API_KEY": "env-key",
     "COMPUTERAGENT_LLM_URL": LLM_URL,
+    "COMPUTERAGENT_MCP_URL": "http://egress.internal/mcp",
 }
 
 
 def resolve(env, **kw):
     params = dict(
-        agent_id=None, engine=None, base_url=None, api_key=None, llm_url=None, gap_dir=None
+        agent_id=None,
+        engine=None,
+        base_url=None,
+        api_key=None,
+        llm_url=None,
+        mcp_url=None,
+        gap_dir=None,
     )
     params.update(kw)
     return resolve_settings(env=env, **params)
@@ -45,6 +52,7 @@ def test_every_setting_has_an_env_var():
         "base_url": "COMPUTERAGENT_BASE_URL",
         "api_key": "LYZR_API_KEY",
         "llm_url": "COMPUTERAGENT_LLM_URL",
+        "mcp_url": "COMPUTERAGENT_MCP_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
 
@@ -57,6 +65,7 @@ def test_env_vars_alone_are_enough():
     assert settings.base_url == BASE
     assert settings.api_key() == "env-key"
     assert settings.llm_url == LLM_URL
+    assert settings.mcp_url == "http://egress.internal/mcp"
     assert settings.gap_dir is None
 
 

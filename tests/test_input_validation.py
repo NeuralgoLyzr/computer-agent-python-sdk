@@ -24,6 +24,7 @@ BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_test"
 LLM_URL = "http://egress.internal/llm"
+MCP_URL = "http://egress.internal/mcp"
 
 
 def build(agent_doc, **kw):
@@ -34,6 +35,7 @@ def build(agent_doc, **kw):
         "api_key": KEY,
         "engine": "claude-agent-sdk",
         "llm_url": LLM_URL,
+        "mcp_url": MCP_URL,
     }
     params.update(kw)
     return ComputerAgent(**params)
@@ -118,7 +120,14 @@ def test_a_malformed_llm_url_is_refused_before_any_request(bad):
     """Every model call is sent to it, so garbage would otherwise fail only
     when the engine tried to reach it mid-run."""
     with pytest.raises(SettingsError, match="llm_url"):
-        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent", llm_url=bad)
+        ComputerAgent(
+            agent_id=AGENT_ID,
+            base_url=BASE,
+            api_key=KEY,
+            engine="gitagent",
+            llm_url=bad,
+            mcp_url=MCP_URL,
+        )
 
 
 # ── things that are not names ────────────────────────────────────────────────

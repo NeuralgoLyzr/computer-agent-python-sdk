@@ -63,7 +63,14 @@ from .errors import (
     UnknownSessionStoreError,
     UnknownSubstrateError,
 )
-from .gateway_envs import GatewayConfigError, build_gateway_envs, build_options, merge_envs
+from .gateway_envs import (
+    ANTHROPIC_SHAPED,
+    GatewayConfigError,
+    build_gateway_envs,
+    build_options,
+    merge_envs,
+)
+from .mcp import build_mcp_servers
 from .settings import SettingsError, resolve_settings
 from .usage import UsageRollup
 
@@ -196,6 +203,25 @@ def _validate_gap_dir(gap_dir: str | Path) -> Path:
     return gap_dir
 
 
+def _refuse_direct_mcp_servers(gap_dir: Path) -> None:
+    """Refuse agent.yaml MCP servers that name their own URL.
+
+    Every MCP call goes through ``mcp_url``. A server in ``agent.yaml`` is
+    reached at whatever URL it names, around the egress proxy, so it is
+    refused at construction rather than connected at the first turn.
+    """
+    from ..identity.gap import _load_yaml
+
+    manifest = _load_yaml(gap_dir / "agent.yaml")
+    servers = manifest.get("mcp_servers") if isinstance(manifest, dict) else None
+    if isinstance(servers, dict) and servers:
+        raise UnsupportedAgentError(
+            f"{gap_dir / 'agent.yaml'}: mcp_servers ({', '.join(map(str, servers))}) connect to "
+            "their own URLs, around the egress proxy. Bind them to the agent in AgentOS so they "
+            "are served through mcp_url."
+        )
+
+
 class ComputerAgent:
     """Run an AgentOS-registered agent locally.
 
@@ -221,6 +247,9 @@ class ComputerAgent:
         engine: str | EngineDriver | None = None,
         # The egress route every model call is sent to.
         llm_url: str | None = None,
+        # The egress route for MCP: each server bound to the agent in AgentOS
+        # becomes `{mcp_url}/{server_id}`.
+        mcp_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
@@ -247,6 +276,7 @@ class ComputerAgent:
             base_url=base_url,
             api_key=api_key,
             llm_url=llm_url,
+            mcp_url=mcp_url,
             gap_dir=gap_dir,
         )
         engine = self._settings.engine
@@ -299,6 +329,7 @@ class ComputerAgent:
 
         if gap_dir is not None:
             workspace = _validate_gap_dir(gap_dir)
+            _refuse_direct_mcp_servers(workspace)
             identity_loader = resolve_identity_loader("gap")
         else:
             workspace = Path.cwd()
@@ -324,6 +355,15 @@ class ComputerAgent:
                 engine_name,
             )
 
+        # 5. MCP servers bound to the agent, all through mcp_url.
+        mcp_servers, mcp_allowed_tools = build_mcp_servers(
+            self.agent.mcp_bindings,
+            mcp_mode=self.agent.mcp_mode,
+            mcp_url=self._settings.mcp_url,
+            api_key=self._settings.api_key(),
+            anthropic_shaped=engine_name in ANTHROPIC_SHAPED,
+        )
+
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
             substrate=LocalSubstrate(),
@@ -340,6 +380,8 @@ class ComputerAgent:
             budget_max_usd=budget_max_usd,
             telemetry_pipeline=telemetry_pipeline,
             options_overlay=merged_options,
+            mcp_servers=mcp_servers,
+            mcp_allowed_tools=mcp_allowed_tools,
         )
 
     async def __aenter__(self) -> ComputerAgent:

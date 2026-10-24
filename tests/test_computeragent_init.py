@@ -25,6 +25,7 @@ BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
+MCP_URL = "http://egress.internal/mcp"
 
 
 class FakeEngine:
@@ -60,6 +61,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "base_url": BASE,
         "api_key": KEY,
         "llm_url": LLM_URL,
+        "mcp_url": MCP_URL,
         "engine": FakeEngine(),
     }
     params.update(kwargs)
@@ -114,7 +116,9 @@ def test_engine_is_required():
     gateway-env branch is built, so a document change must not be able to
     re-shape ANTHROPIC_BASE_URL under a caller who never asked."""
     with pytest.raises(SettingsError, match="engine"):
-        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_url=LLM_URL)
+        ComputerAgent(
+            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_url=LLM_URL, mcp_url=MCP_URL
+        )
 
 
 @respx.mock
@@ -126,6 +130,7 @@ def test_a_named_engine_resolves_to_the_registered_driver(agent_doc):
         base_url=BASE,
         api_key=KEY,
         llm_url=LLM_URL,
+        mcp_url=MCP_URL,
         engine="claude-agent-sdk",
     )
 
@@ -144,6 +149,7 @@ def test_an_unregistered_engine_name_is_refused(agent_doc):
             base_url=BASE,
             api_key=KEY,
             llm_url=LLM_URL,
+            mcp_url=MCP_URL,
             engine="langgraph",
         )
 
@@ -154,7 +160,12 @@ def test_an_engine_that_differs_from_the_harness_is_logged(agent_doc, caplog):
 
     with caplog.at_level("WARNING", logger="computeragent.harness"):
         ComputerAgent(
-            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent", llm_url=LLM_URL
+            agent_id=AGENT_ID,
+            base_url=BASE,
+            api_key=KEY,
+            engine="gitagent",
+            llm_url=LLM_URL,
+            mcp_url=MCP_URL,
         )
 
     assert any("overrides agent" in r.getMessage() for r in caplog.records)
@@ -166,7 +177,12 @@ def test_engine_can_be_named(agent_doc):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     agent = ComputerAgent(
-        agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent", llm_url=LLM_URL
+        agent_id=AGENT_ID,
+        base_url=BASE,
+        api_key=KEY,
+        engine="gitagent",
+        llm_url=LLM_URL,
+        mcp_url=MCP_URL,
     )
 
     assert agent._coordinator._engine.name == "gitagent"  # type: ignore[attr-defined]

@@ -29,11 +29,12 @@ ENV_VARS: dict[str, str] = {
     "base_url": "COMPUTERAGENT_BASE_URL",
     "api_key": "LYZR_API_KEY",
     "llm_url": "COMPUTERAGENT_LLM_URL",
+    "mcp_url": "COMPUTERAGENT_MCP_URL",
     "gap_dir": "COMPUTERAGENT_GAP_DIR",
 }
 
 #: Egress routes: required, and each must be an http(s) URL.
-URL_SETTINGS: tuple[str, ...] = ("llm_url",)
+URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url")
 
 
 class SettingsError(AgentResolveError):
@@ -65,6 +66,7 @@ class Settings:
     engine: str | EngineDriver
     base_url: str
     llm_url: str
+    mcp_url: str
     gap_dir: str | Path | None
     _explicit_api_key: str | None
     _env: Mapping[str, str]
@@ -82,7 +84,7 @@ class Settings:
     def __repr__(self) -> str:
         return (
             f"Settings(agent_id={self.agent_id!r}, engine={self.engine!r}, "
-            f"base_url={self.base_url!r}, llm_url={self.llm_url!r}, "
+            f"base_url={self.base_url!r}, llm_url={self.llm_url!r}, mcp_url={self.mcp_url!r}, "
             f"gap_dir={self.gap_dir!r}, api_key=<hidden>)"
         )
 
@@ -94,6 +96,7 @@ def resolve_settings(
     base_url: str | None,
     api_key: str | None,
     llm_url: str | None,
+    mcp_url: str | None,
     gap_dir: str | Path | None,
     env: Mapping[str, str] | None = None,
 ) -> Settings:
@@ -109,7 +112,7 @@ def resolve_settings(
         engine if _given(engine) else _env(source, "engine")
     )
     resolved_base_url = base_url if _given(base_url) else _env(source, "base_url")
-    given_urls = {"llm_url": llm_url}
+    given_urls = {"llm_url": llm_url, "mcp_url": mcp_url}
     urls = {
         name: given_urls[name] if _given(given_urls[name]) else _env(source, name)
         for name in URL_SETTINGS
@@ -148,6 +151,7 @@ def resolve_settings(
         engine=resolved_engine,
         base_url=resolved_base_url,
         llm_url=str(urls["llm_url"]).rstrip("/"),
+        mcp_url=str(urls["mcp_url"]).rstrip("/"),
         gap_dir=resolved_gap_dir,
         _explicit_api_key=explicit_key,
         _env=source,

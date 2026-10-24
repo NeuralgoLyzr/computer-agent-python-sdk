@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from .mcp import DEFAULT_MCP_MODE, McpBinding, McpBindingError, parse_bindings
+
 logger = logging.getLogger("computeragent.agentos_agent")
 
 # Engines this SDK can actually run in-process. An agent bound to anything else
@@ -72,6 +74,11 @@ class ResolvedAgent:
     #: reconstructing the path client-side.
     gateway_completions_url: str | None
     agent_type: str | None
+    #: Who runs the MCP tool loop: ``"engine"`` attaches the bound servers to
+    #: the engine, anything else leaves the tools to Studio.
+    mcp_mode: str = DEFAULT_MCP_MODE
+    #: MCP servers bound to the agent, as AgentOS resolved them for the caller.
+    mcp_bindings: tuple[McpBinding, ...] = ()
 
     @property
     def has_native_gateway(self) -> bool:
@@ -173,14 +180,6 @@ def _require_supported(doc: dict[str, Any], agent_id: str) -> None:
                 "run mode implements native gateways (and no gateway at all), not generic ones."
             )
 
-    mcp_servers = doc.get("mcp_servers")
-    if isinstance(mcp_servers, list) and mcp_servers:
-        raise UnsupportedAgentError(
-            f"agent {agent_id}: mcp_servers is non-empty ({len(mcp_servers)} bound) and MCP is not "
-            "supported in this run mode. The servers would be silently dropped, so the run is "
-            "refused instead."
-        )
-
     if doc.get("orchestration") is not None:
         raise UnsupportedAgentError(
             f"agent {agent_id}: orchestration is set and sub-agent fan-out is not supported in this "
@@ -262,6 +261,12 @@ def resolve_agent(
     _require_supported(doc, agent_id)
     _require_consistent_gateway(doc, agent_id)
 
+    try:
+        mcp_bindings = parse_bindings(doc.get("mcp_servers"))
+    except McpBindingError as exc:
+        raise UnsupportedAgentError(f"agent {agent_id}: {exc}") from None
+    mcp_mode = doc.get("mcp_mode")
+
     gateway = doc.get("model_gateway") if isinstance(doc.get("model_gateway"), dict) else None
     resolved = ResolvedAgent(
         agent_id=str(doc.get("id") or agent_id),
@@ -272,6 +277,8 @@ def resolve_agent(
         gateway_base_url=(gateway or {}).get("baseUrl"),
         gateway_completions_url=(gateway or {}).get("completionsUrl"),
         agent_type=doc.get("type"),
+        mcp_mode=mcp_mode if isinstance(mcp_mode, str) and mcp_mode else DEFAULT_MCP_MODE,
+        mcp_bindings=mcp_bindings,
     )
     logger.debug(
         "resolved agent %s name=%r harness=%s gateway=%s model=%s",

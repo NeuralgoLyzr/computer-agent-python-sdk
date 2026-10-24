@@ -162,11 +162,26 @@ def test_refuses_generic_gateway(agent_doc):
 
 
 @respx.mock
-def test_refuses_bound_mcp_servers(agent_doc):
+def test_bound_mcp_servers_are_resolved(agent_doc):
+    agent_doc["mcp_servers"] = [
+        {"server_id": "srv_1", "tool_name": "jira", "action_names": ["search"]}
+    ]
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    agent = _resolve()
+
+    assert agent.mcp_mode == "engine"
+    assert [(b.server_id, b.tool_name, b.action_names) for b in agent.mcp_bindings] == [
+        ("srv_1", "jira", ("search",))
+    ]
+
+
+@respx.mock
+def test_a_binding_without_a_tool_name_is_refused_by_index(agent_doc):
     agent_doc["mcp_servers"] = [{"server_id": "srv_1", "action_names": ["x"]}]
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    with pytest.raises(UnsupportedAgentError, match="mcp_servers"):
+    with pytest.raises(UnsupportedAgentError, match=r"mcp_servers\[0\].*tool_name"):
         _resolve()
 
 

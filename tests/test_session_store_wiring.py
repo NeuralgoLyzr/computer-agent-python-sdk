@@ -53,6 +53,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "api_key": "ags_test",
         "engine": "claude-agent-sdk",
         "llm_url": "http://egress.internal/llm",
+        "mcp_url": "http://egress.internal/mcp",
     }
     params.update(kwargs)
     return ComputerAgent(**params)

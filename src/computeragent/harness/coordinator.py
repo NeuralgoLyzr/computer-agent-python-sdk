@@ -92,6 +92,11 @@ class HarnessCoordinator:
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
+        # MCP servers bound to the agent, and the `allowed_tools` grants for
+        # them. Merged INTO what the loader resolved (a GAP agent's in-process
+        # `gap_tools` server stays), before the caller overlay.
+        mcp_servers: dict[str, Any] | None = None,
+        mcp_allowed_tools: list[str] | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
@@ -120,6 +125,8 @@ class HarnessCoordinator:
         # / ``model=...``. Layered on top of whatever the identity loader
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
+        self._mcp_servers: dict[str, Any] = dict(mcp_servers or {})
+        self._mcp_allowed_tools: list[str] = list(mcp_allowed_tools or [])
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -175,6 +182,17 @@ class HarnessCoordinator:
             target_engine=self._engine.name,
             workspace_path=self._workspace_path,
         )
+        # Add the bound MCP servers to the loader's own, keeping both.
+        if self._mcp_servers:
+            from dataclasses import replace
+
+            opts = dict(loaded.options or {})
+            opts["mcp_servers"] = {**dict(opts.get("mcp_servers") or {}), **self._mcp_servers}
+            if self._mcp_allowed_tools:
+                allowed = list(opts.get("allowed_tools") or [])
+                allowed.extend(t for t in self._mcp_allowed_tools if t not in allowed)
+                opts["allowed_tools"] = allowed
+            loaded = replace(loaded, options=opts)
         # Overlay caller-supplied options (from ComputerAgent kwargs) on
         # top of whatever the loader resolved. Caller intent wins.
         if self._options_overlay:
