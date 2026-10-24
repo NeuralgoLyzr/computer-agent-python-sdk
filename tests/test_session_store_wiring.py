@@ -52,7 +52,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "base_url": BASE,
         "api_key": "ags_test",
         "engine": "claude-agent-sdk",
-        "llm_proxy_url": "http://127.0.0.1:8786",
+        "llm_url": "http://egress.internal/llm",
     }
     params.update(kwargs)
     return ComputerAgent(**params)

@@ -17,7 +17,6 @@ import respx
 from computeragent.harness import ComputerAgent
 from computeragent.harness.agentos_agent import AgentResolveError
 from computeragent.harness.errors import UnknownEngineError
-from computeragent.harness.gateway_envs import GatewayConfigError
 from computeragent.harness.settings import SettingsError
 from computeragent.protocol_types import EngineCapabilities, EngineContext, EngineEvent
 
@@ -25,7 +24,7 @@ AGENT_ID = "6aa93f1b3817a13d3103d2c1"
 BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
-PROXY = "http://127.0.0.1:8786"
+LLM_URL = "http://egress.internal/llm"
 
 
 class FakeEngine:
@@ -60,7 +59,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "agent_id": AGENT_ID,
         "base_url": BASE,
         "api_key": KEY,
-        "llm_proxy_url": PROXY,
+        "llm_url": LLM_URL,
         "engine": FakeEngine(),
     }
     params.update(kwargs)
@@ -93,12 +92,18 @@ def test_resolution_failure_surfaces_at_construction(agent_doc):
         )
 
 
-@respx.mock
-def test_missing_proxy_is_refused_at_construction(agent_doc):
-    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-
-    with pytest.raises(GatewayConfigError, match="llm_proxy_url"):
+def test_missing_llm_url_is_refused_at_construction():
+    with pytest.raises(SettingsError, match="llm_url"):
         ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine=FakeEngine())
+
+
+@respx.mock
+def test_the_agent_documents_gateway_url_is_not_used(agent_doc):
+    """Model calls go to llm_url only, never to the document's gateway."""
+    agent = build(agent_doc)
+    envs = agent._coordinator._envs  # type: ignore[attr-defined]
+
+    assert agent_doc["model_gateway"]["baseUrl"] not in "".join(envs.values())
 
 
 # ── engine selection ─────────────────────────────────────────────────────────
@@ -109,7 +114,7 @@ def test_engine_is_required():
     gateway-env branch is built, so a document change must not be able to
     re-shape ANTHROPIC_BASE_URL under a caller who never asked."""
     with pytest.raises(SettingsError, match="engine"):
-        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_proxy_url=PROXY)
+        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, llm_url=LLM_URL)
 
 
 @respx.mock
@@ -120,7 +125,7 @@ def test_a_named_engine_resolves_to_the_registered_driver(agent_doc):
         agent_id=AGENT_ID,
         base_url=BASE,
         api_key=KEY,
-        llm_proxy_url=PROXY,
+        llm_url=LLM_URL,
         engine="claude-agent-sdk",
     )
 
@@ -138,7 +143,7 @@ def test_an_unregistered_engine_name_is_refused(agent_doc):
             agent_id=AGENT_ID,
             base_url=BASE,
             api_key=KEY,
-            llm_proxy_url=PROXY,
+            llm_url=LLM_URL,
             engine="langgraph",
         )
 
@@ -148,18 +153,21 @@ def test_an_engine_that_differs_from_the_harness_is_logged(agent_doc, caplog):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     with caplog.at_level("WARNING", logger="computeragent.harness"):
-        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent")
+        ComputerAgent(
+            agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent", llm_url=LLM_URL
+        )
 
     assert any("overrides agent" in r.getMessage() for r in caplog.records)
 
 
 @respx.mock
 def test_engine_can_be_named(agent_doc):
-    """A gitagent engine needs no proxy, so this also pins that the env branch
-    follows the ENGINE rather than the agent's declared harness."""
+    """The engine follows the caller, not the agent's declared harness."""
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    agent = ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent")
+    agent = ComputerAgent(
+        agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent", llm_url=LLM_URL
+    )
 
     assert agent._coordinator._engine.name == "gitagent"  # type: ignore[attr-defined]
 
@@ -221,7 +229,7 @@ def test_gateway_envs_reach_the_coordinator(agent_doc):
     assert envs["ANTHROPIC_API_KEY"] == KEY
     assert envs["LYZR_API_KEY"] == KEY
     assert envs["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
-    assert envs["ANTHROPIC_BASE_URL"].startswith(f"{PROXY}/up/")
+    assert envs["ANTHROPIC_BASE_URL"] == LLM_URL
 
 
 @respx.mock

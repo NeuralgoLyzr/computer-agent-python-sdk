@@ -17,13 +17,13 @@ import respx
 from computeragent.harness import ComputerAgent
 from computeragent.harness.agentos_agent import AgentResolveError, api_base
 from computeragent.harness.errors import UnknownEngineError, UnknownSessionStoreError
-from computeragent.harness.gateway_envs import GatewayConfigError
+from computeragent.harness.settings import SettingsError
 
 AGENT_ID = "6aa93f1b3817a13d3103d2c1"
 BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_test"
-PROXY = "http://127.0.0.1:8786"
+LLM_URL = "http://egress.internal/llm"
 
 
 def build(agent_doc, **kw):
@@ -33,7 +33,7 @@ def build(agent_doc, **kw):
         "base_url": BASE,
         "api_key": KEY,
         "engine": "claude-agent-sdk",
-        "llm_proxy_url": PROXY,
+        "llm_url": LLM_URL,
     }
     params.update(kw)
     return ComputerAgent(**params)
@@ -110,15 +110,15 @@ def test_gap_dir_of_the_wrong_type_is_refused_at_construction(agent_doc):
         build(agent_doc, gap_dir=42)
 
 
-# ── llm_proxy_url ────────────────────────────────────────────────────────────
+# ── llm_url ──────────────────────────────────────────────────────────────────
 
 
-@respx.mock
-def test_a_malformed_proxy_url_is_refused(agent_doc):
-    """It is concatenated into ANTHROPIC_BASE_URL, so garbage used to be
-    accepted silently and fail only when the engine tried to reach it."""
-    with pytest.raises(GatewayConfigError, match="http\\(s\\) URL"):
-        build(agent_doc, llm_proxy_url="not-a-url")
+@pytest.mark.parametrize("bad", ["not-a-url", "egress.internal/llm", "ftp://egress/llm"])
+def test_a_malformed_llm_url_is_refused_before_any_request(bad):
+    """Every model call is sent to it, so garbage would otherwise fail only
+    when the engine tried to reach it mid-run."""
+    with pytest.raises(SettingsError, match="llm_url"):
+        ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine="gitagent", llm_url=bad)
 
 
 # ── things that are not names ────────────────────────────────────────────────

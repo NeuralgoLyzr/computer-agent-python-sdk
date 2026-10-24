@@ -19,18 +19,21 @@ from computeragent.harness.settings import ENV_VARS, SettingsError, resolve_sett
 AGENT_ID = "6aa93f1b3817a13d3103d2c1"
 BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
-PROXY = "http://127.0.0.1:8786"
+LLM_URL = "http://egress.internal/llm"
 
 FULL_ENV = {
     "COMPUTERAGENT_AGENT_ID": AGENT_ID,
     "COMPUTERAGENT_ENGINE": "claude-agent-sdk",
     "COMPUTERAGENT_BASE_URL": BASE,
     "LYZR_API_KEY": "env-key",
+    "COMPUTERAGENT_LLM_URL": LLM_URL,
 }
 
 
 def resolve(env, **kw):
-    params = dict(agent_id=None, engine=None, base_url=None, api_key=None, gap_dir=None)
+    params = dict(
+        agent_id=None, engine=None, base_url=None, api_key=None, llm_url=None, gap_dir=None
+    )
     params.update(kw)
     return resolve_settings(env=env, **params)
 
@@ -41,6 +44,7 @@ def test_every_setting_has_an_env_var():
         "engine": "COMPUTERAGENT_ENGINE",
         "base_url": "COMPUTERAGENT_BASE_URL",
         "api_key": "LYZR_API_KEY",
+        "llm_url": "COMPUTERAGENT_LLM_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
 
@@ -52,6 +56,7 @@ def test_env_vars_alone_are_enough():
     assert settings.engine == "claude-agent-sdk"
     assert settings.base_url == BASE
     assert settings.api_key() == "env-key"
+    assert settings.llm_url == LLM_URL
     assert settings.gap_dir is None
 
 
@@ -146,7 +151,7 @@ def test_computeragent_builds_from_env_vars_alone(agent_doc, monkeypatch):
         monkeypatch.setenv(name, value)
     route = respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    agent = ComputerAgent(llm_proxy_url=PROXY)
+    agent = ComputerAgent()
 
     assert agent.agent.agent_id == AGENT_ID
     assert route.calls.last.request.headers["x-api-key"] == "env-key"
@@ -161,7 +166,7 @@ def test_computeragent_gap_dir_from_env(agent_doc, monkeypatch, tmp_path):
     monkeypatch.setenv("COMPUTERAGENT_GAP_DIR", str(tmp_path))
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    agent = ComputerAgent(llm_proxy_url=PROXY)
+    agent = ComputerAgent()
 
     assert agent._coordinator._source == Path(tmp_path)  # type: ignore[attr-defined]
 
@@ -169,3 +174,15 @@ def test_computeragent_gap_dir_from_env(agent_doc, monkeypatch, tmp_path):
 def test_computeragent_reports_missing_settings_before_any_request():
     with pytest.raises(SettingsError, match="agent_id"):
         ComputerAgent()
+
+
+def test_llm_url_argument_wins_and_loses_its_trailing_slash():
+    settings = resolve(FULL_ENV, llm_url="https://other/llm/")
+
+    assert settings.llm_url == "https://other/llm"
+
+
+@pytest.mark.parametrize("bad", ["egress/llm", "ftp://egress/llm"])
+def test_a_url_setting_must_be_http(bad):
+    with pytest.raises(SettingsError, match="http\\(s\\) URLs: llm_url"):
+        resolve({**FULL_ENV, "COMPUTERAGENT_LLM_URL": bad})

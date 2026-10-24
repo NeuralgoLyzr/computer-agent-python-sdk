@@ -7,7 +7,8 @@ One run mode: name an agent registered in AgentOS, and run it **locally**::
         base_url="http://localhost:8788/agentos/api",
         agent_id="6aa93f1b3817a13d3103d2c1",
         api_key="<lyzr workspace key>",
-        llm_proxy_url="http://127.0.0.1:8786",
+        engine="claude-agent-sdk",
+        llm_url="http://egress/llm",
     ) as agent:
         result = await agent.chat("List the files in your working directory.")
 
@@ -21,9 +22,9 @@ the process's working directory (``options={"cwd": ...}`` overrides it), and the
 agent is defined by the caller's ``options``. With ``gap_dir`` set, the SDK runs
 in GAP mode instead and loads the agent from that directory's ``agent.yaml``.
 
+Every model call goes to ``llm_url``, the egress route for model traffic.
 Everything beyond the required arguments is an override for something the agent
-document already answers. ``llm_proxy_url`` is needed only for an
-Anthropic-shaped engine against a native (OpenAI-shaped) gateway.
+document already answers.
 """
 
 from __future__ import annotations
@@ -218,11 +219,9 @@ class ComputerAgent:
         # document change could silently re-shape ANTHROPIC_BASE_URL and the
         # model string under a caller who never asked for either.
         engine: str | EngineDriver | None = None,
+        # The egress route every model call is sent to.
+        llm_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
-        # The Anthropic-to-OpenAI translating proxy. Required when an
-        # Anthropic-shaped engine runs against a native (OpenAI-shaped)
-        # gateway, and unused otherwise — see `gateway_envs`.
-        llm_proxy_url: str | None = None,
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
         gap_dir: str | Path | None = None,
@@ -243,7 +242,12 @@ class ComputerAgent:
     ) -> None:
         # 0. Every setting from its argument or its environment variable.
         self._settings = resolve_settings(
-            agent_id=agent_id, engine=engine, base_url=base_url, api_key=api_key, gap_dir=gap_dir
+            agent_id=agent_id,
+            engine=engine,
+            base_url=base_url,
+            api_key=api_key,
+            llm_url=llm_url,
+            gap_dir=gap_dir,
         )
         engine = self._settings.engine
         gap_dir = self._settings.gap_dir
@@ -269,19 +273,15 @@ class ComputerAgent:
         # changes which gateway-env branch is built.
         if engine_name != self.agent.harness:
             logger.warning(
-                "engine=%r overrides agent %s harness=%r; gateway envs follow the ENGINE",
+                "engine=%r overrides agent %s harness=%r; the model string follows the ENGINE",
                 engine_name,
                 self.agent.agent_id,
                 self.agent.harness,
             )
 
-        # 3. Where the model calls go. Raises here, naming the missing
-        #    parameter, rather than surfacing as a 405 mid-run.
+        # 3. Where the model calls go: always llm_url.
         gateway_envs = build_gateway_envs(
-            self.agent,
-            engine_name=engine_name,
-            api_key=self._settings.api_key(),
-            llm_proxy_url=llm_proxy_url,
+            api_key=self._settings.api_key(), llm_url=self._settings.llm_url
         )
         merged_envs = merge_envs(envs, gateway_envs)
         merged_options = build_options(self.agent, engine_name=engine_name, caller_options=options)
