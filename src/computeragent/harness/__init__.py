@@ -342,9 +342,7 @@ class ComputerAgent:
             )
 
         # 3. Where the model calls go: always llm_url.
-        gateway_envs = build_gateway_envs(
-            api_key=self._settings.api_key(), llm_url=self._settings.llm_url
-        )
+        gateway_envs = build_gateway_envs(llm_url=self._settings.llm_url)
         merged_envs = merge_envs(envs, gateway_envs)
         merged_options = build_options(self.agent, engine_name=engine_name, caller_options=options)
         # `budget_max_usd` used to be carried to the engine context and read by
@@ -459,6 +457,9 @@ class ComputerAgent:
             mcp_allowed_tools=mcp_allowed_tools,
             turn_guard=turn_guard,
             forward_cli=engine_name == "claude-agent-sdk",
+            # The key is read at every turn: the engine's key variables and
+            # the bound MCP servers' x-api-key follow it.
+            api_key=self._settings.api_key,
         )
 
     async def __aenter__(self) -> ComputerAgent:

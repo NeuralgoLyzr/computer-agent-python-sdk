@@ -134,6 +134,9 @@ class HarnessCoordinator:
         # through a loopback forwarder (see `egress_forwarder`), so they carry
         # the newest sandbox token and their answers are observed.
         forward_cli: bool = False,
+        # Read at every turn (and at boot): the engine's ANTHROPIC_API_KEY /
+        # OPENAI_API_KEY / LYZR_API_KEY and the bound MCP servers' x-api-key.
+        api_key: Callable[[], str] | None = None,
     ) -> None:
         self._engine = engine
         self._substrate = substrate
@@ -162,6 +165,7 @@ class HarnessCoordinator:
         self._mcp_allowed_tools: list[str] = list(mcp_allowed_tools or [])
         self._turn_guard = turn_guard
         self._forward_cli = forward_cli
+        self._api_key = api_key
         self._forwarder: Any = None
 
         # Substrate state — booted lazily on first chat.
@@ -211,7 +215,9 @@ class HarnessCoordinator:
             )
         if self._substrate_handle is not None:
             return
-        self._substrate_handle = await self._substrate.boot(source=self._source, envs=self._envs)
+        self._substrate_handle = await self._substrate.boot(
+            source=self._source, envs=self._turn_envs()
+        )
         self._workspace_path = self._substrate_handle.workspace_path
         loaded = await self._identity_loader.load(
             source=self._source,
@@ -325,23 +331,55 @@ class HarnessCoordinator:
 
     # ── one chat turn ──────────────────────────────────────────────────────
 
+    def _turn_envs(self) -> dict[str, str]:
+        """The static envs with this turn's key variables over them."""
+        if self._api_key is None:
+            return self._envs
+        from .gateway_envs import key_envs
+
+        return {**self._envs, **key_envs(self._api_key())}
+
+    def _turn_options(self, key: str | None) -> Any:
+        """The manifest options with this turn's key on the bound MCP servers.
+        A server the loader or the caller supplied is left as it is."""
+        options = self._manifest.options
+        if key is None or not isinstance(options, dict) or not self._mcp_servers:
+            return options
+        servers = options.get("mcp_servers")
+        if not isinstance(servers, dict):
+            return options
+        updated = dict(servers)
+        for name, bound in self._mcp_servers.items():
+            server = updated.get(name)
+            if isinstance(server, dict) and server.get("url") == bound.get("url"):
+                updated[name] = {
+                    **server,
+                    "headers": {**dict(server.get("headers") or {}), "x-api-key": key},
+                }
+        return {**options, "mcp_servers": updated}
+
     async def _engine_envs_and_manifest(self) -> tuple[dict[str, str], Any]:
-        """The env and manifest this turn's engine starts with: for the Claude
-        CLI, egress URLs point at the loopback forwarder."""
-        if not self._forward_cli:
-            return self._envs, self._manifest
+        """The env and manifest this turn's engine starts with: the current key
+        in the env and on the bound MCP servers, and for the Claude CLI, egress
+        URLs pointed at the loopback forwarder."""
         from dataclasses import replace
 
-        from .egress_forwarder import EgressForwarder
+        envs = self._turn_envs()
+        options = self._turn_options(envs.get("LYZR_API_KEY") if self._api_key else None)
+        if self._forward_cli:
+            from .egress_forwarder import EgressForwarder
 
-        if self._forwarder is None:
-            self._forwarder = EgressForwarder()
-        options = self._manifest.options
-        envs, rewritten = await self._forwarder.rewrite(
-            self._envs, options if isinstance(options, dict) else None
-        )
+            if self._forwarder is None:
+                self._forwarder = EgressForwarder()
+            envs, rewritten = await self._forwarder.rewrite(
+                envs, options if isinstance(options, dict) else None
+            )
+            if rewritten is not None:
+                options = rewritten
         manifest = (
-            self._manifest if rewritten is None else replace(self._manifest, options=rewritten)
+            self._manifest
+            if options is self._manifest.options
+            else replace(self._manifest, options=options)
         )
         return envs, manifest
 
@@ -366,6 +404,9 @@ class HarnessCoordinator:
         await self._ensure_booted()
         assert self._workspace_path is not None
         assert self._manifest is not None
+        # This turn's key, read now: a missing key fails the turn before the
+        # guardrails check or the engine runs.
+        envs, manifest = await self._engine_envs_and_manifest()
 
         # Reuse the same id across every chat on this coordinator so a
         # multi-turn conversation lands as ONE session doc in Mongo (with
@@ -394,7 +435,6 @@ class HarnessCoordinator:
         if blocked_reply is None:
             await _enqueue_user_message(state.user_queue, message)
 
-        envs, manifest = await self._engine_envs_and_manifest()
         ctx = EngineContext(
             session_id=session_id,
             manifest=manifest,

@@ -52,6 +52,13 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   engine's `PreToolUse` hook passes it, `PolicyToolAuthorizer` puts it in the
   policy input as `call_id`, and a call without one is denied.
 - A rewritten message carries the gateway's masked text (`[EMAIL]`).
+- **The Lyzr key is read at every turn.** The engine's `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY` and `LYZR_API_KEY` and the bound MCP servers' `x-api-key`
+  are set from `Settings.api_key()` when each turn starts (and at boot), so a
+  key replaced in `LYZR_API_KEY` between turns, or a reissued token, is used
+  by the next turn. A missing key fails the turn with `SettingsError` before
+  the engine starts. `build_gateway_envs` no longer takes `api_key`;
+  `key_envs(api_key)` returns the three variables.
 - **BREAKING: the agent document is read from its gateway sections.** The
   model is `llm.config.model` (the gateway agent's kong model; `null` → the
   image's own model) and the MCP servers are `mcp.servers`, every one attached
