@@ -8,6 +8,10 @@ not read.
 
     GET {base_url}/v1/agents/{agent_id}      header: x-api-key: <lyzr key>
 
+With the egress base ``http://egress/computer-agent-api/agentos/api`` that is
+``GET http://egress/computer-agent-api/agentos/api/v1/agents/{id}``, which the
+egress proxy forwards to the computer-agent-api-service.
+
 The response is the authority; the SDK reproduces what the AgentOS dispatch
 path (``sandboxBodyFor`` / ``modelGatewayEnvsFor`` in the TS ``agent-defs.ts``)
 would have sent to a ComputerAgent server, but runs the engine in-process

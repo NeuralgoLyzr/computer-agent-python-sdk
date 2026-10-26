@@ -139,6 +139,7 @@ base never doubles the path:
 | `http://host:8788` | `http://host:8788/agentos/api/v1` |
 | `http://host:8788/agentos/api` | `http://host:8788/agentos/api/v1` |
 | `http://host:8788/agentos/api/v1` | unchanged |
+| `http://egress/computer-agent-api/agentos/api` (behind the egress proxy) | `http://egress/computer-agent-api/agentos/api/v1` |
 
 ---
 
@@ -302,7 +303,9 @@ every model call goes to `llm_url`.
 
 ### Where the agent comes from
 
-The agent is baked into the image; nothing is cloned or fetched.
+The agent is baked into the image; nothing is cloned or fetched. Its definition is read once, at
+construction, from `GET {base_url}/v1/agents/{agent_id}`; behind the egress proxy that is
+`GET http://egress/computer-agent-api/agentos/api/v1/agents/{agent_id}`.
 
 - **Default:** the engine runs in the process's working directory (`options={"cwd": ...}` overrides
   it) and the agent is defined by your `options`.
