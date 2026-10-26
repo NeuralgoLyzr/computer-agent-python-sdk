@@ -76,13 +76,13 @@ def test_eagerly_imported_modules_do_not_bind_httpx():
     which imports httpx eagerly, so it is always present in a base install. What
     IS ours to keep is that no module reached by `import computeragent` binds it
     at import time, which is what `policy/__init__` promises when it says its
-    engines are lazy. `policy.srs` is the one that breaks that promise if left
-    unattended, because unlike `opa`/`cedar` it is imported eagerly there.
+    engines are lazy. The guardrails client is reached eagerly through the
+    harness, so it keeps httpx inside its functions.
     """
     import computeragent.policy as policy
-    import computeragent.policy.srs as srs
+    import computeragent.policy.guardrails_client as guardrails_client
 
-    assert not hasattr(srs, "httpx")
+    assert not hasattr(guardrails_client, "httpx")
     # opa/cedar are reached only through `policy.__getattr__`, so a module-level
     # import there costs the eager path nothing.
     assert "OpaPolicyEngine" not in vars(policy)

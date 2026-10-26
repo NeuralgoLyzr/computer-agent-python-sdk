@@ -583,6 +583,10 @@ import …`. You never need a private path.
 | `EngineDriver`, `SessionStore`, `PolicyDecider`, `PermissionRequest` | Extension-point protocols. |
 | `Pipeline`, `configure`, `PolicyToolAuthorizer` | Telemetry and policy. |
 
+`computeragent.policy` also exports `OpaPolicyEngine` and `CedarPolicyEngine` for your own tool gate.
+The standalone `SrsPolicyEngine` and `srs_authorizer_from_env` were removed in 0.7.0; the built-in
+guardrails gate (§9) replaces them.
+
 ### Getting the assistant's reply out
 
 `result.messages[-1]` is a `ResultMessage`, whose `repr` is metadata — the text is in `.result`.
