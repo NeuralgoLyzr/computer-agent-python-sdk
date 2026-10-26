@@ -24,6 +24,12 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   a listener on `127.0.0.1` that replays each request on the proxy with the
   newest token and streams the answer back
   (`computeragent.harness.egress_forwarder`). `h11` joins the `agentos` extra.
+- **OTLP exports fit the egress proxy's 1 MiB limit.** Each export is split on
+  its encoded size (960 KiB budget, `computeragent.telemetry.sinks.otlp_size`);
+  a single record over the budget is dropped with a WARN carrying the count.
+  Span and log processors export 128 records at a time. The OTLP exporters set
+  `x-api-key` on every request through a stamping `requests` session, so a
+  reissued sandbox token applies to telemetry too.
 
 ### Changed
 
