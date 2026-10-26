@@ -255,7 +255,7 @@ class ComputerAgent:
         # The egress route every model call is sent to.
         llm_url: str | None = None,
         # The egress route for MCP: each server bound to the agent in AgentOS
-        # becomes `{mcp_url}/{server_id}`.
+        # becomes `{mcp_url}/{name}`.
         mcp_url: str | None = None,
         # The egress route for guardrails: the user's message and every tool
         # call are checked at `{guardrails_url}/v1/check`; the agent gateway

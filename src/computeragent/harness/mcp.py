@@ -10,8 +10,12 @@ own server as ``your_server_id``. This mirrors CAS ``mcpDescriptorsFor``
 * ``mcp_mode`` other than ``"engine"`` attaches nothing — Studio runs the tools.
 * The server name, and so the tool namespace ``mcp__<name>__<tool>``, is the
   binding's ``tool_name``, whoever runs the agent.
-* A sign-in binding uses ``your_server_id``; with none, the tool is withheld for
-  this caller rather than sent to a server they cannot use.
+* Each server is ``{mcp_url}/{name}``, ``{name}`` the binding's ``tool_name``
+  percent-encoded as one segment (AgentOS keeps it printable ASCII), with no
+  query; behind the egress proxy ``mcp_url`` is ``http://egress/mcp/v1``. The
+  agent gateway takes the server id and the allowed tools from its registry.
+* A sign-in binding with no ``your_server_id`` is withheld for this caller
+  rather than sent to a server they cannot use.
 * ``allowed_tools`` gets ``mcp__<name>`` for Anthropic-shaped engines only:
   gitclaw treats ``allowedTools`` as a strict allowlist and namespaces MCP
   tools differently, so the entry would filter out every tool it has.
@@ -94,19 +98,14 @@ def build_mcp_servers(
     servers: dict[str, dict[str, Any]] = {}
     allowed: list[str] = []
     for binding in bindings:
-        server_id = binding.server_id
-        if not binding.persist_auth:
-            if binding.your_server_id is None:
-                logger.warning(
-                    "MCP tool %r withheld: it requires the user's own connection and the caller "
-                    "has not connected one",
-                    binding.tool_name,
-                )
-                continue
-            server_id = binding.your_server_id
-        url = f"{base}/{quote(server_id, safe='')}"
-        if binding.action_names:
-            url += f"?tools={quote(','.join(binding.action_names), safe='')}"
+        if not binding.persist_auth and binding.your_server_id is None:
+            logger.warning(
+                "MCP tool %r withheld: it requires the user's own connection and the caller "
+                "has not connected one",
+                binding.tool_name,
+            )
+            continue
+        url = f"{base}/{quote(binding.tool_name, safe='')}"
         servers[binding.tool_name] = {
             "type": "http",
             "url": url,

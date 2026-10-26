@@ -12,7 +12,7 @@ configured the way a sandbox is:
     export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
     export COMPUTERAGENT_GUARDRAILS_URL=http://egress/guardrails
     export COMPUTERAGENT_LLM_URL=http://egress/llm
-    export COMPUTERAGENT_MCP_URL=http://egress/mcp
+    export COMPUTERAGENT_MCP_URL=http://egress/mcp/v1
     export LYZR_API_KEY=...
     # optional: COMPUTERAGENT_TELEMETRY_URL, COMPUTERAGENT_GAP_DIR
 

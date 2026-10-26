@@ -52,7 +52,7 @@ export COMPUTERAGENT_ENGINE=claude-agent-sdk
 export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
 export COMPUTERAGENT_GUARDRAILS_URL=http://egress/guardrails
 export COMPUTERAGENT_LLM_URL=http://egress/llm
-export COMPUTERAGENT_MCP_URL=http://egress/mcp
+export COMPUTERAGENT_MCP_URL=http://egress/mcp/v1
 export LYZR_API_KEY=...          # injected when the sandbox is created
 ```
 
@@ -78,7 +78,7 @@ async with ComputerAgent(
     base_url="http://egress/agentos/api",
     guardrails_url="http://egress/guardrails",
     llm_url="http://egress/llm",
-    mcp_url="http://egress/mcp",
+    mcp_url="http://egress/mcp/v1",
     api_key=os.environ["LYZR_API_KEY"],
     options={"system_prompt": "You are terse.", "disallowed_tools": ["Write", "Edit"]},
     session_store="memory",
@@ -109,7 +109,7 @@ request is made. A URL setting must be an `http(s)` URL.
 | `base_url` | `COMPUTERAGENT_BASE_URL` | **yes** | Route to the AgentOS agent config: the model and its MCP bindings. |
 | `guardrails_url` | `COMPUTERAGENT_GUARDRAILS_URL` | **yes** | Route to the guardrails check, for the user's message and every tool call. |
 | `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
-| `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{server_id}`. |
+| `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{name}`; `{name}` is the binding's `tool_name` (AgentOS keeps it to 1–128 printable ASCII characters); the gateway takes the server id and the allowed tools from its registry. |
 | `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
 | `session_store_url` | `COMPUTERAGENT_SESSION_STORE_URL` | no | Base URL for the `http` session store (§7), e.g. `http://egress/computer-agent-api`; no query or fragment. |
 | `gap_dir` | `COMPUTERAGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
@@ -338,15 +338,17 @@ With `mcp_mode` `"engine"` (the default), each binding becomes an engine MCP ser
 ```python
 mcp_servers[tool_name] = {
     "type": "http",
-    "url": f"{mcp_url}/{server_id}?tools={action_names}",
+    "url": f"{mcp_url}/{quote(tool_name, safe='')}",  # no query
     "headers": {"x-api-key": api_key},
 }
 ```
 
 - `tool_name` is the server name, so the model sees `mcp__<tool_name>__<tool>` whoever runs it.
-- A "require user sign-in" binding (`persist_auth: false`) uses the caller's own server, which AgentOS
-  returns as `your_server_id`. If the caller has not connected one, that tool is withheld and a
-  warning names it.
+- The URL names the server by `tool_name`, percent-encoded as one path segment; the agent gateway
+  resolves it to the server id and its allowed tools. Nothing goes in the query.
+- A "require user sign-in" binding (`persist_auth: false`) is attached only when AgentOS returns the
+  caller's own server as `your_server_id`. If the caller has not connected one, that tool is withheld
+  and a warning names it.
 - `allowed_tools` gets `mcp__<tool_name>` on Anthropic-shaped engines only; gitagent treats
   `allowed_tools` as a strict allowlist.
 - With any other `mcp_mode`, Studio runs the tools and nothing is attached.
