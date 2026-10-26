@@ -25,14 +25,15 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_test"
 LLM_URL = "http://egress.internal/llm"
 MCP_URL = "http://egress.internal/mcp"
-AGENT_API = "http://egress.internal/agent-api"
-SRS = "http://egress.internal/srs"
-ORG_URL = f"{AGENT_API}/v3/org/rai-policy"
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK_URL = f"{GUARDRAILS}/v1/check"
 
 
 def build(agent_doc, **kw):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-    respx.get(ORG_URL).mock(return_value=httpx.Response(200, json={"policies": []}))
+    respx.post(CHECK_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "allow"}})
+    )
     params = {
         "agent_id": AGENT_ID,
         "base_url": BASE,
@@ -40,8 +41,7 @@ def build(agent_doc, **kw):
         "engine": "claude-agent-sdk",
         "llm_url": LLM_URL,
         "mcp_url": MCP_URL,
-        "agent_api_url": AGENT_API,
-        "srs_url": SRS,
+        "guardrails_url": "http://egress.internal/guardrails",
     }
     params.update(kw)
     return ComputerAgent(**params)
@@ -133,8 +133,7 @@ def test_a_malformed_llm_url_is_refused_before_any_request(bad):
             engine="gitagent",
             llm_url=bad,
             mcp_url=MCP_URL,
-            agent_api_url=AGENT_API,
-            srs_url=SRS,
+            guardrails_url=GUARDRAILS,
         )
 
 

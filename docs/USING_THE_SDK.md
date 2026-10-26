@@ -50,8 +50,7 @@ In a sandbox every setting comes from the environment, so construction takes no 
 export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
 export COMPUTERAGENT_ENGINE=claude-agent-sdk
 export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
-export COMPUTERAGENT_AGENT_API_URL=http://egress/agent-api
-export COMPUTERAGENT_SRS_URL=http://egress/srs
+export COMPUTERAGENT_GUARDRAILS_URL=http://egress/guardrails
 export COMPUTERAGENT_LLM_URL=http://egress/llm
 export COMPUTERAGENT_MCP_URL=http://egress/mcp
 export LYZR_API_KEY=...          # injected when the sandbox is created
@@ -77,8 +76,7 @@ async with ComputerAgent(
     agent_id="6aa93f1b3817a13d3103d2c1",
     engine="claude-agent-sdk",
     base_url="http://egress/agentos/api",
-    agent_api_url="http://egress/agent-api",
-    srs_url="http://egress/srs",
+    guardrails_url="http://egress/guardrails",
     llm_url="http://egress/llm",
     mcp_url="http://egress/mcp",
     api_key=os.environ["LYZR_API_KEY"],
@@ -108,9 +106,8 @@ request is made. A URL setting must be an `http(s)` URL.
 | `agent_id` | `COMPUTERAGENT_AGENT_ID` | **yes** | The agent's **24-hex Mongo `_id`** in AgentOS (the id in the agent's URL). Not the stable `agentId` field. |
 | `engine` | `COMPUTERAGENT_ENGINE` | **yes** | `"claude-agent-sdk"` or `"gitagent"`; an `EngineDriver` instance only as an argument. |
 | `api_key` | `LYZR_API_KEY` | **yes** | The key the SDK presents on every call as `x-api-key`. In a sandbox it is injected at creation and the egress proxy swaps it for the real one. Read from the environment **at each use**, so it can be replaced while the agent runs. |
-| `base_url` | `COMPUTERAGENT_BASE_URL` | **yes** | Route to the AgentOS agent config: the model, the agent's own RAI policy and its MCP bindings. |
-| `agent_api_url` | `COMPUTERAGENT_AGENT_API_URL` | **yes** | Route to the Lyzr agent API, for the org (global) RAI policies. |
-| `srs_url` | `COMPUTERAGENT_SRS_URL` | **yes** | Route to SRS, for every guardrail check. |
+| `base_url` | `COMPUTERAGENT_BASE_URL` | **yes** | Route to the AgentOS agent config: the model and its MCP bindings. |
+| `guardrails_url` | `COMPUTERAGENT_GUARDRAILS_URL` | **yes** | Route to the guardrails check, for the user's message and every tool call. |
 | `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
 | `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{server_id}`. |
 | `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
@@ -121,8 +118,7 @@ The requests made from each route, all with `x-api-key: <api_key>`:
 | Route | Requests |
 |---|---|
 | `base_url` | `GET {base_url}/v1/agents/{agent_id}` once, at construction |
-| `agent_api_url` | `GET {agent_api_url}/v3/org/rai-policy` at the start of every turn |
-| `srs_url` | `POST /v1/rai/inference` (input check; tool-call content check), `POST /v1/guardrails/evaluate-tool-call` |
+| `guardrails_url` | `POST {guardrails_url}/v1/check`: one `input` check per text block of the user's message, one `tool-input` check per tool call |
 | `llm_url` | the engine's own model calls (`/v1/messages`, `/chat/completions`) |
 | `mcp_url` | the engine's MCP calls |
 | `telemetry_url` | `POST /v1/traces`, `/v1/metrics`, `/v1/logs` |
@@ -164,7 +160,6 @@ After construction, `agent.agent` is the `ResolvedAgent`:
 agent.agent.name             # str
 agent.agent.harness          # "claude-agent-sdk" | "gitagent"
 agent.agent.model            # what goes on the wire
-agent.agent.rai_policy_id    # the agent's own SRS policy, or None
 agent.agent.mcp_mode         # "engine" | "studio"
 agent.agent.mcp_bindings     # tuple[McpBinding, ...]
 ```
@@ -293,7 +288,6 @@ You do **not** pass any of these — `GET {base_url}/v1/agents/{id}` answers the
 | From the document | Becomes |
 |---|---|
 | `model_gateway.binding.externalModelId` → `.model` → top-level `model` | the model string put on the wire |
-| `rai_policy_id` | the agent's own (local) RAI policy, combined each turn with the org's (§9) |
 | `mcp_mode`, `mcp_servers` | the MCP servers attached to the engine (below) |
 
 The document's `source` and gateway URL are **not** used: the agent is baked into the image, and
@@ -460,33 +454,26 @@ and loses buffered telemetry.
 
 ## 9. Guardrails, permissions and telemetry
 
-### SRS guardrails
+### Guardrails
 
-At the start of **every turn** the SDK builds the turn's policy set:
+Every check is `POST {guardrails_url}/v1/check`. The egress proxy forwards it to the agent gateway,
+which applies the org's RAI policies and then the agent's own; the SDK reads no policies and sends no
+policy ids, so a policy change applies from the next check.
 
-1. the org (global) RAI policies from `{agent_api_url}/v3/org/rai-policy`, read fresh every turn;
-2. the agent's own (local) policy, `rai_policy_id` from the agent document;
-3. combined org first, de-duplicated.
-
-Every check in the turn is made against that **one combined set**, in a single SRS call — never a
-call per policy. Policy ids never come from the environment.
-
-| Check | When | SRS call | On a block |
+| Check | When | Body | On a block |
 |---|---|---|---|
-| Input | before the turn, on each text block of the user's message | `/v1/rai/inference`, stage `llm_input` | the engine never starts; the turn ends with the reason as the reply |
-| Tool content | before every tool call, on its string arguments | `/v1/rai/inference`, stage `llm_output` | the tool is denied with SRS's reason |
-| Tool call | before every tool call, after the content check | `/v1/guardrails/evaluate-tool-call` (Cedar, then OPA) | the tool is denied with SRS's reason |
+| Input | before the turn, on each text block of the user's message | `{"op": "input", "subject": {"text": …}}` | the engine never starts; the turn ends with the reason as the reply |
+| Tool call | before every tool call | `{"op": "tool-input", "subject": {"toolCalls": [{"id", "name", "arguments"}]}}` | the tool is denied with the gateway's reason |
 
-- **Masking:** a masked input (`<EMAIL_ADDRESS_1>`) is what the engine receives; it is not restored.
-- **Tool names:** tool calls reach Cedar as `<engine>__<tool>` (`claude-agent-sdk__Bash`,
-  `gitagent__write`), and MCP tools as `mcp__<server>__<tool>` from either engine. The agent's name is
-  the Cedar principal.
-- **No verdict** (SRS unreachable, timed out or non-2xx): a tool is denied and an input is blocked,
-  unless the org policies say otherwise — a tool runs only if *every* org policy sets `fail_open`, and
-  an input passes unless *any* org policy is fail-closed. A 422 never fails open. The timeout is the
-  slowest org policy's, else 5 s.
-- **Org policies cannot be read:** every check in the turn blocks.
-- **No policies anywhere:** no SRS call is made.
+- **Masking:** on `rewrite` the gateway's masked text (`[EMAIL]`) is what the engine receives; it is
+  not restored.
+- **Tool ids:** a tool call is identified by the engine's own tool-use id. A call that reaches the
+  gate without one is denied (`tool call has no id`).
+- **Tool names:** tool calls are presented as `<engine>__<tool>` (`claude-agent-sdk__Bash`,
+  `gitagent__write`), and MCP tools as `mcp__<server>__<tool>` from either engine.
+- **No verdict** (unreachable, timed out after 5 s, non-2xx or a malformed answer): a tool is denied
+  and an input is blocked. Fail-open is the gateway's decision; when it fails open it answers `allow`
+  with `skipped: true`, which the SDK logs.
 - A **streamed** (async-iterable) message is read entry by entry and every entry is checked before
   the engine starts; one blocked entry blocks the turn.
 
@@ -554,8 +541,8 @@ All of these are raised **from the constructor**, before anything runs.
 | `SettingsError: missing required settings: …` | A route or the key is not set. | Set each named argument or environment variable. |
 | `AgentResolveError: … rejected the credential (401 …)` | The key did not authenticate at AgentOS. | Check the key the egress proxy swaps in, and that AgentOS has its PAGOS bridge configured. |
 | `AgentResolveError: no agent … (404)` | `agent_id` is not the 24-hex Mongo `_id`. | Take the id from the agent's URL in AgentOS. |
-| Every turn ends with `[Content blocked: RAI policy check failed: org RAI policy could not be loaded]` | `{agent_api_url}/v3/org/rai-policy` failed. | Check the `agent_api_url` route on the egress proxy. |
-| Every tool call is denied with `SRS 4xx` / `SRS unreachable` | The `srs_url` route, the key's RAI permission, or a policy id that no longer exists. | Check the route; a `404` names a policy that is gone. |
+| Every turn ends with `[Content blocked: RAI policy check failed: guardrails …]` | The guardrails check reached no verdict. | Check the `guardrails_url` route on the egress proxy; the status and error code follow `guardrails`. |
+| Every tool call is denied with `guardrails 4xx` / `guardrails unreachable` | The `guardrails_url` route or the key's permission; a `400` is a body the SDK got wrong. | Check the route; report a `400`. |
 | A tool you expected is missing | A sign-in MCP binding the caller has not connected (logged as withheld), or `mcp_mode` is not `"engine"`. | Connect the account in Studio, or check `agent.agent.mcp_mode`. |
 | `400 context_management: Extra inputs are not permitted` | The Claude CLI injected experimental betas. | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set automatically; check nothing in `envs=` is lost. |
 | `UnknownEngineError` / `UnknownSessionStoreError` | Typo, or a plugin you meant to register. | The message lists what *is* registered. |

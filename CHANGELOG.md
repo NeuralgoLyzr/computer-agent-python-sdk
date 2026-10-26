@@ -10,8 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 `.claude/plans/p1-sdk-egress-routes.md`).
 
+### Changed
+
+- **BREAKING: guardrails go through the egress proxy.** The user's message and
+  every tool call are checked with `POST {guardrails_url}/v1/check` (ops
+  `input` and `tool-input`); the agent gateway applies the org's and the
+  agent's RAI policies and owns fail-open. `guardrails_url` /
+  `COMPUTERAGENT_GUARDRAILS_URL` is required and replaces `srs_url` /
+  `COMPUTERAGENT_SRS_URL` and `agent_api_url` / `COMPUTERAGENT_AGENT_API_URL`,
+  which are no longer read.
+- A check that reaches no verdict (unreachable, 5 s timeout, non-2xx, a
+  malformed answer) blocks the message or denies the tool; the SDK applies no
+  fail-open of its own.
+- A tool call is identified by the engine's own tool-use id: the Claude
+  engine's `PreToolUse` hook passes it, `PolicyToolAuthorizer` puts it in the
+  policy input as `call_id`, and a call without one is denied.
+- A rewritten message carries the gateway's masked text (`[EMAIL]`).
+
 ### Removed
 
+- **BREAKING: the SDK's own policy resolution.** No org RAI policies are read
+  (`/v3/org/rai-policy`), the agent document's `rai_policy_id` is ignored and
+  `ResolvedAgent.rai_policy_id` is gone, and no SRS route
+  (`/v1/rai/inference`, `/v1/guardrails/evaluate-tool-call`) is called.
+  `computeragent.policy.srs_client`, `computeragent.policy.org_policy`,
+  `TurnPolicy`, `build_turn_policy`, `SrsToolGate.set_turn` and
+  `SrsTurnGuard.resolve_turn` are deleted. The SDK no longer runs a separate
+  content check on a tool call's string arguments; the tool call goes to the
+  gateway as one `tool-input` check.
 - **BREAKING: the AgentOS dashboard events sink.** `AgentOSHttpSink`
   (`computeragent.telemetry.sinks.agentos_http`), the `events_url` setting and
   `COMPUTERAGENT_EVENTS_URL` are gone, and the drop-in path no longer

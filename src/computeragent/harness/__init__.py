@@ -255,11 +255,10 @@ class ComputerAgent:
         # The egress route for MCP: each server bound to the agent in AgentOS
         # becomes `{mcp_url}/{server_id}`.
         mcp_url: str | None = None,
-        # The egress routes for guardrails: the org (global) RAI policies are
-        # read from `{agent_api_url}/v3/org/rai-policy` every turn, and every
-        # check is made against SRS at `srs_url`.
-        agent_api_url: str | None = None,
-        srs_url: str | None = None,
+        # The egress route for guardrails: the user's message and every tool
+        # call are checked at `{guardrails_url}/v1/check`; the agent gateway
+        # applies the org's and the agent's policies.
+        guardrails_url: str | None = None,
         # Optional egress route for telemetry: OTLP to `telemetry_url`. Unset
         # is off.
         telemetry_url: str | None = None,
@@ -290,8 +289,7 @@ class ComputerAgent:
             api_key=api_key,
             llm_url=llm_url,
             mcp_url=mcp_url,
-            agent_api_url=agent_api_url,
-            srs_url=srs_url,
+            guardrails_url=guardrails_url,
             telemetry_url=telemetry_url,
             gap_dir=gap_dir,
         )
@@ -380,15 +378,14 @@ class ComputerAgent:
             anthropic_shaped=engine_name in ANTHROPIC_SHAPED,
         )
 
-        # 6. SRS guardrails. Each turn combines the org (global) policies with
-        #    the agent's own (local) one; the user's message and every tool
-        #    call are checked against that set. A caller's own policy_decider
-        #    replaces the tool-call gate; the input check always runs.
+        # 6. Guardrails through the egress proxy: the user's message and every
+        #    tool call are checked at guardrails_url, where the agent gateway
+        #    applies the policies. A caller's own policy_decider replaces the
+        #    tool-call gate; the input check always runs.
         policy_agent_name = self.agent.name
         self._srs_gate = SrsToolGate(
-            srs_url=self._settings.srs_url,
+            guardrails_url=self._settings.guardrails_url,
             api_key=self._settings.api_key,
-            agent_name=policy_agent_name,
             engine_name=engine_name,
             mcp_server_names=list(mcp_servers),
         )
@@ -407,12 +404,9 @@ class ComputerAgent:
                 ),
             )
         turn_guard = SrsTurnGuard(
-            agent_api_url=self._settings.agent_api_url,
-            srs_url=self._settings.srs_url,
+            guardrails_url=self._settings.guardrails_url,
             api_key=self._settings.api_key,
             agent_name=policy_agent_name,
-            local_policy_ids=[self.agent.rai_policy_id] if self.agent.rai_policy_id else [],
-            gate=self._srs_gate,
         )
 
         # 7. Telemetry through its egress routes, unless the caller brought a

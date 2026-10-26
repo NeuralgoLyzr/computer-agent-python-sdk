@@ -200,8 +200,9 @@ def _policy_pretooluse_matcher(decider: Any) -> Any:
         data = hook_input if isinstance(hook_input, dict) else {}
         tool_name = str(data.get("tool_name") or "")
         tool_input = data.get("tool_input") or {}
+        tool_use_id = str(data.get("tool_use_id") or _tool_use_id or "")
         try:
-            result = await decider(tool_name, tool_input, _permission_context())
+            result = await decider(tool_name, tool_input, _permission_context(tool_use_id))
         except Exception as exc:  # noqa: BLE001 — fail closed on decider bugs
             logger.exception("policy PreToolUse hook: decider raised")
             return _hook_deny(f"policy evaluation failed: {exc}")
@@ -218,21 +219,22 @@ def _policy_pretooluse_matcher(decider: Any) -> Any:
     return HookMatcher(hooks=[_hook])
 
 
-def _permission_context() -> Any:
+def _permission_context(tool_use_id: str = "") -> Any:
     """A best-effort ``ToolPermissionContext`` for hook-originated decisions.
 
     The hook path has no real permission context (the CLI never built one —
-    the call skipped the prompt), so hand the decider an empty one; the
+    the call skipped the prompt), so hand the decider one carrying just the
+    tool-use id, which the guardrails check identifies the call by; the
     ``_bind_session_id`` wrapper still stamps the session id onto it.
     """
     try:
         from claude_agent_sdk.types import ToolPermissionContext
 
-        return ToolPermissionContext()
+        return ToolPermissionContext(tool_use_id=tool_use_id or None)
     except Exception:  # noqa: BLE001 — required fields / import drift
         from types import SimpleNamespace
 
-        return SimpleNamespace()
+        return SimpleNamespace(tool_use_id=tool_use_id or None)
 
 
 def _hook_deny(reason: str) -> dict[str, Any]:

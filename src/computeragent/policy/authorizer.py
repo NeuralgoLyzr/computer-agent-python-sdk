@@ -130,9 +130,12 @@ class PolicyToolAuthorizer:
             )
         ctx: dict[str, Any]
         if self._context_resolver is not None:
-            ctx = await _maybe_await(self._context_resolver(context))
+            ctx = dict(await _maybe_await(self._context_resolver(context)))
         else:
             ctx = {"session_id": str(_ctx_value(context, "session_id") or "")}
+        # The engine's own tool-use id: the guardrails check identifies the
+        # call by it. A context resolver that set one keeps it.
+        ctx.setdefault("call_id", str(_ctx_value(context, "tool_use_id", "call_id") or ""))
 
         return PolicyInput(
             principal=principal,

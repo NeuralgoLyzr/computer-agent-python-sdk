@@ -28,8 +28,7 @@ FULL_ENV = {
     "LYZR_API_KEY": "env-key",
     "COMPUTERAGENT_LLM_URL": LLM_URL,
     "COMPUTERAGENT_MCP_URL": "http://egress.internal/mcp",
-    "COMPUTERAGENT_AGENT_API_URL": "http://egress.internal/agent-api",
-    "COMPUTERAGENT_SRS_URL": "http://egress.internal/srs",
+    "COMPUTERAGENT_GUARDRAILS_URL": "http://egress.internal/guardrails",
 }
 
 
@@ -41,8 +40,7 @@ def resolve(env, **kw):
         api_key=None,
         llm_url=None,
         mcp_url=None,
-        agent_api_url=None,
-        srs_url=None,
+        guardrails_url=None,
         telemetry_url=None,
         gap_dir=None,
     )
@@ -58,8 +56,7 @@ def test_every_setting_has_an_env_var():
         "api_key": "LYZR_API_KEY",
         "llm_url": "COMPUTERAGENT_LLM_URL",
         "mcp_url": "COMPUTERAGENT_MCP_URL",
-        "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
-        "srs_url": "COMPUTERAGENT_SRS_URL",
+        "guardrails_url": "COMPUTERAGENT_GUARDRAILS_URL",
         "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
@@ -74,9 +71,20 @@ def test_env_vars_alone_are_enough():
     assert settings.api_key() == "env-key"
     assert settings.llm_url == LLM_URL
     assert settings.mcp_url == "http://egress.internal/mcp"
-    assert settings.agent_api_url == "http://egress.internal/agent-api"
-    assert settings.srs_url == "http://egress.internal/srs"
+    assert settings.guardrails_url == "http://egress.internal/guardrails"
     assert settings.gap_dir is None
+
+
+def test_the_old_srs_and_agent_api_env_vars_are_not_read():
+    env = {
+        **{k: v for k, v in FULL_ENV.items() if k != "COMPUTERAGENT_GUARDRAILS_URL"},
+        "COMPUTERAGENT_SRS_URL": "http://egress.internal/srs",
+        "AGENT_API_URL": "http://egress.internal/agent-api",
+        "COMPUTERAGENT_AGENT_API_URL": "http://egress.internal/agent-api",
+    }
+
+    with pytest.raises(SettingsError, match="guardrails_url"):
+        resolve(env)
 
 
 def test_the_argument_wins_over_the_env_var():

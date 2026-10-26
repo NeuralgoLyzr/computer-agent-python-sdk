@@ -30,9 +30,8 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
 MCP_URL = "http://egress.internal/mcp"
-AGENT_API = "http://egress.internal/agent-api"
-SRS = "http://egress.internal/srs"
-ORG_URL = f"{AGENT_API}/v3/org/rai-policy"
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK_URL = f"{GUARDRAILS}/v1/check"
 
 
 def build_servers(bindings, *, mcp_mode="engine", anthropic_shaped=True):
@@ -196,7 +195,9 @@ class FakeEngine:
 
 def build(agent_doc, **kwargs) -> ComputerAgent:
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-    respx.get(ORG_URL).mock(return_value=httpx.Response(200, json={"policies": []}))
+    respx.post(CHECK_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "allow"}})
+    )
     params: dict = {
         "agent_id": AGENT_ID,
         "base_url": BASE,
@@ -204,8 +205,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "engine": FakeEngine(),
         "llm_url": LLM_URL,
         "mcp_url": MCP_URL,
-        "agent_api_url": AGENT_API,
-        "srs_url": SRS,
+        "guardrails_url": "http://egress.internal/guardrails",
     }
     params.update(kwargs)
     return ComputerAgent(**params)

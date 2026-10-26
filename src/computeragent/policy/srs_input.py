@@ -1,17 +1,16 @@
-"""The user's message through SRS ``llm_input`` before the turn starts.
+"""The user's message through the guardrails check before the turn starts.
 
-A port of CAS harness-server ``session.ts`` (``redactUserMessage`` /
-``aggregateRedaction``) and ``SrsPolicyDecider.redactInput``:
+Each text block of the message is sent to ``POST {guardrails_url}/v1/check``
+as one ``input`` check, in parallel; the agent gateway applies the org's and
+the agent's policies. Folding follows CAS harness-server ``session.ts``
+(``redactUserMessage`` / ``aggregateRedaction``):
 
-* every text block of the message is checked against the turn's whole policy
-  set, in parallel, and replaced by SRS's masked text;
+* a ``rewrite`` replaces the block's text with the gateway's masked text;
 * the results fold into one decision: the worst outcome wins
   (``error > blocked > redacted > clean``), and the reason and policy are the
   first a call reported;
 * a block means the engine never runs and the reason is the reply;
-* a call with no verdict blocks only when an org policy is fail-closed
-  (``fail_open`` is False); otherwise the text goes through unchanged. A turn
-  whose policies could not be resolved blocks.
+* a call with no verdict blocks the message: the gateway owns fail-open.
 
 A streamed (async-iterable) message is read entry by entry and every entry is
 checked, as CAS checks each message ``pushUserMessage`` receives; the engine is
@@ -24,13 +23,12 @@ import asyncio
 import copy
 import logging
 from collections.abc import AsyncIterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from .srs_client import SrsUnavailable, check_input
-from .srs_gate import TURN_UNRESOLVED_REASON, TurnPolicy
+from .guardrails_client import GUARDRAILS_TIMEOUT_S, GuardrailsUnavailable, check_text
 
-logger = logging.getLogger("computeragent.policy.srs")
+logger = logging.getLogger("computeragent.policy.guardrails")
 
 #: The reply when a block came with no reason of its own.
 DEFAULT_BLOCK_REPLY = "Your message was blocked by the content policy."
@@ -53,9 +51,7 @@ class InputDecision:
     blocked: bool = False
     reason: str | None = None
     policy_id: str | None = None
-    policy_ids: tuple[str, ...] = ()
-    entity_counts: dict[str, int] = field(default_factory=dict)
-    #: Whether any SRS call was made; ``False`` means nothing was checked.
+    #: Whether any check was made; ``False`` means there was no text to check.
     checked: bool = False
 
     @property
@@ -70,7 +66,6 @@ class _Call:
     blocked: bool
     reason: str | None
     policy_id: str | None
-    entity_counts: dict[str, int]
 
 
 #: A user text inside a message: ``container[key]`` is the string.
@@ -109,23 +104,13 @@ def _text_slots(message: Any) -> list[_Slot]:
 
 async def check_user_message(
     message: Any,
-    turn: TurnPolicy,
     *,
-    srs_url: str,
+    guardrails_url: str,
     api_key: str,
-    principal_id: str,
+    timeout_s: float = GUARDRAILS_TIMEOUT_S,
     client: Any | None = None,
 ) -> InputDecision:
-    """Check and mask one user message under ``turn``."""
-    if turn.unresolved:
-        return InputDecision(
-            message=message,
-            outcome="error",
-            blocked=True,
-            reason=blocked_no_verdict_reply(TURN_UNRESOLVED_REASON),
-        )
-    if not turn.policy_ids:
-        return InputDecision(message=message, outcome="clean")
+    """Check and mask one user message."""
     if isinstance(message, AsyncIterable):
         # The turn starts only after its input is read in full, so the entries
         # are collected here and checked like a list of messages.
@@ -151,27 +136,20 @@ async def check_user_message(
 
     async def one(text: str) -> tuple[_Call, str | None]:
         try:
-            verdict = await check_input(
-                srs_url,
+            verdict = await check_text(
+                guardrails_url,
                 api_key=api_key,
-                policy_ids=turn.policy_ids,
                 text=text,
-                principal_id=principal_id,
-                timeout_s=turn.timeout_s,
+                timeout_s=timeout_s,
                 client=client,
             )
-        except SrsUnavailable as exc:
-            block = turn.fail_open is False
-            if block:
-                logger.warning(
-                    "SRS input check gave no verdict (%s); an org policy is fail-closed", exc
-                )
+        except GuardrailsUnavailable as exc:
+            logger.warning("guardrails input check gave no verdict (%s); blocking", exc)
             no_verdict = _Call(
                 outcome="error",
-                blocked=block,
-                reason=blocked_no_verdict_reply(str(exc)) if block else str(exc),
+                blocked=True,
+                reason=blocked_no_verdict_reply(str(exc)),
                 policy_id=None,
-                entity_counts={},
             )
             return no_verdict, None
         call = _Call(
@@ -179,7 +157,6 @@ async def check_user_message(
             blocked=verdict.blocked,
             reason=verdict.reason,
             policy_id=verdict.blocked_by_policy_id,
-            entity_counts=dict(verdict.entity_counts),
         )
         return call, verdict.text
 
@@ -189,7 +166,6 @@ async def check_user_message(
     blocked = False
     reason: str | None = None
     policy_id: str | None = None
-    counts: dict[str, int] = {}
     for (container, key), (call, masked) in zip(slots, results, strict=True):
         if masked is not None:
             container[key] = masked
@@ -198,20 +174,16 @@ async def check_user_message(
         blocked = blocked or call.blocked
         reason = reason or call.reason
         policy_id = policy_id or call.policy_id
-        for kind, n in call.entity_counts.items():
-            counts[kind] = counts.get(kind, 0) + n
 
     masked_message = holder["content"] if isinstance(message, str) else holder["value"]
     if blocked:
-        logger.warning("SRS blocked the user message (policy %s)", policy_id or "?")
+        logger.warning("guardrails blocked the user message (policy %s)", policy_id or "?")
     return InputDecision(
         message=masked_message,
         outcome=outcome,
         blocked=blocked,
         reason=reason,
-        policy_id=policy_id or turn.policy_ids[0],
-        policy_ids=turn.policy_ids,
-        entity_counts=counts,
+        policy_id=policy_id,
         checked=True,
     )
 

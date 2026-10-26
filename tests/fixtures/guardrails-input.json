@@ -1,0 +1,12 @@
+{
+  "data": {
+    "decision": "rewrite",
+    "op": "input",
+    "text": "mail me at [EMAIL]",
+    "policyIds": [
+      "pol_pii"
+    ],
+    "warnings": 0,
+    "skipped": false
+  }
+}

@@ -97,6 +97,17 @@ def test_trailing_slash_on_base_url_does_not_double_the_path(agent_doc):
     assert str(route.calls.last.request.url) == URL
 
 
+@respx.mock
+def test_rai_policy_id_ignored(agent_doc):
+    """Policies are applied by the gateway behind the guardrails check; the
+    SDK reads no policy id from the agent document."""
+    respx.get(URL).mock(return_value=httpx.Response(200, json={**agent_doc, "rai_policy_id": "p1"}))
+
+    agent = _resolve()
+
+    assert not hasattr(agent, "rai_policy_id")
+
+
 EGRESS_BASE = "http://egress/computer-agent-api/agentos/api"
 
 
