@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 `.claude/plans/p1-sdk-egress-routes.md`).
 
+### Added
+
+- **Sandbox token reissue is adopted by every client.** An egress answer that
+  carries `X-Cas-Token` / `X-Cas-Token-Expires-At` (an `sbt_` token with a later
+  expiry, on a request sent with the newest token) makes every later egress
+  request carry the new token: the agent-document read, the guardrails checks,
+  gitagent's Anthropic/OpenAI clients and injected httpx clients.
+  `Settings.api_key()` returns the newest token and `LYZR_API_KEY` is updated
+  (`computeragent.harness.egress_token`).
+- **A loopback forwarder for the Claude CLI.** On the `claude-agent-sdk` engine
+  the CLI's `ANTHROPIC_BASE_URL` and MCP server URLs on an egress origin point at
+  a listener on `127.0.0.1` that replays each request on the proxy with the
+  newest token and streams the answer back
+  (`computeragent.harness.egress_forwarder`). `h11` joins the `agentos` extra.
+
 ### Changed
 
 - **BREAKING: guardrails go through the egress proxy.** The user's message and

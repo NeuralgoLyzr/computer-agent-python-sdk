@@ -59,6 +59,7 @@ from .agentos_agent import (
     resolve_agent,
 )
 from .coordinator import HarnessCoordinator, _SessionState
+from .egress_token import CREDENTIAL
 from .errors import (
     HarnessError,
     UnknownEngineError,
@@ -295,6 +296,17 @@ class ComputerAgent:
         )
         engine = self._settings.engine
         gap_dir = self._settings.gap_dir
+        # Every request to these origins is stamped with the newest sandbox
+        # token, and every answer observed for a reissue.
+        CREDENTIAL.configure(
+            [
+                self._settings.base_url,
+                self._settings.llm_url,
+                self._settings.mcp_url,
+                self._settings.guardrails_url,
+                self._settings.telemetry_url,
+            ]
+        )
         self._api_base = api_base(self._settings.base_url)
 
         # 1. Ask AgentOS what this agent is. Fails fast and by field name, so a
@@ -438,6 +450,7 @@ class ComputerAgent:
             mcp_servers=mcp_servers,
             mcp_allowed_tools=mcp_allowed_tools,
             turn_guard=turn_guard,
+            forward_cli=engine_name == "claude-agent-sdk",
         )
 
     async def __aenter__(self) -> ComputerAgent:

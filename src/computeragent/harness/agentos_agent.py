@@ -240,11 +240,14 @@ def resolve_agent(
     url = f"{api_base(base_url)}/agents/{agent_id}"
     headers = {"x-api-key": api_key, "accept": "application/json"}
 
+    from .egress_token import egress_event_hooks, install
+
     try:
         if client is not None:
-            resp = client.get(url, headers=headers, timeout=timeout)
+            resp = install(client).get(url, headers=headers, timeout=timeout)
         else:
-            resp = httpx.get(url, headers=headers, timeout=timeout)
+            with httpx.Client(event_hooks=egress_event_hooks(False)) as owned:
+                resp = owned.get(url, headers=headers, timeout=timeout)
     except Exception as exc:  # network / DNS / TLS — never leak the key in the message
         raise AgentResolveError(
             f"could not reach AgentOS at {url} ({type(exc).__name__}) — check base_url and that "

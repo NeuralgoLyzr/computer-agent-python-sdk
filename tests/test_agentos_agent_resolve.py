@@ -386,3 +386,26 @@ def test_the_key_never_appears_in_the_resolved_repr(agent_doc):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     assert KEY not in repr(_resolve())
+
+
+def _reissue_headers():
+    from datetime import datetime, timedelta, timezone
+
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    return {"x-cas-token": "sbt_next", "x-cas-token-expires-at": expiry}
+
+
+@pytest.mark.parametrize("injected", [False, True])
+@respx.mock
+def test_reissue_adopted(agent_doc, injected):
+    from computeragent.harness.egress_token import CREDENTIAL
+
+    CREDENTIAL.configure([BASE])
+    respx.get(URL).mock(
+        return_value=httpx.Response(200, json=agent_doc, headers=_reissue_headers())
+    )
+    client = httpx.Client() if injected else None
+
+    resolve_agent(AGENT_ID, base_url=BASE, api_key="sbt_first", client=client)
+
+    assert CREDENTIAL.resolve("sbt_first") == "sbt_next"

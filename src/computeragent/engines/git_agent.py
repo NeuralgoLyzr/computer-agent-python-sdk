@@ -281,6 +281,16 @@ def _env(envs: Mapping[str, str] | None, name: str) -> str | None:
     return value if value else os.environ.get(name)
 
 
+def _egress_http_client() -> Any:
+    """An httpx client with the egress hooks: requests carry the newest
+    sandbox token and answers are observed for a reissue."""
+    import httpx
+
+    from ..harness.egress_token import egress_event_hooks
+
+    return httpx.AsyncClient(event_hooks=egress_event_hooks(True), timeout=httpx.Timeout(600.0))
+
+
 def _build_anthropic_client(envs: Mapping[str, str] | None = None) -> Any:
     try:
         import anthropic  # type: ignore
@@ -293,7 +303,7 @@ def _build_anthropic_client(envs: Mapping[str, str] | None = None) -> Any:
             "agent's model gateway, ComputerAgent(envs=...), or the process environment."
         )
     base_url = _env(envs, "ANTHROPIC_BASE_URL")
-    kwargs: dict[str, Any] = {"api_key": api_key}
+    kwargs: dict[str, Any] = {"api_key": api_key, "http_client": _egress_http_client()}
     if base_url:
         kwargs["base_url"] = base_url
     return anthropic.AsyncAnthropic(**kwargs)
@@ -414,7 +424,7 @@ def _build_openai_client(envs: Mapping[str, str] | None = None) -> Any:
             "GitAgentEngine (OpenAI backend) requires OPENAI_API_KEY — supply it via the agent's "
             "model gateway, ComputerAgent(envs=...), or the process environment."
         )
-    return openai.AsyncOpenAI(base_url=base_url, api_key=api_key)
+    return openai.AsyncOpenAI(base_url=base_url, api_key=api_key, http_client=_egress_http_client())
 
 
 def _build_openai_messages(

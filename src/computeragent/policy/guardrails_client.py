@@ -134,13 +134,17 @@ async def _check(
 ) -> dict[str, Any]:
     import httpx
 
+    from ..harness.egress_token import egress_event_hooks, install
+
     url = f"{guardrails_url.rstrip('/')}{CHECK_PATH}"
     headers = {"content-type": "application/json", "x-api-key": api_key}
     try:
         if client is not None:
-            resp = await client.post(url, headers=headers, json=body, timeout=timeout_s)
+            resp = await install(client).post(url, headers=headers, json=body, timeout=timeout_s)
         else:
-            async with httpx.AsyncClient(timeout=timeout_s) as owned:
+            async with httpx.AsyncClient(
+                timeout=timeout_s, event_hooks=egress_event_hooks(True)
+            ) as owned:
                 resp = await owned.post(url, headers=headers, json=body)
     except Exception as exc:  # network / DNS / TLS / timeout: no body to echo
         logger.warning("guardrails check unreachable at %s (%s)", _origin(url), type(exc).__name__)

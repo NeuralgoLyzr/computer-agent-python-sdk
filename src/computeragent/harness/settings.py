@@ -85,13 +85,16 @@ class Settings:
 
     def api_key(self) -> str:
         """The key to present, read now: the argument when one was given,
-        else the environment variable as it stands at this call."""
+        else the environment variable as it stands at this call; either way
+        the newest sandbox token of its chain (see ``egress_token``)."""
+        from .egress_token import CREDENTIAL
+
         if self._explicit_api_key is not None:
-            return self._explicit_api_key
+            return CREDENTIAL.resolve(self._explicit_api_key)
         value = _env(self._env, "api_key")
         if value is None:
             raise SettingsError(f"missing required setting: {_spelling('api_key')}")
-        return value
+        return CREDENTIAL.resolve(value)
 
     def __repr__(self) -> str:
         return (

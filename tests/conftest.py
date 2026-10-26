@@ -28,11 +28,14 @@ def _reset_pipeline(monkeypatch):
     for name in ENV_VARS.values():
         monkeypatch.delenv(name, raising=False)
 
+    from computeragent.harness.egress_token import CREDENTIAL
     from computeragent.telemetry import config as _cfg
 
     _cfg._reset_for_tests()
+    CREDENTIAL.reset()
     yield
     _cfg._reset_for_tests()
+    CREDENTIAL.reset()
 
 
 class StubSink:
