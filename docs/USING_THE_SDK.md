@@ -8,7 +8,7 @@ dispatch path would have sent to a ComputerAgent server — same model, same eng
 permission mode — except the engine runs in this process.
 
 **Every call the SDK and its engine make goes through an egress proxy.** Each downstream service is
-reached at a URL you configure — the agent config, the global RAI policies, SRS, the model, MCP and
+reached at a URL you configure — the agent config, the guardrails check, the model, MCP and
 telemetry — and there is no direct path to any of them. The proxy routes each URL to its service and
 swaps the key the SDK presents for the real one.
 
@@ -149,7 +149,7 @@ All parameters are **keyword-only**. The settings in §3 are not repeated here.
 | `session_id` | `str \| None` | generated `ca_…` | Pins the **telemetry** lifecycle session id. |
 | `agent_name` | `str \| None` | agent document's `name` | Telemetry label only. |
 | `agent_description` | `str \| None` | `None` | Telemetry label only. |
-| `policy_decider` | `PolicyDecider \| None` | the SRS gate | Your own tool gate; **replaces** the SRS tool-call gate (§9). The input check still runs. |
+| `policy_decider` | `PolicyDecider \| None` | the guardrails gate | Your own tool gate; **replaces** the guardrails tool-call gate (§9). The input check still runs. |
 | `on_tool_call` | `Callable[[PermissionRequest], Awaitable[dict]] \| None` | `None` | Per-tool callback for engines that emit permission requests (`gitagent`). |
 | `budget_max_usd` | `float \| None` | `None` | Maps to the `max_budget_usd` option the Claude CLI enforces. |
 | `telemetry_pipeline` | `Pipeline \| None` | built from `telemetry_url` | Your own pipeline replaces the one built from the routes (§9). |
@@ -238,8 +238,8 @@ options={
 }
 ```
 
-**`policy_decider` is the real gate.** By default it is the SDK's SRS gate (§9), which checks every
-tool call against the agent's RAI policies. Passing your own **replaces** that gate — the input check
+**`policy_decider` is the real gate.** By default it is the SDK's guardrails gate (§9), which checks every
+tool call against the org's and the agent's RAI policies. Passing your own **replaces** that gate — the input check
 still runs. Under a prompt-skipping mode the engine routes it through a
 `PreToolUse` hook, which fires for *every* tool call regardless of permission mode — so keep the
 default `bypassPermissions` and decide in code:
@@ -485,7 +485,7 @@ are not checked by the SDK; guarding them is the job of whatever the egress prox
 
 ### Your own tool gate
 
-`policy_decider` replaces the SRS tool-call gate — the input check still runs. On the
+`policy_decider` replaces the guardrails tool-call gate — the input check still runs. On the
 `claude-agent-sdk` engine a decider is wired into `can_use_tool` and, under the prompt-skipping
 permission modes this SDK uses, into a `PreToolUse` hook that fires for every tool call. A decider that
 raises fails **closed**. `on_tool_call` fires only on engines that emit permission requests
