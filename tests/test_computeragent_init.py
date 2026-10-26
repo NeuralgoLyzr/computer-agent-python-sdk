@@ -82,8 +82,8 @@ def test_exposes_the_resolved_agent(agent_doc):
     agent = build(agent_doc)
 
     assert agent.agent.agent_id == AGENT_ID
-    assert agent.agent.model == "6aa93f1a75ce74c4e6772b20"
-    assert agent.agent.has_native_gateway
+    assert agent.agent.model == "claude-sonnet-4-5"
+    assert not hasattr(agent.agent, "has_native_gateway")
 
 
 @respx.mock
@@ -103,15 +103,6 @@ def test_resolution_failure_surfaces_at_construction(agent_doc):
 def test_missing_llm_url_is_refused_at_construction():
     with pytest.raises(SettingsError, match="llm_url"):
         ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine=FakeEngine())
-
-
-@respx.mock
-def test_the_agent_documents_gateway_url_is_not_used(agent_doc):
-    """Model calls go to llm_url only, never to the document's gateway."""
-    agent = build(agent_doc)
-    envs = agent._coordinator._envs  # type: ignore[attr-defined]
-
-    assert agent_doc["model_gateway"]["baseUrl"] not in "".join(envs.values())
 
 
 # ── engine selection ─────────────────────────────────────────────────────────
@@ -277,7 +268,7 @@ def test_options_overlay_carries_dispatch_defaults_and_caller_options(agent_doc)
 
     assert overlay["permission_mode"] == "bypassPermissions"
     assert overlay["setting_sources"] == ["project"]
-    assert overlay["model"] == "6aa93f1a75ce74c4e6772b20"
+    assert overlay["model"] == "claude-sonnet-4-5"
     assert overlay["system_prompt"] == "You are terse."
 
 
@@ -383,4 +374,4 @@ async def test_the_resolved_model_reaches_the_engine_context(agent_doc, tmp_path
     async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hello")
 
-    assert engine.contexts[0].manifest.options["model"] == "6aa93f1a75ce74c4e6772b20"
+    assert engine.contexts[0].manifest.options["model"] == "claude-sonnet-4-5"

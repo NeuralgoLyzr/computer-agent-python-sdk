@@ -11,7 +11,7 @@ ComputerAgent(…)            every setting: argument, else its environment vari
         │  constructor, synchronous — fails before anything runs
         ├─▶ settings.resolve_settings()        → Settings (missing ones reported together)
         ├─▶ agentos_agent.resolve_agent()      GET {base_url}/v1/agents/{id}   x-api-key
-        │       └─ ResolvedAgent: harness, model, mcp_mode, mcp_bindings
+        │       └─ ResolvedAgent: harness, model, mcp_bindings
         ├─▶ gateway_envs.build_gateway_envs()  → the engine's environment (llm_url)
         ├─▶ gateway_envs.build_options()       → permission mode, model, caller options
         ├─▶ mcp.build_mcp_servers()            → engine MCP servers on mcp_url

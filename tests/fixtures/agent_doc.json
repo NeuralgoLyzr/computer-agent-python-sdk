@@ -5,36 +5,24 @@
   "harness": "claude-agent-sdk",
   "source": "https://github.com/vrajp-lyzr/general-agent-private",
   "sourceUrl": "https://github.com/vrajp-lyzr/general-agent-private",
-  "model": "Anthropic:anthropic/claude-sonnet-4-6",
-  "modelGatewayId": "6a9a6c9893432debd1668743",
-  "model_gateway": {
-    "id": "6a9a6c9893432debd1668743",
-    "slug": "lyzr-studio",
-    "label": "Lyzr Studio",
-    "type": "native",
-    "baseUrl": "https://excellent-flavor-glance-myspace.trycloudflare.com",
-    "completionsUrl": "https://excellent-flavor-glance-myspace.trycloudflare.com/v4/chat/completions",
-    "models": [
-      "OpenAI:gpt-4o",
-      "Anthropic:anthropic/claude-haiku-4-5",
-      "Anthropic:anthropic/claude-sonnet-4-6",
-      "Google:gemini/gemini-2.5-pro",
-      "Aws-Bedrock:bedrock/us.anthropic.claude-sonnet-4-6"
-    ],
-    "isDefault": true,
-    "ownerGroup": "ac9b6d5f-fbbc-41b6-b832-3e5e47e31c83",
-    "hasSecret": false,
-    "binding": {
-      "model": "Anthropic:anthropic/claude-sonnet-4-6",
-      "externalModelId": "6aa93f1a75ce74c4e6772b20",
-      "raiPolicyId": null
+  "credential_id": "fe5e3df8-bbf5-4aba-ada7-e312a1da44a7",
+  "llm": {
+    "provider": "kong",
+    "config": {
+      "model": "claude-sonnet-4-5"
     }
   },
-  "credential_id": "fe5e3df8-bbf5-4aba-ada7-e312a1da44a7",
+  "guardrails": {
+    "provider": "lyzr-srs",
+    "config": {
+      "id": "pol_1"
+    }
+  },
+  "mcp": {
+    "provider": "lyzr-mcp",
+    "servers": []
+  },
   "type": "client",
-  "rai_policy_id": null,
-  "mcp_servers": [],
-  "mcp_mode": "engine",
   "runtime": null,
   "orchestration": null,
   "origin": "registry",

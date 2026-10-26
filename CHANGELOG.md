@@ -52,6 +52,12 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   engine's `PreToolUse` hook passes it, `PolicyToolAuthorizer` puts it in the
   policy input as `call_id`, and a call without one is denied.
 - A rewritten message carries the gateway's masked text (`[EMAIL]`).
+- **BREAKING: the agent document is read from its gateway sections.** The
+  model is `llm.config.model` (the gateway agent's kong model; `null` → the
+  image's own model) and the MCP servers are `mcp.servers`, every one attached
+  to the engine. `guardrails` is not read. A document without these sections
+  resolves with no model and no MCP servers. For gitagent a model without a
+  `provider:` prefix always gets `openai:`.
 - **BREAKING: MCP servers are addressed by name.** Each bound server is
   `{mcp_url}/{tool_name}` (one percent-encoded segment) with no query; the
   server id path and the `?tools=` query are gone, since the gateway resolves
@@ -76,6 +82,12 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   `SrsTurnGuard.resolve_turn` are deleted. The SDK no longer runs a separate
   content check on a tool call's string arguments; the tool call goes to the
   gateway as one `tool-input` check.
+- **BREAKING: model-gateway and MCP-mode handling.** `ResolvedAgent.gateway_type`,
+  `gateway_base_url`, `gateway_completions_url`, `has_native_gateway` and
+  `mcp_mode`, `DEFAULT_MCP_MODE`, `build_mcp_servers(mcp_mode=)`, the generic
+  gateway refusal and the unresolved-binding refusal are gone; `model`,
+  `model_gateway`, `modelGatewayId`, `mcp_servers` and `mcp_mode` are no longer
+  read.
 - **BREAKING: the standalone SRS policy engine.** `SrsPolicyEngine`,
   `srs_authorizer_from_env` and `computeragent.policy.srs` are gone; nothing
   fetches `{srs}/rai/policies/{id}` any more. Use the built-in guardrails gate,

@@ -161,7 +161,6 @@ After construction, `agent.agent` is the `ResolvedAgent`:
 agent.agent.name             # str
 agent.agent.harness          # "claude-agent-sdk" | "gitagent"
 agent.agent.model            # what goes on the wire
-agent.agent.mcp_mode         # "engine" | "studio"
 agent.agent.mcp_bindings     # tuple[McpBinding, ...]
 ```
 
@@ -288,11 +287,13 @@ You do **not** pass any of these — `GET {base_url}/v1/agents/{id}` answers the
 
 | From the document | Becomes |
 |---|---|
-| `model_gateway.binding.externalModelId` → `.model` → top-level `model` | the model string put on the wire |
-| `mcp_mode`, `mcp_servers` | the MCP servers attached to the engine (below) |
+| `llm.config.model` | the model put on the wire (the gateway agent's kong model); `llm` null or no model → the image's own model |
+| `mcp.servers` | the MCP servers attached to the engine (below) |
 
-The document's `source` and gateway URL are **not** used: the agent is baked into the image, and
-every model call goes to `llm_url`.
+`guardrails` is **not** read: the agent gateway applies it (§9). The document's `source` is not used
+(the agent is baked into the image), and every model call goes to `llm_url`. A document without the
+`llm` and `mcp` sections resolves with no model and no MCP servers; the older fields (`model`,
+`model_gateway`, `mcp_servers`, `mcp_mode`, `rai_policy_id`) are not read.
 
 ### Where the agent comes from
 
@@ -328,12 +329,13 @@ variables stop the Claude CLI's own background traffic (telemetry, error reporti
 which would otherwise go straight to Anthropic and Datadog. `CLAUDE_CODE_USE_BEDROCK` is removed from
 your `envs=`, because the CLI would route through Bedrock and ignore `ANTHROPIC_BASE_URL`.
 
-For a native gateway the model is the binding's `externalModelId` (the backing Lyzr Studio agent id),
-not the catalog name — which is why overriding `options={"model": ...}` is usually a mistake.
+The model is the gateway agent's kong model (`llm.config.model`), the only model the agent gateway
+accepts for this agent — which is why overriding `options={"model": ...}` is usually a mistake. For
+gitagent a model without a `provider:` prefix gets `openai:`; the Claude engine strips any prefix.
 
 ### MCP servers
 
-With `mcp_mode` `"engine"` (the default), each binding becomes an engine MCP server:
+Each binding in `mcp.servers` becomes an engine MCP server:
 
 ```python
 mcp_servers[tool_name] = {
@@ -351,7 +353,6 @@ mcp_servers[tool_name] = {
   and a warning names it.
 - `allowed_tools` gets `mcp__<tool_name>` on Anthropic-shaped engines only; gitagent treats
   `allowed_tools` as a strict allowlist.
-- With any other `mcp_mode`, Studio runs the tools and nothing is attached.
 
 They are added to the servers the identity loader resolved (a GAP agent's `gap_tools` server stays);
 an `mcp_servers` key in your own `options` still wins.
@@ -574,10 +575,9 @@ All of these are raised **from the constructor**, before anything runs.
 | Shape | Message names | What to do |
 |---|---|---|
 | `harness` not in `{claude-agent-sdk, gitagent}` | `harness` | Pass your own `EngineDriver` as `engine`. |
-| `model_gateway.type != "native"` | `model_gateway.type` | Bind the agent to a native gateway, or none. |
-| an `mcp_servers` binding with no `server_id` or `tool_name` | `mcp_servers[i]` | Fix the binding in AgentOS. |
+| `mcp` not an object, or `mcp.servers` not a list | `mcp` / `mcp.servers` | Fix the agent in AgentOS. |
+| an `mcp.servers` binding with no `server_id` or `tool_name` | `mcp.servers[i]` | Fix the binding in AgentOS. |
 | `orchestration` set | `orchestration` | Sub-agent fan-out is not supported. |
-| `modelGatewayId` set but `model_gateway` absent | `did not resolve` | The binding did not resolve for this caller; check the agent's `ownerGroup`. |
 | GAP mode with `mcp_servers` in `agent.yaml` | the server names | Bind those servers to the agent in AgentOS. |
 
 ---
@@ -591,7 +591,7 @@ All of these are raised **from the constructor**, before anything runs.
 | `AgentResolveError: no agent … (404)` | `agent_id` is not the 24-hex Mongo `_id`. | Take the id from the agent's URL in AgentOS. |
 | Every turn ends with `[Content blocked: RAI policy check failed: guardrails …]` | The guardrails check reached no verdict. | Check the `guardrails_url` route on the egress proxy; the status and error code follow `guardrails`. |
 | Every tool call is denied with `guardrails 4xx` / `guardrails unreachable` | The `guardrails_url` route or the key's permission; a `400` is a body the SDK got wrong. | Check the route; report a `400`. |
-| A tool you expected is missing | A sign-in MCP binding the caller has not connected (logged as withheld), or `mcp_mode` is not `"engine"`. | Connect the account in Studio, or check `agent.agent.mcp_mode`. |
+| A tool you expected is missing | A sign-in MCP binding the caller has not connected (logged as withheld), or the agent document has no `mcp` section. | Connect the account in Studio, or check `agent.agent.mcp_bindings`. |
 | `400 context_management: Extra inputs are not permitted` | The Claude CLI injected experimental betas. | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set automatically; check nothing in `envs=` is lost. |
 | `UnknownEngineError` / `UnknownSessionStoreError` | Typo, or a plugin you meant to register. | The message lists what *is* registered. |
 
@@ -606,7 +606,6 @@ turn, tool calls, the reply — so a failure localises itself.
 ## 12. Known limitations
 
 - **Sub-agent orchestration is not supported**; an agent with `orchestration` set is refused.
-- **Only `native` gateways (or none).** Generic gateways are refused.
 - **Only two harnesses run in-process:** `claude-agent-sdk` and `gitagent`.
 - **Model calls inside a turn are not checked by the SDK**; see §9.
 - **Concurrent `chat()`s on one instance are refused.** Run concurrent work as separate instances.

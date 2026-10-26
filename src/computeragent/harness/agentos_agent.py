@@ -2,9 +2,13 @@
 
 The single entry point for the SDK's one run mode: give it an AgentOS API base,
 an agent id, and a Lyzr workspace key, and it returns everything needed to run
-that agent locally — harness, the effective model, and the model gateway it is
-bound to. The agent itself is baked into the image, so the document's source is
-not read.
+that agent locally: the harness, the model and the MCP servers. The agent itself
+is baked into the image, so the document's source is not read.
+
+Fields read: ``id``, ``name``, ``harness``, ``type``, ``orchestration``, and
+the gateway sections ``llm`` (``llm.config.model``) and ``mcp``
+(``mcp.servers``). ``guardrails`` is not read: the agent gateway applies it.
+A document without these sections resolves with no model and no MCP servers.
 
     GET {base_url}/v1/agents/{agent_id}      header: x-api-key: <lyzr key>
 
@@ -36,7 +40,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
-from .mcp import DEFAULT_MCP_MODE, McpBinding, McpBindingError, parse_bindings
+from .mcp import McpBinding, McpBindingError, parse_bindings
 
 logger = logging.getLogger("computeragent.agentos_agent")
 
@@ -68,25 +72,13 @@ class ResolvedAgent:
     agent_id: str
     name: str
     harness: str
-    #: The model string to put on the wire. For a native gateway this is the
-    #: backing Lyzr Studio agent id, NOT the catalog name — see `model_of`.
+    #: The model string to put on the wire: the gateway agent's kong model
+    #: (``llm.config.model``), or ``None`` to use the image's own model.
     model: str | None
-    #: ``"native"``, or ``None`` when the agent has no effective gateway.
-    gateway_type: str | None
-    gateway_base_url: str | None
-    #: The server's own ``{baseUrl}{LYZR_UPSTREAM_PATH}``. Preferred over
-    #: reconstructing the path client-side.
-    gateway_completions_url: str | None
     agent_type: str | None
-    #: Who runs the MCP tool loop: ``"engine"`` attaches the bound servers to
-    #: the engine, anything else leaves the tools to Studio.
-    mcp_mode: str = DEFAULT_MCP_MODE
-    #: MCP servers bound to the agent, as AgentOS resolved them for the caller.
+    #: MCP servers bound to the agent (``mcp.servers``), as AgentOS resolved
+    #: them for the caller.
     mcp_bindings: tuple[McpBinding, ...] = ()
-
-    @property
-    def has_native_gateway(self) -> bool:
-        return self.gateway_type == "native"
 
 
 def api_base(base_url: str) -> str:
@@ -130,23 +122,16 @@ def api_base(base_url: str) -> str:
 
 
 def model_of(doc: dict[str, Any]) -> str | None:
-    """The model string AgentOS would have dispatched.
+    """The model the agent gateway accepts for this agent: ``llm.config.model``.
 
-    Mirrors ``modelForDispatch`` (agent-defs.ts): the gateway binding's
-    ``externalModelId`` wins, else its ``model``, else the doc's top-level
-    ``model``. For a **native** gateway ``externalModelId`` is the backing Lyzr
-    Studio agent id (a Mongo ObjectId) — that is what goes upstream as the
-    OpenAI ``model``. The catalog name (``"Anthropic:anthropic/claude-…"``) only
-    ever configured the Studio agent; sending it to the gateway is a 500.
-
-    ``None`` means "nothing bound" — let the GAP repo's ``agent.yaml`` decide.
+    ``None`` when ``llm`` or its ``config`` is absent, null or not an object, or
+    the model is blank: the image's own model is used (the GAP ``agent.yaml``
+    ``model.preferred``). ``llm.provider`` is not read.
     """
-    gateway = doc.get("model_gateway") or {}
-    binding = gateway.get("binding") or {} if isinstance(gateway, dict) else {}
-    for candidate in (binding.get("externalModelId"), binding.get("model"), doc.get("model")):
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate
-    return None
+    llm = doc.get("llm")
+    config = llm.get("config") if isinstance(llm, dict) else None
+    model = config.get("model") if isinstance(config, dict) else None
+    return model if isinstance(model, str) and model.strip() else None
 
 
 def require_runnable_harness(agent: ResolvedAgent, *, engine_given: bool) -> None:
@@ -169,44 +154,11 @@ def require_runnable_harness(agent: ResolvedAgent, *, engine_given: bool) -> Non
 
 
 def _require_supported(doc: dict[str, Any], agent_id: str) -> None:
-    """Refuse agent shapes this run mode does not implement, naming the field.
-
-    A *null* gateway is fine — that is a direct-Anthropic run, exactly what the
-    TS ``defaultEnvsFor`` produces when nothing resolves. Only a **generic**
-    gateway is refused, because its upstream contract differs.
-    """
-    gateway = doc.get("model_gateway")
-    if isinstance(gateway, dict):
-        gateway_type = gateway.get("type")
-        if gateway_type != "native":
-            raise UnsupportedAgentError(
-                f"agent {agent_id}: model_gateway.type={gateway_type!r} is not supported — this "
-                "run mode implements native gateways (and no gateway at all), not generic ones."
-            )
-
+    """Refuse agent shapes this run mode does not implement, naming the field."""
     if doc.get("orchestration") is not None:
         raise UnsupportedAgentError(
             f"agent {agent_id}: orchestration is set and sub-agent fan-out is not supported in this "
             "run mode. The agent would run as a plain single agent, which is not what it declares."
-        )
-
-
-def _require_consistent_gateway(doc: dict[str, Any], agent_id: str) -> None:
-    """Port of ``requireConsistentGatewayBinding`` (agent-defs.ts:220).
-
-    A binding that names an ``externalModelId`` while its gateway failed to
-    resolve is the one case where the *catalog* name would reach the gateway
-    and 500 it. Server-side that is a 503 before dispatch; here it is a refusal
-    before boot.
-    """
-    gateway = doc.get("model_gateway")
-    if isinstance(gateway, dict):
-        return  # gateway resolved — nothing to reconcile
-    if doc.get("modelGatewayId"):
-        raise UnsupportedAgentError(
-            f"agent {agent_id}: bound to modelGatewayId={doc['modelGatewayId']!r} but the server "
-            "returned no model_gateway — the binding did not resolve for this caller. Check that "
-            "the agent's ownerGroup matches a group with a configured gateway."
         )
 
 
@@ -266,33 +218,25 @@ def resolve_agent(
         )
 
     _require_supported(doc, agent_id)
-    _require_consistent_gateway(doc, agent_id)
 
     try:
-        mcp_bindings = parse_bindings(doc.get("mcp_servers"))
+        mcp_bindings = parse_bindings(doc.get("mcp"))
     except McpBindingError as exc:
         raise UnsupportedAgentError(f"agent {agent_id}: {exc}") from None
-    mcp_mode = doc.get("mcp_mode")
 
-    gateway = doc.get("model_gateway") if isinstance(doc.get("model_gateway"), dict) else None
     resolved = ResolvedAgent(
         agent_id=str(doc.get("id") or agent_id),
         name=str(doc.get("name") or agent_id),
         harness=str(doc.get("harness") or "claude-agent-sdk"),
         model=model_of(doc),
-        gateway_type=(gateway or {}).get("type"),
-        gateway_base_url=(gateway or {}).get("baseUrl"),
-        gateway_completions_url=(gateway or {}).get("completionsUrl"),
         agent_type=doc.get("type"),
-        mcp_mode=mcp_mode if isinstance(mcp_mode, str) and mcp_mode else DEFAULT_MCP_MODE,
         mcp_bindings=mcp_bindings,
     )
     logger.debug(
-        "resolved agent %s name=%r harness=%s gateway=%s model=%s",
+        "resolved agent %s name=%r harness=%s model=%s",
         agent_id,
         resolved.name,
         resolved.harness,
-        resolved.gateway_type,
         resolved.model,
     )
     return resolved
