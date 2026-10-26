@@ -12,6 +12,18 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 
 ### Added
 
+- **The app server for stage images** (`computeragent.server`, extra `server`).
+  `python -m computeragent.server` serves CAS's harness REST API on `0.0.0.0:8080`:
+  - the Lambda MicroVM lifecycle hooks, health, sessions, messages, events,
+    end-input, cancel, approvals and the workspace file routes;
+  - one `ComputerAgent` per session, built from the image's settings;
+  - the sandbox token from the session's `envs`, replaced by each turn's
+    `credential`;
+  - events in CAS's `sse-events.ts` shapes, including the turn start, the
+    input-guardrail outcome, tool-gate decisions and usage.
+
+  `ComputerAgent.workspace` and `ComputerAgent.telemetry_pipeline`, and
+  `computeragent.engines.registered_engines()`, are new.
 - **Sandbox token reissue is adopted by every client.** An egress answer that
   carries `X-Cas-Token` / `X-Cas-Token-Expires-At` (an `sbt_` token with a later
   expiry, on a request sent with the newest token) makes every later egress

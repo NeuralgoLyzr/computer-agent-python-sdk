@@ -436,6 +436,8 @@ class ComputerAgent:
                 api_key=self._settings.api_key,
             )
             telemetry_pipeline = self._owned_pipeline
+        self._telemetry_pipeline = telemetry_pipeline
+        self._workspace = workspace
 
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
@@ -477,6 +479,17 @@ class ComputerAgent:
                 with suppress(Exception):
                     await self._owned_pipeline.aclose()
                 self._owned_pipeline = None
+
+    @property
+    def telemetry_pipeline(self) -> Pipeline:
+        """The pipeline this agent's turns emit to (its own, or the caller's)."""
+        return self._telemetry_pipeline
+
+    @property
+    def workspace(self) -> Path:
+        """The directory the engine runs in: ``gap_dir`` in GAP mode, else the
+        working directory at construction."""
+        return self._workspace
 
     def chat(self, message: ChatInput) -> ChatHandle:
         """Start one chat turn. Returns immediately; iterate or await the
