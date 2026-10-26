@@ -14,6 +14,7 @@ status codes and error codes follow the reference harness,
     POST /v1/sessions/{id}/end-input | /cancel    {ok: true}
     POST /v1/sessions/{id}/permission/{callId}    {decision, input?, reason?} → {ok: true}
     GET|PUT|DELETE /v1/sessions/{id}/fs/file, GET …/fs/tree, POST …/fs/{edit,mkdir,move}
+    GET  /ping, POST /invocations                  AgentCore: the same routes in relay envelope v1 (relay.py)
 
 One ``ComputerAgent`` per session, built from the image's settings
 (``COMPUTERAGENT_*``) with no ``api_key=``: the session's
@@ -679,8 +680,15 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
                 await s.cancel()
                 await s.dispose()
 
+    from .relay import relay_routes
+
+    # AgentCore: the same routes inside relay envelope v1 (relay.py).
+    ping, invocations = relay_routes(lambda: app, busy)
+
     app = Starlette(
         routes=[
+            Route("/ping", ping, methods=["GET"]),
+            Route("/invocations", invocations, methods=["POST"]),
             Route(HOOK_PREFIX + "{hook}", lifecycle_hook, methods=["POST", "GET"]),
             Route("/v1/health", health),
             Route("/v1/sessions", create_session, methods=["POST"]),

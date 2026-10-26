@@ -739,3 +739,19 @@ delete removes a file or an empty directory only: a non-empty directory answers
 `409 WORKDIR_DIRECTORY_NOT_EMPTY`, also with `recursive=true`.
 
 The server never logs `envs`, a `credential`, a request header or a body.
+
+### On AgentCore
+
+The same process also serves AgentCore's front door, so one image build covers both runtimes (build
+it `linux/arm64` for AgentCore):
+
+- `GET /ping` → `{"status": "Healthy" | "HealthyBusy", "time_of_last_update": <unix seconds>}`,
+  `HealthyBusy` while a turn runs.
+- `POST /invocations` carries relay envelope v1, `{relay: 1, method, path, headers, body | bodyBase64}`
+  (`path` with its query; `bodyBase64` for bytes that are not UTF-8), and replays it in-process on
+  the routes above. The answer is always HTTP 200:
+  - a server-sent-event answer streams as `text/event-stream`, with a first frame
+    `: ca-relay {"instance": …, "status": …}`;
+  - any other answer is `{relay: 1, instance, status, headers, body | bodyBase64}`;
+  - a malformed envelope is that JSON with `status: 400` and code `AGENTCORE_RELAY_REQUEST_INVALID`.
+- `instance` is minted on the first invocation, so CAS can tell when AgentCore replaced the microVM.
