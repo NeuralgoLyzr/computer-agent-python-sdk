@@ -166,3 +166,17 @@ async def test_an_object_that_is_not_a_store_is_refused(agent_doc, tmp_path):
 
     with pytest.raises((UnknownSessionStoreError, TypeError, AttributeError)):
         build(agent_doc, session_store=object())
+
+
+def test_descriptor_error_never_echoes_values():
+    from computeragent.harness.errors import UnknownSessionStoreError
+    from computeragent.session_stores import resolve_session_store
+
+    with pytest.raises(UnknownSessionStoreError) as exc:
+        resolve_session_store({"options": {"base_url": "http://x", "token": "sekrit"}})
+
+    message = str(exc.value)
+    for name in ("options", "base_url", "token"):
+        assert name in message
+    assert "sekrit" not in message
+    assert "http://x" not in message

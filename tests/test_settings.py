@@ -58,6 +58,7 @@ def test_every_setting_has_an_env_var():
         "mcp_url": "COMPUTERAGENT_MCP_URL",
         "guardrails_url": "COMPUTERAGENT_GUARDRAILS_URL",
         "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
+        "session_store_url": "COMPUTERAGENT_SESSION_STORE_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
 
@@ -131,7 +132,7 @@ def test_every_missing_setting_is_reported_at_once():
 
     message = str(exc.value)
     for name, var in ENV_VARS.items():
-        if name in ("gap_dir", "telemetry_url"):
+        if name in ("gap_dir", "telemetry_url", "session_store_url"):
             assert name not in message
             continue
         assert f"{name} (or {var})" in message
@@ -253,3 +254,20 @@ def test_api_key_resolves_the_chain(explicit):
     CREDENTIAL.adopt("sbt_root", "sbt_next", expiry)
 
     assert settings.api_key() == "sbt_next"
+
+
+def test_session_store_url():
+    assert resolve(FULL_ENV).session_store_url is None
+    assert (
+        resolve(
+            {**FULL_ENV, "COMPUTERAGENT_SESSION_STORE_URL": "http://egress/computer-agent-api/"}
+        ).session_store_url
+        == "http://egress/computer-agent-api"
+    )
+
+
+@pytest.mark.parametrize("bad", ["egress/x", "ftp://x", "http://e/x?y=1", "http://e/x#f"])
+def test_session_store_url_is_validated(bad):
+    with pytest.raises(SettingsError, match="session_store_url") as exc:
+        resolve(FULL_ENV, session_store_url=bad)
+    assert bad not in str(exc.value)

@@ -111,6 +111,7 @@ request is made. A URL setting must be an `http(s)` URL.
 | `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
 | `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{server_id}`. |
 | `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
+| `session_store_url` | `COMPUTERAGENT_SESSION_STORE_URL` | no | Base URL for the `http` session store (§7), e.g. `http://egress/computer-agent-api`; no query or fragment. |
 | `gap_dir` | `COMPUTERAGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
 
 The requests made from each route, all with `x-api-key: <api_key>`:
@@ -379,7 +380,20 @@ Two more kinds ship with the SDK:
 | Kind | Options | Notes |
 |---|---|---|
 | `mongo` | `url` **(required)**, `database`, `collection`, `owner_user`, `owner_group` | One document per transcript, uuid-deduped. Warns loudly when `database` is unset — the fallback is *not* the database AgentOS reads. Needs the `[mongo]` extra. |
-| `http` | `base_url` **(required)**, `token` **(required)**, `append_timeout`, `load_timeout`, `auto_refresh` | Two verbs against the CAS, which does the write in-pod — for a harness that cannot hold a database credential. `load` never raises: a store outage costs a session its resume, not its life. |
+| `http` | `base_url` **(required unless `session_store_url` is set)**, `append_timeout`, `load_timeout` | Two verbs (`GET`/`POST {base_url}/session-store/entries`) against the session-store service, which does the write — for a harness that cannot hold a database credential. `load` never raises: a store outage costs a session its resume, not its life. |
+
+**The `http` kind behind the egress proxy.** Set `COMPUTERAGENT_SESSION_STORE_URL=http://egress/computer-agent-api`
+(or `session_store_url=`), so requests go to `http://egress/computer-agent-api/session-store/entries`:
+
+- with the setting, kind `http` (a string or a descriptor) takes its `base_url` from it, and any
+  `base_url` / `baseUrl` in the descriptor is ignored;
+- without it, the descriptor's `options.base_url` is required (`baseUrl` is not read);
+- a store instance or any other kind ignores the setting.
+
+The store sends only `x-api-key`: `LYZR_API_KEY` read at each request, as the newest sandbox token
+(§8a). There is no store token and no refresh; a `token` option is ignored. The proxy swaps the key
+for the Lyzr key and names the session the service scopes the entries to. Without `LYZR_API_KEY` no
+credential is sent (a local, unauthenticated store).
 
 An unknown kind raises `UnknownSessionStoreError` naming the registered set, and a known kind
 missing a required option raises `ValueError` naming the option — the registry is self-documenting.
