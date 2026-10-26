@@ -16,7 +16,7 @@ ComputerAgent(…)            every setting: argument, else its environment vari
         ├─▶ gateway_envs.build_options()       → permission mode, model, caller options
         ├─▶ mcp.build_mcp_servers()            → engine MCP servers on mcp_url
         ├─▶ SrsToolGate + PolicyToolAuthorizer → the tool-call gate
-        ├─▶ telemetry.build_pipeline()         → sinks on telemetry_url / events_url
+        ├─▶ telemetry.build_pipeline()         → the OTLP sink on telemetry_url
         │
         └─▶ HarnessCoordinator
                 │  lazily, on the first chat()
@@ -36,7 +36,7 @@ has no knowledge of what is underneath it.
 ## Every call goes through an egress route
 
 Each downstream service is reached only at a configured URL: `base_url`, `agent_api_url`,
-`srs_url`, `llm_url`, `mcp_url`, and optionally `telemetry_url` and `events_url`. There is no
+`srs_url`, `llm_url`, `mcp_url`, and optionally `telemetry_url`. There is no
 fallback to a discovered or default destination, and the engine env switches off the Claude CLI's
 own background traffic. Every request carries `x-api-key: <api_key>`, which the egress proxy swaps.
 `Settings.api_key()` reads the environment at each use, so the key can be replaced while an agent
@@ -58,7 +58,7 @@ despite being an HTTP call.
 | `harness/gateway_envs.py` | The engine environment for `llm_url`, and the model string per the TS dispatch. |
 | `harness/mcp.py` | AgentOS MCP bindings → engine MCP servers on `mcp_url` (port of CAS `applyMcpServers`). |
 | `harness/guardrails.py` | Per-turn policy resolution and the input check. |
-| `harness/telemetry.py` | The pipeline built from `telemetry_url` / `events_url`. |
+| `harness/telemetry.py` | The pipeline built from `telemetry_url`. |
 | `harness/__init__.py` | `ComputerAgent`, `ChatHandle`, `ChatResult`, and the wiring above. |
 | `harness/coordinator.py` | Boot, turn lifecycle, the turn guard hook, engine-event → telemetry translation. |
 | `policy/org_policy.py`, `policy/srs_client.py`, `policy/srs_gate.py`, `policy/srs_input.py` | Ports of CAS's org-policy fetch, SRS v1 calls, tool gate and input check. |
@@ -107,8 +107,7 @@ that raises fails closed.
 
 ## Telemetry
 
-A `ComputerAgent` builds its own pipeline from `telemetry_url` (OTLP) and `events_url` (dashboard
-events); unset routes are off and the module-level, environment-driven pipeline is not used. The
+A `ComputerAgent` builds its own pipeline from `telemetry_url` (OTLP); unset, telemetry is off and the module-level, environment-driven pipeline is not used. The
 coordinator owns the hot path — engines never call `pipeline.emit`, or events would double-fire
 when an engine is composed under the harness. One `ComputerAgent` is one logical session:
 `session_started` on the first chat, `session_ended` on dispose, so N chats are N turns of one

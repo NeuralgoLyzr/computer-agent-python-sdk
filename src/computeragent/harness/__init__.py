@@ -260,10 +260,9 @@ class ComputerAgent:
         # check is made against SRS at `srs_url`.
         agent_api_url: str | None = None,
         srs_url: str | None = None,
-        # Optional egress routes for telemetry: OTLP to `telemetry_url`, the
-        # AgentOS dashboard events to `{events_url}/events`. Unset is off.
+        # Optional egress route for telemetry: OTLP to `telemetry_url`. Unset
+        # is off.
         telemetry_url: str | None = None,
-        events_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
@@ -294,7 +293,6 @@ class ComputerAgent:
             agent_api_url=agent_api_url,
             srs_url=srs_url,
             telemetry_url=telemetry_url,
-            events_url=events_url,
             gap_dir=gap_dir,
         )
         engine = self._settings.engine
@@ -423,7 +421,6 @@ class ComputerAgent:
         if telemetry_pipeline is None:
             self._owned_pipeline = build_pipeline(
                 telemetry_url=self._settings.telemetry_url,
-                events_url=self._settings.events_url,
                 api_key=self._settings.api_key,
             )
             telemetry_pipeline = self._owned_pipeline

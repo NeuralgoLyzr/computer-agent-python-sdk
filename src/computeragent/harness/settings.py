@@ -33,7 +33,6 @@ ENV_VARS: dict[str, str] = {
     "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
     "srs_url": "COMPUTERAGENT_SRS_URL",
     "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
-    "events_url": "COMPUTERAGENT_EVENTS_URL",
     "gap_dir": "COMPUTERAGENT_GAP_DIR",
 }
 
@@ -42,7 +41,7 @@ URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url", "agent_api_url", "srs_url
 
 #: Egress routes that may be unset (the feature is then off), but must be
 #: http(s) URLs when set.
-OPTIONAL_URL_SETTINGS: tuple[str, ...] = ("telemetry_url", "events_url")
+OPTIONAL_URL_SETTINGS: tuple[str, ...] = ("telemetry_url",)
 
 
 class SettingsError(AgentResolveError):
@@ -82,7 +81,6 @@ class Settings:
     agent_api_url: str
     srs_url: str
     telemetry_url: str | None
-    events_url: str | None
     gap_dir: str | Path | None
     _explicit_api_key: str | None
     _env: Mapping[str, str]
@@ -102,7 +100,7 @@ class Settings:
             f"Settings(agent_id={self.agent_id!r}, engine={self.engine!r}, "
             f"base_url={self.base_url!r}, llm_url={self.llm_url!r}, mcp_url={self.mcp_url!r}, "
             f"agent_api_url={self.agent_api_url!r}, srs_url={self.srs_url!r}, "
-            f"telemetry_url={self.telemetry_url!r}, events_url={self.events_url!r}, "
+            f"telemetry_url={self.telemetry_url!r}, "
             f"gap_dir={self.gap_dir!r}, api_key=<hidden>)"
         )
 
@@ -118,7 +116,6 @@ def resolve_settings(
     agent_api_url: str | None,
     srs_url: str | None,
     telemetry_url: str | None,
-    events_url: str | None,
     gap_dir: str | Path | None,
     env: Mapping[str, str] | None = None,
 ) -> Settings:
@@ -140,7 +137,6 @@ def resolve_settings(
         "agent_api_url": agent_api_url,
         "srs_url": srs_url,
         "telemetry_url": telemetry_url,
-        "events_url": events_url,
     }
     urls = {
         name: given_urls[name] if _given(given_urls[name]) else _env(source, name)
@@ -184,7 +180,6 @@ def resolve_settings(
         agent_api_url=str(urls["agent_api_url"]).rstrip("/"),
         srs_url=str(urls["srs_url"]).rstrip("/"),
         telemetry_url=_optional_url(urls["telemetry_url"]),
-        events_url=_optional_url(urls["events_url"]),
         gap_dir=resolved_gap_dir,
         _explicit_api_key=explicit_key,
         _env=source,

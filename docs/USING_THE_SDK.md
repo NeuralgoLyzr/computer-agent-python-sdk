@@ -114,7 +114,6 @@ request is made. A URL setting must be an `http(s)` URL.
 | `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
 | `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{server_id}`. |
 | `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
-| `events_url` | `COMPUTERAGENT_EVENTS_URL` | no | Route for the AgentOS dashboard events, posted to `{events_url}/events`. Unset: none sent. |
 | `gap_dir` | `COMPUTERAGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
 
 The requests made from each route, all with `x-api-key: <api_key>`:
@@ -127,7 +126,6 @@ The requests made from each route, all with `x-api-key: <api_key>`:
 | `llm_url` | the engine's own model calls (`/v1/messages`, `/chat/completions`) |
 | `mcp_url` | the engine's MCP calls |
 | `telemetry_url` | `POST /v1/traces`, `/v1/metrics`, `/v1/logs` |
-| `events_url` | `POST {events_url}/events` |
 
 ### `base_url` — three accepted spellings
 
@@ -158,7 +156,7 @@ All parameters are **keyword-only**. The settings in §3 are not repeated here.
 | `policy_decider` | `PolicyDecider \| None` | the SRS gate | Your own tool gate; **replaces** the SRS tool-call gate (§9). The input check still runs. |
 | `on_tool_call` | `Callable[[PermissionRequest], Awaitable[dict]] \| None` | `None` | Per-tool callback for engines that emit permission requests (`gitagent`). |
 | `budget_max_usd` | `float \| None` | `None` | Maps to the `max_budget_usd` option the Claude CLI enforces. |
-| `telemetry_pipeline` | `Pipeline \| None` | built from `telemetry_url` / `events_url` | Your own pipeline replaces the one built from the routes (§9). |
+| `telemetry_pipeline` | `Pipeline \| None` | built from `telemetry_url` | Your own pipeline replaces the one built from the routes (§9). |
 
 After construction, `agent.agent` is the `ResolvedAgent`:
 
@@ -508,14 +506,13 @@ raises fails **closed**. `on_tool_call` fires only on engines that emit permissi
 
 ### Telemetry
 
-A `ComputerAgent` builds its pipeline from the routes:
+A `ComputerAgent` builds its pipeline from its telemetry route:
 
 | Route | Sink | Auth |
 |---|---|---|
 | `telemetry_url` | OTLP (`OtelSink`, needs the `otel` extra) | `x-api-key`, read when the agent is built |
-| `events_url` | AgentOS dashboard events (`AgentOSHttpSink`), `POST {events_url}/events` | `x-api-key`, read at every POST |
 
-An unset route turns that output off. `AGENTOS_DISCOVERY_URL`, `AGENTOS_INGEST_URL`, `AGENTOS_OTEL_URL`
+An unset `telemetry_url` turns telemetry off. There is no AgentOS dashboard events sink. `AGENTOS_DISCOVERY_URL`, `AGENTOS_INGEST_URL`, `AGENTOS_OTEL_URL`
 and `OTEL_EXPORTER_OTLP_ENDPOINT` are **not** consulted, so telemetry never goes around the egress
 proxy. Content capture and attribute limits still come from `COMPUTERAGENT_CAPTURE_CONTENT`,
 `COMPUTERAGENT_CAPTURE_CONTENT_MODE`, `COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH` and
@@ -640,6 +637,6 @@ cooperative and cannot enforce a deadline on a wedged turn.
 
 ### Telemetry
 
-`capture_content` defaults to **False**. With neither `telemetry_url` nor `events_url` set, an agent
+`capture_content` defaults to **False**. Without `telemetry_url`, an agent
 sends no telemetry at all. Nothing is written to your console unless you build your own pipeline with
 `configure(exporter="console")` and pass it as `telemetry_pipeline=`.

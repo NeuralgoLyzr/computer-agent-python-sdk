@@ -24,12 +24,11 @@ Run:
 
 What it does:
 * Configures the telemetry pipeline with PII redaction + guardrails.
-* Fans out to OtelSink (→ otel-collector → ClickHouse → SPA Observability) and
-  AgentOSHttpSink (→ POST /agentos/api/ingest/events → the server writes
-  agent_registry + agent_logs + sessions + chat_sessions + agent_messages).
+* Sends telemetry to OtelSink (→ otel-collector → ClickHouse → SPA Observability).
 * Runs a small agent that reads a couple of files in a scratch dir, so we
   generate tool_use + tool_result + usage_snapshot events.
-* Prints a mongosh-style summary of what landed in each collection.
+* Prints a mongosh-style summary of the AgentOS collections (the SDK no longer
+  writes them: it has no events sink).
 
 Then open http://localhost:8080 in a browser → log in → click the new agent
 under the "Library" filter → verify Logs / Chat / Observability tabs.
@@ -49,15 +48,10 @@ from computeragent import (
     configure,
     query,
 )
-from computeragent.telemetry.sinks import AgentOSHttpSink, OtelSink
+from computeragent.telemetry.sinks import OtelSink
 from computeragent.types import ResultMessage
 
-# The SDK now writes via HTTP — point it at the agentos-server ingest endpoint.
-INGEST_URL = os.environ.get(
-    "AGENTOS_INGEST_URL", "http://localhost:8788/agentos/api/ingest/events"
-)
-INGEST_TOKEN = os.environ.get("AGENTOS_INGEST_TOKEN")
-# The verification read still hits Mongo directly (the server wrote there).
+# The verification read hits Mongo directly.
 # Honour the names the docker-compose stack uses so both point at the same DB.
 MONGO_URL = (
     os.environ.get("AGENTOS_MONGO_URL")
@@ -133,7 +127,6 @@ async def _summary(client: AsyncIOMotorClient) -> None:
 
 
 async def main() -> None:
-    print(f"→ Ingest URL: {INGEST_URL}")
     print(f"→ Mongo URL: {MONGO_URL}  (db={MONGO_DB}, for the verification read)")
     print(f"→ OTel endpoint: {OTEL_ENDPOINT}")
 
@@ -149,7 +142,6 @@ async def main() -> None:
         ],
         sinks=[
             OtelSink(),  # auto-picks up OTEL_EXPORTER_OTLP_ENDPOINT
-            AgentOSHttpSink(url=INGEST_URL, token=INGEST_TOKEN),
         ],
         service_name="computeragent-e2e-demo",
     )

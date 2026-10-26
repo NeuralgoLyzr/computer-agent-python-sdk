@@ -1,15 +1,10 @@
-"""The telemetry pipeline a ComputerAgent sends through its egress routes.
+"""The telemetry pipeline a ComputerAgent sends through its egress route.
 
-* ``telemetry_url`` — OTLP (traces, metrics, logs) via
-  :class:`~computeragent.telemetry.sinks.otel.OtelSink`.
-* ``events_url`` — the AgentOS dashboard events via
-  :class:`~computeragent.telemetry.sinks.agentos_http.AgentOSHttpSink`, posted
-  to ``{events_url}/events``.
-
-Both carry the caller's key on ``x-api-key`` for the egress proxy to swap.
-Either may be unset, which turns that output off: there is no fallback to the
-``AGENTOS_*`` or ``OTEL_EXPORTER_OTLP_ENDPOINT`` destinations, which would send
-telemetry around the egress proxy.
+``telemetry_url`` — OTLP (traces, metrics, logs) via
+:class:`~computeragent.telemetry.sinks.otel.OtelSink`, with the caller's key on
+``x-api-key`` for the egress proxy to swap. Unset turns telemetry off: there is
+no fallback to the ``AGENTOS_*`` or ``OTEL_EXPORTER_OTLP_ENDPOINT``
+destinations, which would send telemetry around the egress proxy.
 """
 
 from __future__ import annotations
@@ -25,10 +20,9 @@ logger = logging.getLogger("computeragent.harness")
 def build_pipeline(
     *,
     telemetry_url: str | None,
-    events_url: str | None,
     api_key: Callable[[], str],
 ) -> Pipeline:
-    """A pipeline with one sink per configured route, and none otherwise."""
+    """A pipeline with the OTLP sink when ``telemetry_url`` is set, else none."""
     sinks: list[TelemetrySink] = []
     if telemetry_url:
         try:
@@ -48,10 +42,6 @@ def build_pipeline(
                     headers={"x-api-key": api_key()},
                 )
             )
-    if events_url:
-        from ..telemetry.sinks.agentos_http import AgentOSHttpSink
-
-        sinks.append(AgentOSHttpSink(url=f"{events_url}/events", api_key=api_key))
     return Pipeline(middleware=[], sinks=sinks, fail_open=False)
 
 

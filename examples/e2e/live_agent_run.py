@@ -15,7 +15,7 @@ configured the way a sandbox is:
     export COMPUTERAGENT_LLM_URL=http://egress/llm
     export COMPUTERAGENT_MCP_URL=http://egress/mcp
     export LYZR_API_KEY=...
-    # optional: COMPUTERAGENT_TELEMETRY_URL, COMPUTERAGENT_EVENTS_URL, COMPUTERAGENT_GAP_DIR
+    # optional: COMPUTERAGENT_TELEMETRY_URL, COMPUTERAGENT_GAP_DIR
 
     uv run python examples/e2e/live_agent_run.py
 
@@ -113,7 +113,6 @@ async def main(args: argparse.Namespace) -> int:
         "llm_url": settings.llm_url,
         "mcp_url": settings.mcp_url,
         "telemetry_url": settings.telemetry_url,
-        "events_url": settings.events_url,
     }
     for name, url in routes.items():
         if url:
