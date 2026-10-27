@@ -443,5 +443,5 @@ as a worked example, not as production resources.
 
 | Runtime | Resource | Image |
 |---|---|---|
-| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:python-sdk-example-lambda-microvm`, version `4.0` | `computer-agent/python-sdk-example-lambda-microvm@sha256:075a6ef4fd3eebf80f6bd8de56c83f8787b1710d837d93140a1b0fb206fdd819` |
-| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/python_sdk_example_agentcore_runtime-aICRZZ5e7i`, version `4` (endpoint `DEFAULT`) | `computer-agent/python-sdk-example-agentcore-runtime@sha256:a02cd61a384502f81f7bfa435244010bdeb7b332fc22b3b312e3fcb7192324a0` |
+| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:python-sdk-example-lambda-microvm`, version `5.0` | `computer-agent/python-sdk-example-lambda-microvm@sha256:00dd5c580b1baa7e2c136a168b38e144ba9078634f38d9a899074cf30ec4b86a` |
+| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/python_sdk_example_agentcore_runtime-aICRZZ5e7i`, version `5` (endpoint `DEFAULT`) | `computer-agent/python-sdk-example-agentcore-runtime@sha256:12186d9e0654bb1a864fb042d4826ac9f513032d7e80d52c8d10adcf77795e97` |
