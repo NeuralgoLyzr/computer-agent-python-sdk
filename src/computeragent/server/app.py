@@ -546,16 +546,8 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
             since = -1
 
         async def stream() -> AsyncIterator[str]:
-            frames = s.log.iterate(since=since).__aiter__()
-            while True:
-                try:
-                    event_id, event = await asyncio.wait_for(frames.__anext__(), KEEPALIVE_S)
-                except asyncio.TimeoutError:
-                    yield ":keepalive\n\n"
-                    continue
-                except StopAsyncIteration:
-                    return
-                yield encode_sse(event_id, event)
+            async for item in s.log.iterate(since=since, keepalive=KEEPALIVE_S):
+                yield ":keepalive\n\n" if item is None else encode_sse(*item)
 
         return StreamingResponse(
             stream(), media_type="text/event-stream", headers={"cache-control": "no-cache"}

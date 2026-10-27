@@ -297,17 +297,33 @@ class EventLog:
             self._closed = True
             self._changed.notify_all()
 
-    async def iterate(self, *, since: int) -> AsyncIterator[tuple[int, dict[str, Any]]]:
-        """Events with an id above ``since``, then live ones until the log closes."""
+    async def iterate(
+        self, *, since: int, keepalive: float | None = None
+    ) -> AsyncIterator[tuple[int, dict[str, Any]] | None]:
+        """Events with an id above ``since``, then live ones until the log closes.
+
+        With ``keepalive``, ``None`` is yielded after that many seconds without
+        an event. The wait is bounded here, inside the generator: a timeout
+        applied to ``__anext__()`` from outside would cancel the generator and
+        end the iteration for good.
+        """
         cursor = since + 1
         while True:
+            idle = False
             async with self._changed:
                 pending = [e for e in self._events if e[0] >= cursor]
                 if not pending:
                     if self._closed:
                         return
-                    await self._changed.wait()
-                    continue
+                    try:
+                        await asyncio.wait_for(self._changed.wait(), keepalive)
+                    except asyncio.TimeoutError:
+                        idle = True
+                    else:
+                        continue
+            if idle:
+                yield None
+                continue
             for event_id, event in pending:
                 cursor = event_id + 1
                 yield event_id, event

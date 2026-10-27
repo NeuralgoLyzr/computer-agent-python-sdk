@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -132,6 +133,29 @@ async def test_message_credential_is_the_turn_key(agent_doc):
 
     keys = [ctx.envs["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] for ctx in engine.contexts]
     assert keys == ["sbt_2", "sbt_2"]  # without a credential the previous key stays
+
+
+@respx.mock
+async def test_a_quiet_gap_keeps_the_stream_open(agent_doc, monkeypatch):
+    monkeypatch.setattr("computeragent.server.app.KEEPALIVE_S", 0.05)
+    mock_backends(agent_doc)
+    async with client_for(make_app(FakeEngine())) as client:
+        await client.post("/v1/sessions", json=session_body())
+
+        async def later_turn():
+            await asyncio.sleep(0.3)  # several keepalive intervals without an event
+            await client.post(
+                "/v1/sessions/s1/messages", json={"message": {"role": "user", "content": "hi"}}
+            )
+            await client.post("/v1/sessions/s1/end-input")
+
+        turn = asyncio.create_task(later_turn())
+        text = (await client.get("/v1/sessions/s1/events")).text
+        await turn
+
+    assert text.count(":keepalive") >= 2
+    assert text.index(":keepalive") < text.index("event: sdk_message")
+    assert frames(text)[-1][1] == "ca_session_ended"
 
 
 @respx.mock
