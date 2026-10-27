@@ -33,7 +33,7 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   expiry, on a request sent with the newest token) makes every later egress
   request carry the new token: the agent-document read, the guardrails checks,
   gitagent's Anthropic/OpenAI clients and injected httpx clients.
-  `Settings.api_key()` returns the newest token and `LYZR_API_KEY` is updated
+  `Settings.api_key()` returns the newest token and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` is updated
   (`computeragent.harness.egress_token`).
 - **A loopback forwarder for the Claude CLI.** On the `claude-agent-sdk` engine
   the CLI's `ANTHROPIC_BASE_URL` and MCP server URLs on an egress origin point at
@@ -46,7 +46,7 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   Span and log processors export 128 records at a time. The OTLP exporters set
   `x-api-key` on every request through a stamping `requests` session, so a
   reissued sandbox token applies to telemetry too.
-- **`COMPUTERAGENT_SESSION_STORE_URL` / `session_store_url`.** The base URL of
+- **`COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` / `session_store_url`.** The base URL of
   the `http` session store behind the egress proxy
   (`http://egress/computer-agent-api`); it overrides a descriptor's `base_url`
   for kind `http` and is ignored for other kinds and store instances
@@ -54,11 +54,43 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 
 ### Changed
 
+- **`session_id` keys the session store.** With `ComputerAgent(session_id=…,
+  session_store=…)`, every `append` and `load` carries that id instead of the
+  Claude CLI's per-process UUID (`project_key` and `subpath` are kept), and
+  the CLI runs under a UUID derived from it. A new process or sandbox with the
+  same `session_id` resumes the conversation on its first turn. The app server
+  builds each session with `session_id = sessionId`, so the `http` store is
+  keyed by the CAS session, which agentos expects (old-CAS plan 10). Without
+  `session_id` nothing changes.
+
+- **BREAKING: the settings' environment variables are renamed**, so the names
+  say what each one is; the constructor arguments are unchanged. No old name is
+  read any more:
+
+  | Argument | Was | Now |
+  |---|---|---|
+  | `agent_id` | `COMPUTERAGENT_AGENT_ID` | `COMPUTER_AGENT_ID` |
+  | `engine` | `COMPUTERAGENT_ENGINE` | `COMPUTER_AGENT_ENGINE` |
+  | `api_key` | `LYZR_API_KEY` | `COMPUTER_AGENT_EGRESS_PROXY_SECRET` |
+  | `base_url` | `COMPUTERAGENT_BASE_URL` | `COMPUTER_AGENT_EGRESS_API_URL` |
+  | `llm_url` | `COMPUTERAGENT_LLM_URL` | `COMPUTER_AGENT_EGRESS_LLM_URL` |
+  | `mcp_url` | `COMPUTERAGENT_MCP_URL` | `COMPUTER_AGENT_EGRESS_MCP_URL` |
+  | `guardrails_url` | `COMPUTERAGENT_GUARDRAILS_URL` | `COMPUTER_AGENT_EGRESS_GUARDRAILS_URL` |
+  | `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | `COMPUTER_AGENT_EGRESS_TELEMETRY_URL` |
+  | `session_store_url` | `COMPUTERAGENT_SESSION_STORE_URL` | `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` |
+  | `gap_dir` | `COMPUTERAGENT_GAP_DIR` | `COMPUTER_AGENT_GAP_DIR` |
+
+  Old CAS passes the same names in `POST /v1/sessions` `envs`: the app server
+  seeds `COMPUTER_AGENT_EGRESS_PROXY_SECRET` from it (the `LYZR_API_KEY` field
+  is no longer read) and builds the session's agent from `COMPUTER_AGENT_ID`,
+  falling back to the image's own. The engine's per-turn environment carries
+  the token as `COMPUTER_AGENT_EGRESS_PROXY_SECRET`.
+
 - **BREAKING: guardrails go through the egress proxy.** The user's message and
   every tool call are checked with `POST {guardrails_url}/v1/check` (ops
   `input` and `tool-input`); the agent gateway applies the org's and the
   agent's RAI policies and owns fail-open. `guardrails_url` /
-  `COMPUTERAGENT_GUARDRAILS_URL` is required and replaces `srs_url` /
+  `COMPUTER_AGENT_EGRESS_GUARDRAILS_URL` is required and replaces `srs_url` /
   `COMPUTERAGENT_SRS_URL` and `agent_api_url` / `COMPUTERAGENT_AGENT_API_URL`,
   which are no longer read.
 - A check that reaches no verdict (unreachable, 5 s timeout, non-2xx, a
@@ -69,9 +101,9 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   policy input as `call_id`, and a call without one is denied.
 - A rewritten message carries the gateway's masked text (`[EMAIL]`).
 - **The Lyzr key is read at every turn.** The engine's `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY` and `LYZR_API_KEY` and the bound MCP servers' `x-api-key`
+  `OPENAI_API_KEY` and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` and the bound MCP servers' `x-api-key`
   are set from `Settings.api_key()` when each turn starts (and at boot), so a
-  key replaced in `LYZR_API_KEY` between turns, or a reissued token, is used
+  key replaced in `COMPUTER_AGENT_EGRESS_PROXY_SECRET` between turns, or a reissued token, is used
   by the next turn. A missing key fails the turn with `SettingsError` before
   the engine starts. `build_gateway_envs` no longer takes `api_key`;
   `key_envs(api_key)` returns the three variables.
@@ -84,12 +116,12 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 - **BREAKING: MCP servers are addressed by name.** Each bound server is
   `{mcp_url}/{tool_name}` (one percent-encoded segment) with no query; the
   server id path and the `?tools=` query are gone, since the gateway resolves
-  both from its registry. Behind the egress proxy `COMPUTERAGENT_MCP_URL` is
+  both from its registry. Behind the egress proxy `COMPUTER_AGENT_EGRESS_MCP_URL` is
   `http://egress/mcp/v1`.
 - **BREAKING: the `http` session store sends only `x-api-key`.** The store
   token (`x-ca-session-store-token`), its refresh against `/v1/auth/token`, the
   `token` / `auto_refresh` arguments, `TOKEN_HEADER` and `expiry_of` are gone;
-  a `token` option is ignored. The key is `LYZR_API_KEY` at each request, as
+  a `token` option is ignored. The key is `COMPUTER_AGENT_EGRESS_PROXY_SECRET` at each request, as
   the newest sandbox token.
 - A session-store descriptor without a `kind` is reported by its keys, never
   its values.
