@@ -125,7 +125,11 @@ def test_no_model_stays_none():
 
 
 def test_key_envs():
-    assert key_envs("k") == {"ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "LYZR_API_KEY": "k"}
+    assert key_envs("k") == {
+        "ANTHROPIC_API_KEY": "k",
+        "OPENAI_API_KEY": "k",
+        "COMPUTER_AGENT_EGRESS_PROXY_SECRET": "k",
+    }
     assert not set(key_envs("k")) & set(build_gateway_envs(llm_url=LLM_URL))
 
 

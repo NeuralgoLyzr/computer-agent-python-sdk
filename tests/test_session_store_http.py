@@ -215,7 +215,7 @@ def later(hours: float = 4) -> str:
 
 @respx.mock
 async def test_sends_only_the_api_key(monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_a")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_a")
     CREDENTIAL.configure([BASE])
     load = respx.get(ENTRIES_URL).mock(return_value=httpx.Response(200, json={"entries": []}))
     append = respx.post(ENTRIES_URL).mock(return_value=httpx.Response(200, json={}))
@@ -239,7 +239,7 @@ async def test_sends_only_the_api_key(monkeypatch):
 
 @respx.mock
 async def test_no_key_means_no_credential(monkeypatch):
-    monkeypatch.delenv("LYZR_API_KEY", raising=False)
+    monkeypatch.delenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", raising=False)
     route = respx.get(ENTRIES_URL).mock(return_value=httpx.Response(200, json={"entries": []}))
 
     await store().load(KEY)
@@ -249,7 +249,7 @@ async def test_no_key_means_no_credential(monkeypatch):
 
 @respx.mock
 async def test_proxy_401_is_not_a_store_error(caplog, monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_a")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_a")
     respx.get(ENTRIES_URL).mock(
         return_value=httpx.Response(
             401, json={"error": {"code": "TOKEN_INVALID", "message": "leak"}}
@@ -270,14 +270,14 @@ async def test_close_is_idempotent():
     await s.close()
 
 
-# ── COMPUTERAGENT_SESSION_STORE_URL ──────────────────────────────────────────
+# ── COMPUTER_AGENT_EGRESS_SESSION_STORE_URL ──────────────────────────────────────────
 
 EGRESS_STORE = "http://egress/computer-agent-api"
 
 
 @respx.mock
 async def test_session_store_url_precedence(caplog, monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_a")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_a")
     route = respx.get(f"{EGRESS_STORE}/session-store/entries").mock(
         return_value=httpx.Response(200, json={"entries": []})
     )
@@ -290,7 +290,7 @@ async def test_session_store_url_precedence(caplog, monkeypatch):
     await resolve_session_store(spec).load(KEY)
     assert route.called
     (info,) = [r for r in caplog.records if r.levelname == "INFO"]
-    assert "http" not in info.getMessage().replace("COMPUTERAGENT_SESSION_STORE_URL", "")
+    assert "http" not in info.getMessage().replace("COMPUTER_AGENT_EGRESS_SESSION_STORE_URL", "")
 
     spec = with_base_url({"kind": "http", "options": {"base_url": "http://other"}}, EGRESS_STORE)
     assert spec["options"]["base_url"] == EGRESS_STORE

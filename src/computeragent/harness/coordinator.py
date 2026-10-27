@@ -135,7 +135,7 @@ class HarnessCoordinator:
         # the newest sandbox token and their answers are observed.
         forward_cli: bool = False,
         # Read at every turn (and at boot): the engine's ANTHROPIC_API_KEY /
-        # OPENAI_API_KEY / LYZR_API_KEY and the bound MCP servers' x-api-key.
+        # OPENAI_API_KEY / COMPUTER_AGENT_EGRESS_PROXY_SECRET and the bound MCP servers' x-api-key.
         api_key: Callable[[], str] | None = None,
     ) -> None:
         self._engine = engine
@@ -365,7 +365,9 @@ class HarnessCoordinator:
         from dataclasses import replace
 
         envs = self._turn_envs()
-        options = self._turn_options(envs.get("LYZR_API_KEY") if self._api_key else None)
+        options = self._turn_options(
+            envs.get("COMPUTER_AGENT_EGRESS_PROXY_SECRET") if self._api_key else None
+        )
         if self._forward_cli:
             from .egress_forwarder import EgressForwarder
 

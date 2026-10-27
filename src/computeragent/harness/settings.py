@@ -25,16 +25,16 @@ from .agentos_agent import AgentResolveError
 
 #: Argument name → environment variable.
 ENV_VARS: dict[str, str] = {
-    "agent_id": "COMPUTERAGENT_AGENT_ID",
-    "engine": "COMPUTERAGENT_ENGINE",
-    "base_url": "COMPUTERAGENT_BASE_URL",
-    "api_key": "LYZR_API_KEY",
-    "llm_url": "COMPUTERAGENT_LLM_URL",
-    "mcp_url": "COMPUTERAGENT_MCP_URL",
-    "guardrails_url": "COMPUTERAGENT_GUARDRAILS_URL",
-    "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
-    "session_store_url": "COMPUTERAGENT_SESSION_STORE_URL",
-    "gap_dir": "COMPUTERAGENT_GAP_DIR",
+    "agent_id": "COMPUTER_AGENT_ID",
+    "engine": "COMPUTER_AGENT_ENGINE",
+    "base_url": "COMPUTER_AGENT_EGRESS_API_URL",
+    "api_key": "COMPUTER_AGENT_EGRESS_PROXY_SECRET",
+    "llm_url": "COMPUTER_AGENT_EGRESS_LLM_URL",
+    "mcp_url": "COMPUTER_AGENT_EGRESS_MCP_URL",
+    "guardrails_url": "COMPUTER_AGENT_EGRESS_GUARDRAILS_URL",
+    "telemetry_url": "COMPUTER_AGENT_EGRESS_TELEMETRY_URL",
+    "session_store_url": "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL",
+    "gap_dir": "COMPUTER_AGENT_GAP_DIR",
 }
 
 #: Egress routes: required, and each must be an http(s) URL.

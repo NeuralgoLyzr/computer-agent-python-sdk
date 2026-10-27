@@ -206,10 +206,10 @@ class SessionStoreAppendError(RuntimeError):
 
 
 def _env_api_key() -> str | None:
-    """``LYZR_API_KEY`` as it stands now, as the newest token of its chain."""
+    """``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` as it stands now, as the newest token of its chain."""
     from ..harness.egress_token import CREDENTIAL
 
-    value = os.environ.get("LYZR_API_KEY", "").strip()
+    value = os.environ.get("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "").strip()
     return CREDENTIAL.resolve(value) if value else None
 
 
@@ -217,7 +217,7 @@ def http_session_store_builder(**defaults: Any) -> Callable[[Any], HttpSessionSt
     """Registry builder.
 
     Takes no connection defaults: ``base_url`` comes per session (from
-    ``COMPUTERAGENT_SESSION_STORE_URL`` through :func:`with_base_url`, or the
+    ``COMPUTER_AGENT_EGRESS_SESSION_STORE_URL`` through :func:`with_base_url`, or the
     descriptor). A ``token`` option, which older dispatchers still send, is
     dropped: the store sends only ``x-api-key``.
     """
@@ -230,7 +230,7 @@ def http_session_store_builder(**defaults: Any) -> Callable[[Any], HttpSessionSt
         if not merged.get("base_url"):
             raise ValueError(
                 "http session store: options.base_url is required — set "
-                "COMPUTERAGENT_SESSION_STORE_URL or send it in the descriptor"
+                "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL or send it in the descriptor"
             )
         return HttpSessionStore(**merged)
 
@@ -238,7 +238,7 @@ def http_session_store_builder(**defaults: Any) -> Callable[[Any], HttpSessionSt
 
 
 def with_base_url(spec: Any, url: str | None) -> Any:
-    """Apply ``COMPUTERAGENT_SESSION_STORE_URL`` to a session-store spec.
+    """Apply ``COMPUTER_AGENT_EGRESS_SESSION_STORE_URL`` to a session-store spec.
 
     A store instance, or a kind other than ``http``, is returned unchanged.
     For kind ``http`` with ``url`` set, ``options.base_url`` becomes ``url``
@@ -260,7 +260,7 @@ def with_base_url(spec: Any, url: str | None) -> Any:
     else:
         logger.debug("session store URL setting ignored for this kind")
         return spec
-    logger.info("session store base URL taken from COMPUTERAGENT_SESSION_STORE_URL")
+    logger.info("session store base URL taken from COMPUTER_AGENT_EGRESS_SESSION_STORE_URL")
     return {"kind": "http", "options": {**options, "base_url": url}}
 
 

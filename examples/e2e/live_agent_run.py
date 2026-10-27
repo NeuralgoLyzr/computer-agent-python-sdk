@@ -7,14 +7,14 @@ a later one cannot pass if an earlier one failed.
 ComputerAgent reads every setting from its environment variable, so the run is
 configured the way a sandbox is:
 
-    export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
-    export COMPUTERAGENT_ENGINE=claude-agent-sdk
-    export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
-    export COMPUTERAGENT_GUARDRAILS_URL=http://egress/guardrails
-    export COMPUTERAGENT_LLM_URL=http://egress/llm
-    export COMPUTERAGENT_MCP_URL=http://egress/mcp/v1
-    export LYZR_API_KEY=...
-    # optional: COMPUTERAGENT_TELEMETRY_URL, COMPUTERAGENT_GAP_DIR
+    export COMPUTER_AGENT_ID=6aa93f1b3817a13d3103d2c1
+    export COMPUTER_AGENT_ENGINE=claude-agent-sdk
+    export COMPUTER_AGENT_EGRESS_API_URL=http://egress/agentos/api
+    export COMPUTER_AGENT_EGRESS_GUARDRAILS_URL=http://egress/guardrails
+    export COMPUTER_AGENT_EGRESS_LLM_URL=http://egress/llm
+    export COMPUTER_AGENT_EGRESS_MCP_URL=http://egress/mcp/v1
+    export COMPUTER_AGENT_EGRESS_PROXY_SECRET=...
+    # optional: COMPUTER_AGENT_EGRESS_TELEMETRY_URL, COMPUTER_AGENT_GAP_DIR
 
     uv run python examples/e2e/live_agent_run.py
 
@@ -216,13 +216,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--engine",
         default=None,
-        help="'claude-agent-sdk' or 'gitagent' (else COMPUTERAGENT_ENGINE)",
+        help="'claude-agent-sdk' or 'gitagent' (else COMPUTER_AGENT_ENGINE)",
     )
     p.add_argument(
         "--gap-dir",
         default=None,
         type=lambda v: Path(v).resolve(),
-        help="run in GAP mode from this directory (else COMPUTERAGENT_GAP_DIR)",
+        help="run in GAP mode from this directory (else COMPUTER_AGENT_GAP_DIR)",
     )
     return p.parse_args()
 

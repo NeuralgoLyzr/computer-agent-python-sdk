@@ -37,16 +37,16 @@ def cred(env=None) -> EgressCredential:
 
 
 def test_adopts_later_expiry():
-    env = {"LYZR_API_KEY": "sbt_a"}
+    env = {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_a"}
     c = cred(env)
 
     assert c.adopt("sbt_a", "sbt_b", later(4)) is True
     assert c.resolve("sbt_a") == c.resolve("sbt_b") == "sbt_b"
-    assert env["LYZR_API_KEY"] == "sbt_b"
+    assert env["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] == "sbt_b"
 
     assert c.adopt("sbt_b", "sbt_c", later(5)) is True
     assert {c.resolve(t) for t in ("sbt_a", "sbt_b", "sbt_c")} == {"sbt_c"}
-    assert env["LYZR_API_KEY"] == "sbt_c"
+    assert env["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] == "sbt_c"
 
 
 @pytest.mark.parametrize(
@@ -96,10 +96,10 @@ def test_a_chain_whose_newest_token_expired_is_dropped():
 def test_new_root_is_not_rolled_back(monkeypatch):
     """The sandbox's next turn brings a fresh key; a late reissue of the old
     chain only extends the old chain."""
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_1")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_1")
     CREDENTIAL.configure([f"{EGRESS}/llm"])
     CREDENTIAL.adopt("sbt_1", "sbt_1b", later(1))
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_2")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_2")
 
     CREDENTIAL.adopt("sbt_1b", "sbt_1c", later(2))
 
@@ -107,7 +107,7 @@ def test_new_root_is_not_rolled_back(monkeypatch):
     assert settings.api_key() == "sbt_2"
     import os
 
-    assert os.environ["LYZR_API_KEY"] == "sbt_2"
+    assert os.environ["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] == "sbt_2"
 
 
 def settings_from_env(**kw):
@@ -129,7 +129,7 @@ def settings_from_env(**kw):
 
 
 def test_explicit_key_follows_its_chain(monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_env")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_env")
     CREDENTIAL.configure([f"{EGRESS}/llm"])
     settings = settings_from_env(api_key="sbt_k")
 
@@ -138,7 +138,7 @@ def test_explicit_key_follows_its_chain(monkeypatch):
     assert settings.api_key() == "sbt_k2"
     import os
 
-    assert os.environ["LYZR_API_KEY"] == "sbt_env"
+    assert os.environ["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] == "sbt_env"
 
 
 def test_concurrent_adopt():

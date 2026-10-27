@@ -9,6 +9,7 @@ import respx
 
 from computeragent.server.app import default_agent_factory
 from server_helpers import (
+    AGENT_ID,
     FakeEngine,
     client_for,
     env_key,
@@ -21,7 +22,7 @@ from server_helpers import (
 
 @pytest.fixture(autouse=True)
 def _no_key(monkeypatch):
-    monkeypatch.delenv("LYZR_API_KEY", raising=False)
+    monkeypatch.delenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", raising=False)
     monkeypatch.delenv("OTHER", raising=False)
 
 
@@ -62,6 +63,20 @@ async def test_create_session_seeds_the_key(agent_doc):
     assert "OTHER" not in os.environ
     assert "api_key" not in calls[0]
     assert calls[0]["session_id"] == "s1"
+    assert "agent_id" not in calls[0]  # no COMPUTER_AGENT_ID: the image's own agent
+
+
+@respx.mock
+async def test_the_session_agent_comes_from_envs(agent_doc):
+    mock_backends(agent_doc)
+    calls: list = []
+    envs = {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_1", "COMPUTER_AGENT_ID": f" {AGENT_ID} "}
+    async with client_for(make_app(FakeEngine(), calls)) as client:
+        r = await client.post("/v1/sessions", json=session_body(envs=envs))
+
+    assert r.status_code == 201
+    assert calls[0]["agent_id"] == AGENT_ID
+    assert env_key() == "sbt_1"
 
 
 def test_the_default_factory_passes_no_api_key(monkeypatch):
@@ -72,7 +87,7 @@ def test_the_default_factory_passes_no_api_key(monkeypatch):
             seen.update(kwargs)
 
     monkeypatch.setattr("computeragent.harness.ComputerAgent", Recorder)
-    monkeypatch.setenv("COMPUTERAGENT_ENGINE", "gitagent")
+    monkeypatch.setenv("COMPUTER_AGENT_ENGINE", "gitagent")
 
     default_agent_factory(session_id="s", options=None, session_store=None, on_tool_call=print)
 
@@ -115,7 +130,7 @@ async def test_message_credential_is_the_turn_key(agent_doc):
         await client.post("/v1/sessions/s1/end-input")
         await client.get("/v1/sessions/s1/events")
 
-    keys = [ctx.envs["LYZR_API_KEY"] for ctx in engine.contexts]
+    keys = [ctx.envs["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] for ctx in engine.contexts]
     assert keys == ["sbt_2", "sbt_2"]  # without a credential the previous key stays
 
 
@@ -176,7 +191,8 @@ async def test_never_logs_secrets(agent_doc, caplog):
     with caplog.at_level(logging.DEBUG):
         async with client_for(make_app(FakeEngine())) as client:
             await client.post(
-                "/v1/sessions", json=session_body(envs={"LYZR_API_KEY": "sbt_secret_1"})
+                "/v1/sessions",
+                json=session_body(envs={"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_secret_1"}),
             )
             await client.post(
                 "/v1/sessions/s1/messages",
