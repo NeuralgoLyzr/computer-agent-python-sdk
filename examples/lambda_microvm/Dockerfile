@@ -17,11 +17,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # The SDK, from this checkout. With a published release, replace these three
-# lines with: RUN pip install 'computer-agent-py[agentos,server,gitagent]'
+# lines with: RUN pip install 'computer-agent-py[agentos,server,gitagent,otel]'
 WORKDIR /opt/computer-agent-py
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
-RUN pip install ".[agentos,server,gitagent]" "python-dotenv>=1,<2"
+RUN pip install ".[agentos,server,gitagent,otel]" "python-dotenv>=1,<2"
 
 # The app and its settings; app.py loads .env, and docker run -e overrides it.
 COPY examples/lambda_microvm/app.py examples/lambda_microvm/.env /app/

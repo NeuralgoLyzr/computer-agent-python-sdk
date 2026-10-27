@@ -14,7 +14,7 @@ relays.
 
 Run locally:
 
-    pip install 'computer-agent-py[agentos,server,gitagent]' python-dotenv
+    pip install 'computer-agent-py[agentos,server,gitagent,otel]' python-dotenv
     cp .env.example .env
     python app.py
 """

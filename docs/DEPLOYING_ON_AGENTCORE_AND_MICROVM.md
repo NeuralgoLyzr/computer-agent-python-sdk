@@ -157,7 +157,7 @@ runtimes.
 
 ```dockerfile
 FROM python:3.12-slim
-RUN pip install 'computer-agent-py[agentos,server,gitagent]' 'python-dotenv>=1,<2'
+RUN pip install 'computer-agent-py[agentos,server,gitagent,otel]' 'python-dotenv>=1,<2'
 COPY app.py .env /app/
 
 # The Claude CLI refuses to skip permission prompts as root; the engine runs in the working directory.
