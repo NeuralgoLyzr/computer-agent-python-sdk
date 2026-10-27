@@ -48,7 +48,7 @@ from ..protocol_types import (
     PolicyDecider,
     SessionStore,
 )
-from ..session_stores import is_session_store, resolve_session_store
+from ..session_stores import PinnedSessionStore, is_session_store, resolve_session_store
 from ..session_stores.http import with_base_url
 from ..substrates import LocalSubstrate
 from ..telemetry.pipeline import Pipeline
@@ -376,6 +376,11 @@ class ComputerAgent:
                         self._settings.session_store_url,
                     )
                 )
+
+        # A conversation id keys the store, so any process (sandbox) serving
+        # this conversation finds its transcript (see PinnedSessionStore).
+        if resolved_store is not None and session_id:
+            resolved_store = cast("SessionStore", PinnedSessionStore(resolved_store, session_id))
 
         # `on_tool_call` is only consulted by engines that emit permission
         # requests. On claude-agent-sdk gating runs through `policy_decider`,

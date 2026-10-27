@@ -12,6 +12,7 @@ telemetry hot path.
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Any
@@ -22,6 +23,7 @@ from ..protocol_types import (
     EngineCapabilities,
     EngineContext,
     EngineEvent,
+    SessionKey,
 )
 
 logger = logging.getLogger("computeragent.engines.claude_agent")
@@ -45,6 +47,7 @@ class ClaudeAgentEngine:
 
     async def start_session(self, ctx: EngineContext) -> AsyncIterator[EngineEvent]:
         options = _build_options(ctx)
+        await _pin_engine_session(options, ctx)
 
         # claude-agent-sdk wants prompts as an AsyncIterable of
         # ``{"type": "user", "message": {...}}`` dicts when ``can_use_tool``
@@ -181,6 +184,31 @@ def _build_options(ctx: EngineContext) -> Any:
         if ctx.manifest.name:
             options.agent_name = ctx.manifest.name  # type: ignore[attr-defined]
     return options
+
+
+async def _pin_engine_session(options: Any, ctx: EngineContext) -> None:
+    """Run the CLI under one UUID per conversation when the store is pinned.
+
+    The CLI session id must be a UUID, so it is derived from the pinned
+    ``session_id``: a new conversation starts with ``session_id = uuid5(...)``,
+    and a conversation the store already holds resumes it (``resume``), which
+    makes the SDK load the transcript first. Every process serving the
+    conversation then uses the same UUID, so the stored entries' ids match.
+    Later turns in one process already resume from ``ctx.resume_session_id``.
+    """
+    store = ctx.session_store
+    pinned = getattr(store, "pinned_session_id", None)
+    if store is None or not pinned or options.resume or options.session_id:
+        return
+    cli_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"computeragent:session:{pinned}"))
+    key: SessionKey = {
+        "project_key": claude_agent_sdk.project_key_for_directory(options.cwd),
+        "session_id": cli_id,
+    }
+    if await store.load(key):
+        options.resume = cli_id
+    else:
+        options.session_id = cli_id
 
 
 def _policy_pretooluse_matcher(decider: Any) -> Any:
