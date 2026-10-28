@@ -95,6 +95,9 @@ class HarnessCoordinator:
         # ── cloning a private source ────────────────────────────────────────
         # The PAT used to clone a private source, when there is one.
         git_token: str | None = None,
+        mcp_bindings: tuple[Any, ...] = (),
+        mcp_client: Any | None = None,
+        mcp_bridge_servers: Any | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
@@ -124,6 +127,12 @@ class HarnessCoordinator:
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
         self._git_token = git_token
+        # MCP servers bound on the agent, and the client that reaches them.
+        # Attached at boot rather than at construction because discovery is
+        # a network call and construction is synchronous.
+        self._mcp_bindings = mcp_bindings
+        self._mcp_client = mcp_client
+        self._mcp_bridge_servers = mcp_bridge_servers
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -222,6 +231,7 @@ class HarnessCoordinator:
             from dataclasses import replace
 
             loaded = replace(loaded, options=merged_options)
+        loaded = await self._attach_mcp(loaded)
         # Loader-declared compliance hardening (e.g. GAP human-in-the-loop →
         # permission mode) runs AFTER the caller overlay, so strictest-wins
         # constraints hold even against caller-supplied options.
@@ -234,6 +244,75 @@ class HarnessCoordinator:
                 if isinstance(hardened, dict):
                     loaded = replace(loaded, options=hardened)
         self._manifest = loaded
+
+    async def _attach_mcp(self, loaded: Any) -> Any:
+        """Merge the agent's MCP servers into the engine options.
+
+        Deliberately a DEEP merge, unlike the overlay above. ``mcp_servers`` is
+        a dict two independent sources write into — the identity loader (a GAP
+        repo's ``gap_tools`` plus any ``agent.yaml`` HTTP servers) and this —
+        and a shallow ``update`` would have one silently erase the other. The
+        symptom is a GAP repo whose own tools vanish the moment an MCP server is
+        bound to the agent, with nothing in the configuration looking wrong.
+
+        Runs BEFORE the loader's ``harden`` hook, so a GAP repo's compliance
+        constraints still get the last word over everything here.
+        """
+        if not self._mcp_bindings:
+            return loaded
+        if self._mcp_bridge_servers is None and self._mcp_client is None:
+            return loaded
+        if self._engine.name != "claude-agent-sdk":
+            # Matches `applyMcpServers`, which refuses to write an
+            # Anthropic-shaped allowlist for an engine that cannot read one:
+            # gitclaw's allowedTools is a strict exact-match set with no
+            # server-level form, so an `mcp__<server>` entry there matches
+            # nothing and filters out EVERY tool, built-ins included.
+            logger.warning(
+                "%d MCP server(s) are bound but the %r engine has no MCP support in this SDK — "
+                "running without them.",
+                len(self._mcp_bindings),
+                self._engine.name,
+            )
+            return loaded
+
+        from dataclasses import replace
+
+        from ..mcp.server import build_mcp_servers
+
+        built = (
+            self._mcp_bridge_servers
+            if self._mcp_bridge_servers is not None
+            else await build_mcp_servers(self._mcp_bindings, self._mcp_client)
+        )
+        if not built:
+            return loaded
+
+        options = dict(loaded.options or {})
+        servers = dict(options.get("mcp_servers") or {})
+        for name, config in built.servers.items():
+            if name in servers:
+                logger.warning(
+                    "MCP server %r is already configured by the identity loader or the caller — "
+                    "keeping theirs and skipping the agent's binding, rather than overwriting it.",
+                    name,
+                )
+                continue
+            servers[name] = config
+        options["mcp_servers"] = servers
+
+        # EXTEND an existing allowlist; never CREATE one. Creating a list where
+        # none existed flips "every tool allowed" into "only these", silently
+        # stripping Read/Write/Bash — measured, not theorised: workers built
+        # that way reported a missing tool, made zero calls, and still came back
+        # `completed`. (Note this list is inert under the permission mode this
+        # run mode dispatches; the real gate is `policy_decider`. It matters the
+        # moment a caller passes permission_mode="default".)
+        if options.get("allowed_tools"):
+            existing = list(options["allowed_tools"])
+            options["allowed_tools"] = existing + [g for g in built.grants if g not in existing]
+
+        return replace(loaded, options=options)
 
     async def dispose(self) -> None:
         if self._disposed:

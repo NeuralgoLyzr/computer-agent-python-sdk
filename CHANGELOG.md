@@ -5,6 +5,58 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-09-16
+
+### Added
+
+- **MCP support, `engine` mode.** An agent's bound `mcp_servers` become in-process MCP servers
+  whose tools call the Lyzr MCP service directly, so the model interleaves them with
+  `Read`/`Write`/`Bash`, every call produces an `execute_tool` span, and every call passes the
+  `policy_decider`. New input `mcp_base_url=` (defaulting to `LYZR_MCP_CLIENT_URL`): the agent
+  document names the servers but not where the service lives, and AgentOS's discovery document
+  publishes only `ingest`/`api`/`otel`, so it is an argument — the same shape as `llm_proxy_url`
+  and `git_token`.
+
+  In-process rather than an HTTP bridge because this SDK's consumer is `claude_agent_sdk` in the
+  same process, which accepts an in-process server. That removes the listener, the port, the URL
+  and the inbound auth surface — so the open-relay hazard that forced the hosted bridge to drop its
+  operator token cannot exist here.
+
+- **`mcp_bridge_url=`**, an escape hatch for a deployment already fronted by the CAS translator
+  proxy. Emits byte-for-byte what `applyMcpServers` emits.
+
+- **`McpBinding`, `McpBindingError`, `McpModeUnsupportedError`** on the public surface;
+  `ResolvedAgent` gains `mcp_bindings` and `mcp_mode` (and still holds no credential).
+
+### Changed
+
+- **The blanket MCP refusal is now three targeted ones.** Previously any non-empty `mcp_servers`
+  was refused. Now: `studio` mode is refused (the tool loop runs inside Lyzr Studio, so this SDK
+  would see no tool calls — no spans, no policy, no HITL — while looking like it worked); a
+  malformed binding is refused naming the rule it broke; and bindings with no MCP base configured
+  are refused naming `mcp_base_url`. Agents that bind nothing are unaffected.
+
+- **Engine options are now deep-merged for `mcp_servers`.** The caller overlay is still a shallow
+  update, but a shallow merge here would have the agent's bindings erase a GAP repo's own
+  `gap_tools` server, or vice versa — with nothing in the configuration looking wrong.
+
+### Notes
+
+- **The content path deliberately diverges from the TypeScript bridge in two places**, because the
+  in-process sink is narrower than the MCP wire. `create_sdk_mcp_server` builds its result from
+  `content` and `isError` only, so hoisting a `structured` block into `structuredContent` — what
+  `mcp.ts` does — would delete the payload; and `_convert_tool_content` drops `audio`, which
+  `mcp.ts` passes through. Both become text blocks here, so nothing is lost. A guard test fails if
+  upstream ever widens what it keeps.
+
+- **`allowed_tools` is extended, never created** — creating one flips "every tool allowed" into
+  "only these" and silently strips the built-ins. Note it is inert under `bypassPermissions`, which
+  this run mode dispatches; the gate that fires is `policy_decider` via the `PreToolUse` hook.
+
+- **`tool_name` is validated as a namespace.** Nothing upstream validates it — not AgentOS, not the
+  CAS, not `claude-agent-sdk` — yet it becomes `mcp__<tool_name>__<tool>`. A value that no
+  allowlist could match is skipped with a warning rather than attached.
+
 ## [0.4.3] — 2026-09-16
 
 ### Removed
