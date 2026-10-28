@@ -101,7 +101,7 @@ async def main(args: argparse.Namespace) -> int:
     resolved = agent.agent
     settings = agent._settings  # noqa: SLF001 — diagnostics, not API
     ok(f"name={resolved.name!r} harness={resolved.harness} model={resolved.model}")
-    ok(f"MCP mode={resolved.mcp_mode} bindings={[b.tool_name for b in resolved.mcp_bindings]}")
+    ok(f"MCP bindings={[b.tool_name for b in resolved.mcp_bindings]}")
 
     stage(2, "The egress routes")
     routes = {

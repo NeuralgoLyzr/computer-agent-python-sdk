@@ -21,8 +21,7 @@ from computeragent.harness.gateway_envs import (
 
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
-GATEWAY = "https://excellent-flavor-glance-myspace.trycloudflare.com"
-STUDIO_ID = "6aa93f1a75ce74c4e6772b20"
+KONG_MODEL = "claude-sonnet-4-5"
 
 
 def agent(**overrides) -> ResolvedAgent:
@@ -30,10 +29,7 @@ def agent(**overrides) -> ResolvedAgent:
         agent_id="6aa93f1b3817a13d3103d2c1",
         name="private git test with client",
         harness="claude-agent-sdk",
-        model=STUDIO_ID,
-        gateway_type="native",
-        gateway_base_url=GATEWAY,
-        gateway_completions_url=f"{GATEWAY}/v4/chat/completions",
+        model=KONG_MODEL,
         agent_type="client",
     )
     defaults.update(overrides)
@@ -93,8 +89,8 @@ def test_a_malformed_llm_url_is_refused(bad):
 # ── model ────────────────────────────────────────────────────────────────────
 
 
-def test_studio_agent_id_reaches_the_claude_engine_untouched():
-    assert dispatch_model(agent(), engine_name="claude-agent-sdk") == STUDIO_ID
+def test_kong_model_reaches_the_claude_engine_untouched():
+    assert dispatch_model(agent(), engine_name="claude-agent-sdk") == KONG_MODEL
 
 
 @pytest.mark.parametrize(
@@ -103,7 +99,7 @@ def test_studio_agent_id_reaches_the_claude_engine_untouched():
         ("Anthropic:anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-6"),
         ("openai:gpt-4o", "gpt-4o"),
         ("bedrock/us.anthropic.claude-sonnet-4-6", "bedrock/us.anthropic.claude-sonnet-4-6"),
-        (STUDIO_ID, STUDIO_ID),
+        (KONG_MODEL, KONG_MODEL),
     ],
 )
 def test_provider_prefix_strip_matches_the_ts_engine(given, expected):
@@ -114,18 +110,13 @@ def test_gitagent_gets_an_openai_prefix_so_it_finds_the_right_key():
     """gitclaw resolves its provider from the prefix; without one an
     OpenAI-shaped gateway model fails with 'No API key for provider'."""
     assert (
-        dispatch_model(agent(harness="gitagent"), engine_name="gitagent") == f"openai:{STUDIO_ID}"
+        dispatch_model(agent(harness="gitagent"), engine_name="gitagent") == f"openai:{KONG_MODEL}"
     )
 
 
 def test_gitagent_does_not_double_prefix_a_model_that_has_one():
     a = agent(harness="gitagent", model="anthropic:claude-sonnet-4-6")
     assert dispatch_model(a, engine_name="gitagent") == "anthropic:claude-sonnet-4-6"
-
-
-def test_gitagent_without_a_gateway_leaves_the_model_alone():
-    a = agent(harness="gitagent", gateway_type=None, gateway_base_url=None, model="gpt-4o")
-    assert dispatch_model(a, engine_name="gitagent") == "gpt-4o"
 
 
 def test_no_model_stays_none():
@@ -174,7 +165,7 @@ def test_options_carry_what_agentos_dispatches():
 
     assert options["permission_mode"] == "bypassPermissions"
     assert options["setting_sources"] == ["project"]
-    assert options["model"] == STUDIO_ID
+    assert options["model"] == KONG_MODEL
 
 
 def test_caller_options_win():
@@ -186,7 +177,7 @@ def test_caller_options_win():
 
     assert options["permission_mode"] == "default"
     assert options["system_prompt"] == "You are terse."
-    assert options["model"] == STUDIO_ID
+    assert options["model"] == KONG_MODEL
 
 
 def test_caller_can_override_the_resolved_model():

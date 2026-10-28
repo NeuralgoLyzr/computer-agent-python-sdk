@@ -393,7 +393,6 @@ class ComputerAgent:
         # 5. MCP servers bound to the agent, all through mcp_url.
         mcp_servers, mcp_allowed_tools = build_mcp_servers(
             self.agent.mcp_bindings,
-            mcp_mode=self.agent.mcp_mode,
             mcp_url=self._settings.mcp_url,
             api_key=self._settings.api_key(),
             anthropic_shaped=engine_name in ANTHROPIC_SHAPED,

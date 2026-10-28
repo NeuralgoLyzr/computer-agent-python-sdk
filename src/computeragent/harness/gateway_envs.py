@@ -43,16 +43,18 @@ def strip_provider_prefix(model: str) -> str:
 def dispatch_model(agent: ResolvedAgent, *, engine_name: str) -> str | None:
     """The model string to hand the engine, per ``modelForDispatch``.
 
-    gitclaw resolves its provider from the model prefix, so a gateway model with
-    no prefix gets ``openai:`` — that is how an OpenAI-shaped gateway model
-    finds ``OPENAI_API_KEY`` instead of failing with "No API key for provider".
-    The Claude engine wants the opposite: any prefix stripped.
+    gitclaw resolves its provider from the model prefix, and every model call
+    goes to ``llm_url`` (the agent gateway, OpenAI-shaped for gitagent), so a
+    model with no prefix gets ``openai:`` — that is how it finds
+    ``OPENAI_API_KEY`` instead of failing with "No API key for provider". A
+    prefixed model is unchanged. The Claude engine wants the opposite: any
+    prefix stripped.
     """
     model = agent.model
     if model is None:
         return None
     if engine_name == "gitagent":
-        if agent.has_native_gateway and ":" not in model:
+        if ":" not in model:
             return f"openai:{model}"
         return model
     return strip_provider_prefix(model)

@@ -35,10 +35,9 @@ GUARDRAILS = "http://egress.internal/guardrails"
 CHECK_URL = f"{GUARDRAILS}/v1/check"
 
 
-def build_servers(bindings, *, mcp_mode="engine", anthropic_shaped=True):
+def build_servers(bindings, *, anthropic_shaped=True):
     return build_mcp_servers(
         tuple(bindings),
-        mcp_mode=mcp_mode,
         mcp_url=MCP_URL,
         api_key=KEY,
         anthropic_shaped=anthropic_shaped,
@@ -50,16 +49,20 @@ def build_servers(bindings, *, mcp_mode="engine", anthropic_shaped=True):
 
 def test_parses_every_field():
     (binding,) = parse_bindings(
-        [
-            {
-                "server_id": "srv_creator",
-                "tool_name": "jira",
-                "action_names": ["search", "create"],
-                "persist_auth": False,
-                "your_server_id": "srv_mine",
-                "needs_your_connection": False,
-            }
-        ]
+        {
+            "provider": "lyzr-mcp",
+            "servers": [
+                {
+                    "server_id": "srv_creator",
+                    "tool_name": "jira",
+                    "action_names": ["search", "create"],
+                    "persist_auth": False,
+                    "your_server_id": "srv_mine",
+                    "needs_your_connection": False,
+                    "standard_server_id": "std_1",
+                }
+            ],
+        }
     )
 
     assert binding == McpBinding(
@@ -71,24 +74,28 @@ def test_parses_every_field():
     )
 
 
-def test_no_bindings():
+def test_parses_mcp_section():
     assert parse_bindings(None) == ()
-    assert parse_bindings([]) == ()
+    assert parse_bindings({"servers": []}) == ()
+    assert parse_bindings({"servers": None}) == ()
+    assert parse_bindings({"provider": "lyzr-mcp"}) == ()
 
 
 def test_persist_auth_defaults_to_shared():
-    (binding,) = parse_bindings([{"server_id": "s", "tool_name": "t"}])
+    (binding,) = parse_bindings({"servers": [{"server_id": "s", "tool_name": "t"}]})
     assert binding.persist_auth is True
 
 
 @pytest.mark.parametrize(
     ("raw", "match"),
     [
-        ("nope", "must be a list"),
-        (["nope"], r"mcp_servers\[0\] must be an object"),
-        ([{"tool_name": "t"}], r"mcp_servers\[0\] has no server_id"),
-        ([{"server_id": "s"}], r"mcp_servers\[0\] \(s\) has no tool_name"),
-        ([{"server_id": "  ", "tool_name": "t"}], "no server_id"),
+        ("nope", "mcp must be an object"),
+        ([], "mcp must be an object"),
+        ({"servers": "nope"}, "mcp.servers must be a list"),
+        ({"servers": ["nope"]}, r"mcp\.servers\[0\] must be an object"),
+        ({"servers": [{"tool_name": "t"}]}, r"mcp\.servers\[0\] has no server_id"),
+        ({"servers": [{"server_id": "s"}]}, r"mcp\.servers\[0\] \(s\) has no tool_name"),
+        ({"servers": [{"server_id": "  ", "tool_name": "t"}]}, "no server_id"),
     ],
 )
 def test_a_malformed_binding_is_refused(raw, match):
@@ -165,10 +172,6 @@ def test_a_sign_in_binding_without_a_connection_is_withheld(caplog):
     assert any("jira" in r.getMessage() for r in caplog.records)
 
 
-def test_studio_mode_attaches_nothing():
-    assert build_servers([McpBinding("srv_1", "jira")], mcp_mode="studio") == ({}, [])
-
-
 def test_gitagent_gets_servers_but_no_allowed_tools_entries():
     """gitclaw treats allowedTools as a strict allowlist; an mcp__ entry would
     filter out every tool it has."""
@@ -181,7 +184,6 @@ def test_gitagent_gets_servers_but_no_allowed_tools_entries():
 def test_a_trailing_slash_on_mcp_url_does_not_double_up():
     servers, _ = build_mcp_servers(
         (McpBinding("srv_1", "jira"),),
-        mcp_mode="engine",
         mcp_url=MCP_URL + "/",
         api_key=KEY,
         anthropic_shaped=True,
@@ -242,7 +244,10 @@ def test_mcp_url_is_required():
 @pytest.mark.asyncio
 @respx.mock
 async def test_bound_servers_reach_the_engine(agent_doc):
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "tool_name": "jira"}]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+    }
     engine = FakeEngine()
 
     async with build(agent_doc, engine=engine) as agent:
@@ -263,7 +268,10 @@ async def test_bound_servers_reach_the_engine(agent_doc):
 async def test_gap_tools_and_bound_servers_are_both_kept(agent_doc, tmp_path):
     """The bound servers are added to the loader's own, not swapped for them."""
     (tmp_path / "agent.yaml").write_text("name: fixture\ntools: [Read]\n", encoding="utf-8")
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "tool_name": "jira"}]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+    }
     engine = FakeEngine()
 
     async with build(agent_doc, engine=engine, gap_dir=tmp_path) as agent:
@@ -277,7 +285,10 @@ async def test_gap_tools_and_bound_servers_are_both_kept(agent_doc, tmp_path):
 @pytest.mark.asyncio
 @respx.mock
 async def test_a_caller_mcp_servers_option_still_wins(agent_doc):
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "tool_name": "jira"}]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+    }
     engine = FakeEngine()
 
     async with build(agent_doc, engine=engine, options={"mcp_servers": {}}) as agent:
