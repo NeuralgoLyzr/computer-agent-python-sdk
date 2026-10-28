@@ -14,8 +14,9 @@ already run. It covers:
 8. [Point an AgentOS agent at it](#8-point-an-agentos-agent-at-the-image).
 9. [Troubleshooting](#9-troubleshooting).
 
-Working examples of everything below are in `examples/lambda_microvm/` and
-`examples/agentcore_runtime/`. The settings reference is [`USING_THE_SDK.md`](USING_THE_SDK.md) §3.
+Working examples of everything below are in `examples/sdk_default_lambda_microvm/` and
+`examples/sdk_default_agentcore/`, the sources of the UAT default sandbox images (appendix). The
+settings reference is [`USING_THE_SDK.md`](USING_THE_SDK.md) §3.
 
 ## How the pieces fit
 
@@ -147,13 +148,13 @@ The full route list is in `USING_THE_SDK.md` §14.
 ### 4.1 Start from an example
 
 ```bash
-cp examples/lambda_microvm/.env.example examples/lambda_microvm/.env   # set the proxy URLs and the engine
+cp examples/sdk_default_lambda_microvm/.env.example examples/sdk_default_lambda_microvm/.env   # the engine
 docker buildx build --platform linux/arm64 \
-  -f examples/lambda_microvm/Dockerfile -t my-agent-sandbox .            # from the repository root
+  -f examples/sdk_default_lambda_microvm/Dockerfile -t my-agent-sandbox .  # from the repository root
 ```
 
-`examples/agentcore_runtime/` is the same app with AgentCore wording; one image works on both
-runtimes.
+`examples/sdk_default_agentcore/` is the same app with AgentCore wording; one image works on both
+runtimes. Neither bakes an egress route: CAS passes them per session (§2).
 
 ### 4.2 Or add it to your own Dockerfile
 

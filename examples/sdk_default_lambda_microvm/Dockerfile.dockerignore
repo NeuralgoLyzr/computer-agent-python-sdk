@@ -1,0 +1,8 @@
+*
+!pyproject.toml
+!README.md
+!LICENSE
+!src/
+!examples/sdk_default_lambda_microvm/app.py
+!examples/sdk_default_lambda_microvm/.env
+**/__pycache__

@@ -1,16 +1,15 @@
-# AgentCore Runtime example image: the CAS SDK's app server (app.py), installed
-# from this checkout. Old CAS drives it through /invocations (relay envelope v1).
+# UAT default Lambda MicroVM sandbox image: the CAS SDK's app server (app.py),
+# installed from this checkout. Old CAS drives it through the harness API.
 #
-# Build from the repository root (AgentCore runs linux/arm64 images), after
-# creating the app's settings file (the egress routes and the engine):
-#   cp examples/agentcore_runtime/.env.example examples/agentcore_runtime/.env
+# Build from the repository root (MicroVMs are arm64), after creating the
+# app's settings file (the engine):
+#   cp examples/sdk_default_lambda_microvm/.env.example examples/sdk_default_lambda_microvm/.env
 #   docker buildx build --platform linux/arm64 \
-#     -f examples/agentcore_runtime/Dockerfile -t cas-agentcore-example .
+#     -f examples/sdk_default_lambda_microvm/Dockerfile -t sdk-default-lambda-microvm .
 #
-# The agent and the sandbox token are never baked in: old CAS passes
-# COMPUTER_AGENT_ID and COMPUTER_AGENT_EGRESS_PROXY_SECRET per session in the
-# POST /v1/sessions envs it relays.
-FROM --platform=linux/arm64 python:3.12-slim
+# Nothing per session is baked in: old CAS passes the agent id, the sandbox
+# token and the egress routes in POST /v1/sessions envs.
+FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -24,7 +23,7 @@ COPY src ./src
 RUN pip install ".[agentos,server,gitagent,otel]" "python-dotenv>=1,<2"
 
 # The app and its settings; app.py loads .env, and docker run -e overrides it.
-COPY examples/agentcore_runtime/app.py examples/agentcore_runtime/.env /app/
+COPY examples/sdk_default_lambda_microvm/app.py examples/sdk_default_lambda_microvm/.env /app/
 
 # The Claude CLI refuses to skip permission prompts as root; the engine runs
 # in the working directory.

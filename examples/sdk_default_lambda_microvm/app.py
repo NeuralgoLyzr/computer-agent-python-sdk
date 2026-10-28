@@ -1,16 +1,16 @@
-"""An Amazon Bedrock AgentCore Runtime app on the CAS SDK: the SDK's app server,
-which old CAS drives.
+"""The UAT default Lambda MicroVM sandbox: the CAS SDK's app server, which old CAS
+drives when an agent names no MicroVM image of its own.
 
-On ``0.0.0.0:8080`` it serves AgentCore's contract
+On ``0.0.0.0:8080`` it serves
 
-    GET  /ping         {"status": "Healthy" | "HealthyBusy", "time_of_last_update": <unix s>}
-    POST /invocations  relay envelope v1, dispatched to the CAS harness API
+    POST /aws/lambda-microvms/runtime/v1/{ready,validate,run,suspend,resume,terminate}  -> 200
+    GET  /v1/health
+    POST /v1/sessions, POST /v1/sessions/{id}/messages, GET /v1/sessions/{id}/events, ...
 
-(``docs/USING_THE_SDK.md`` §14). The egress routes and the engine come from
-``.env`` next to this file (baked into the image). The agent and the sandbox
-token come per session: old CAS passes ``COMPUTER_AGENT_ID`` and
-``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` in the ``POST /v1/sessions`` ``envs`` it
-relays.
+(the CAS harness API; ``docs/USING_THE_SDK.md`` §14). Only the engine is baked
+into ``.env``. Old CAS passes the rest per session in ``POST /v1/sessions``
+``envs``: ``COMPUTER_AGENT_ID``, ``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` and the
+six ``COMPUTER_AGENT_EGRESS_*_URL`` routes.
 
 Run locally:
 
