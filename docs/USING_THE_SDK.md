@@ -105,7 +105,7 @@ request is made. A URL setting must be an `http(s)` URL.
 |---|---|---|---|
 | `agent_id` | `COMPUTERAGENT_AGENT_ID` | **yes** | The agent's **24-hex Mongo `_id`** in AgentOS (the id in the agent's URL). Not the stable `agentId` field. |
 | `engine` | `COMPUTERAGENT_ENGINE` | **yes** | `"claude-agent-sdk"` or `"gitagent"`; an `EngineDriver` instance only as an argument. |
-| `api_key` | `LYZR_API_KEY` | **yes** | The key the SDK presents on every call as `x-api-key`. In a sandbox it is injected at creation and the egress proxy swaps it for the real one. Read from the environment **at each use**, so it can be replaced while the agent runs. |
+| `api_key` | `LYZR_API_KEY` | **yes** | The key the SDK presents on every call as `x-api-key`. In a sandbox it is injected at creation and the egress proxy swaps it for the real one. Read **at every turn** (and at each other use): the engine's key variables and the bound MCP servers' `x-api-key` follow it, so the app server can set it from each message's `credential`. An explicit `api_key=` is kept and replaced only by its own reissued successors (§8a). |
 | `base_url` | `COMPUTERAGENT_BASE_URL` | **yes** | Route to the AgentOS agent config: the model and its MCP bindings. |
 | `guardrails_url` | `COMPUTERAGENT_GUARDRAILS_URL` | **yes** | Route to the guardrails check, for the user's message and every tool call. |
 | `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
@@ -318,7 +318,7 @@ Every engine gets the same environment:
 ANTHROPIC_BASE_URL       = llm_url
 GITCLAW_MODEL_BASE_URL   = llm_url
 GITAGENT_MODEL_BASE_URL  = llm_url
-ANTHROPIC_API_KEY = OPENAI_API_KEY = LYZR_API_KEY = api_key
+ANTHROPIC_API_KEY = OPENAI_API_KEY = LYZR_API_KEY = api_key   # read at every turn
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = 1
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1
 DISABLE_AUTOUPDATER = 1

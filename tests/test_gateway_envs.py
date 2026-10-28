@@ -15,6 +15,7 @@ from computeragent.harness.gateway_envs import (
     build_gateway_envs,
     build_options,
     dispatch_model,
+    key_envs,
     merge_envs,
     strip_provider_prefix,
 )
@@ -44,9 +45,6 @@ def expected_envs(base: str = LLM_URL) -> dict[str, str]:
         "ANTHROPIC_BASE_URL": base,
         "GITAGENT_MODEL_BASE_URL": base,
         "GITCLAW_MODEL_BASE_URL": base,
-        "ANTHROPIC_API_KEY": KEY,
-        "OPENAI_API_KEY": KEY,
-        "LYZR_API_KEY": KEY,
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         "DISABLE_AUTOUPDATER": "1",
@@ -54,12 +52,12 @@ def expected_envs(base: str = LLM_URL) -> dict[str, str]:
 
 
 def test_llm_url_envs_exactly():
-    assert build_gateway_envs(api_key=KEY, llm_url=LLM_URL) == expected_envs()
+    assert build_gateway_envs(llm_url=LLM_URL) == expected_envs()
 
 
 def test_llm_url_is_passed_verbatim_with_no_proxy_or_version_segments():
     """The egress proxy owns its routes: no /up/<b64>, no /v4 appended."""
-    envs = build_gateway_envs(api_key=KEY, llm_url=LLM_URL)
+    envs = build_gateway_envs(llm_url=LLM_URL)
 
     for name in ("ANTHROPIC_BASE_URL", "GITCLAW_MODEL_BASE_URL", "GITAGENT_MODEL_BASE_URL"):
         assert envs[name] == LLM_URL
@@ -68,13 +66,13 @@ def test_llm_url_is_passed_verbatim_with_no_proxy_or_version_segments():
 
 
 def test_a_trailing_slash_on_llm_url_is_dropped():
-    assert build_gateway_envs(api_key=KEY, llm_url=LLM_URL + "/") == expected_envs()
+    assert build_gateway_envs(llm_url=LLM_URL + "/") == expected_envs()
 
 
 def test_the_cli_background_traffic_is_switched_off():
     """The Claude CLI otherwise talks to Anthropic and Datadog itself, around
     the egress proxy."""
-    envs = build_gateway_envs(api_key=KEY, llm_url=LLM_URL)
+    envs = build_gateway_envs(llm_url=LLM_URL)
 
     assert envs["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert envs["DISABLE_AUTOUPDATER"] == "1"
@@ -83,7 +81,7 @@ def test_the_cli_background_traffic_is_switched_off():
 @pytest.mark.parametrize("bad", ["", "egress.internal/llm", "ftp://egress/llm", None])
 def test_a_malformed_llm_url_is_refused(bad):
     with pytest.raises(GatewayConfigError, match="llm_url"):
-        build_gateway_envs(api_key=KEY, llm_url=bad)  # type: ignore[arg-type]
+        build_gateway_envs(llm_url=bad)  # type: ignore[arg-type]
 
 
 # ── model ────────────────────────────────────────────────────────────────────
@@ -126,14 +124,21 @@ def test_no_model_stays_none():
 # ── env merge ────────────────────────────────────────────────────────────────
 
 
-def test_gateway_envs_beat_caller_envs():
-    merged = merge_envs(
-        {"ANTHROPIC_API_KEY": "caller-key", "MY_VAR": "kept"},
-        build_gateway_envs(api_key=KEY, llm_url=LLM_URL),
-    )
+def test_key_envs():
+    assert key_envs("k") == {"ANTHROPIC_API_KEY": "k", "OPENAI_API_KEY": "k", "LYZR_API_KEY": "k"}
+    assert not set(key_envs("k")) & set(build_gateway_envs(llm_url=LLM_URL))
 
-    assert merged["ANTHROPIC_API_KEY"] == KEY
-    assert merged["MY_VAR"] == "kept"
+
+def test_gateway_and_turn_key_envs_beat_caller_envs():
+    merged = merge_envs(
+        {"ANTHROPIC_API_KEY": "caller-key", "ANTHROPIC_BASE_URL": "http://x", "MY_VAR": "kept"},
+        build_gateway_envs(llm_url=LLM_URL),
+    )
+    turn = {**merged, **key_envs(KEY)}  # what the coordinator hands the engine
+
+    assert turn["ANTHROPIC_API_KEY"] == KEY
+    assert turn["ANTHROPIC_BASE_URL"] == LLM_URL
+    assert turn["MY_VAR"] == "kept"
 
 
 def test_bedrock_flag_is_dropped():
@@ -142,7 +147,7 @@ def test_bedrock_flag_is_dropped():
     egress proxy."""
     merged = merge_envs(
         {"CLAUDE_CODE_USE_BEDROCK": "1"},
-        build_gateway_envs(api_key=KEY, llm_url=LLM_URL),
+        build_gateway_envs(llm_url=LLM_URL),
     )
 
     assert "CLAUDE_CODE_USE_BEDROCK" not in merged

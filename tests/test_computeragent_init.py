@@ -246,10 +246,12 @@ def test_gap_dir_as_a_string_is_accepted(agent_doc, tmp_path):
 @respx.mock
 def test_gateway_envs_reach_the_coordinator(agent_doc):
     agent = build(agent_doc)
-    envs = agent._coordinator._envs  # type: ignore[attr-defined]
+    coordinator = agent._coordinator  # type: ignore[attr-defined]
+    envs = coordinator._envs
 
-    assert envs["ANTHROPIC_API_KEY"] == KEY
-    assert envs["LYZR_API_KEY"] == KEY
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LYZR_API_KEY"):
+        assert name not in envs  # added at every turn
+    assert coordinator._api_key() == KEY
     assert envs["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
     assert envs["ANTHROPIC_BASE_URL"] == LLM_URL
 
