@@ -449,5 +449,5 @@ UAT CAS boots these when an agent names no image of its own (`LAMBDA_MICROVM_IMA
 
 | Runtime | Resource | Image |
 |---|---|---|
-| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:lyzr-studio-uat-computeragent-sdk-default`, version `1.0` | `computer-agent/sdk-default-lambda-microvm@sha256:a8a1f7288d87609f46040d18202e6a886a71142b88094f996f1d4301dc023cf4` |
-| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/lyzr_studio_uat_computeragent_sdk_default-wzY4Av5AO0`, version `1` (endpoint `DEFAULT`) | `computer-agent/sdk-default-agentcore@sha256:36366184d84e2f3bd36de74549e7e60c110e958e72352feb9dce23febb994aff` |
+| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:lyzr-studio-uat-computeragent-sdk-default`, version `2.0` | `computer-agent/sdk-default-lambda-microvm@sha256:1984285ebff6ea2c7cf816c5ebe39ded7f829963b121c4774dd2899d9868128c` |
+| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/lyzr_studio_uat_computeragent_sdk_default-wzY4Av5AO0`, version `2` (endpoint `DEFAULT`) | `computer-agent/sdk-default-agentcore@sha256:e24c8cdd7dd4277642a9c1b82e2622d6e5fb05f3c060cfa504f3afb14d655838` |
