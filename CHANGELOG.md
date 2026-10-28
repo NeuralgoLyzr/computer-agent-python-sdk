@@ -38,6 +38,10 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   `SrsTurnGuard.resolve_turn` are deleted. The SDK no longer runs a separate
   content check on a tool call's string arguments; the tool call goes to the
   gateway as one `tool-input` check.
+- **BREAKING: the standalone SRS policy engine.** `SrsPolicyEngine`,
+  `srs_authorizer_from_env` and `computeragent.policy.srs` are gone; nothing
+  fetches `{srs}/rai/policies/{id}` any more. Use the built-in guardrails gate,
+  or `OpaPolicyEngine` / `CedarPolicyEngine` for a gate of your own.
 - **BREAKING: the AgentOS dashboard events sink.** `AgentOSHttpSink`
   (`computeragent.telemetry.sinks.agentos_http`), the `events_url` setting and
   `COMPUTERAGENT_EVENTS_URL` are gone, and the drop-in path no longer
