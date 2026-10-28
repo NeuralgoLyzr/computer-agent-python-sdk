@@ -59,7 +59,8 @@ pip install 'computer-agent-py[agentos]'
 ```
 
 `[agentos]` is not optional in practice — every call the SDK makes is HTTP. Add `[otel]` for OTLP
-telemetry and `[gap]` for GAP mode.
+telemetry, `[gap]` for GAP mode, and `[server]` for the app server a stage image runs
+(`python -m computeragent.server`; see `docs/USING_THE_SDK.md` §14).
 
 ## Documentation
 

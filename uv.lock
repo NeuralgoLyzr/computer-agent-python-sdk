@@ -416,6 +416,8 @@ all = [
     { name = "opentelemetry-semantic-conventions" },
     { name = "pymongo" },
     { name = "pyyaml" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 cedar = [
     { name = "cedarpy" },
@@ -436,6 +438,12 @@ otel = [
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
+]
+server = [
+    { name = "h11" },
+    { name = "httpx" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -468,8 +476,10 @@ requires-dist = [
     { name = "claude-agent-sdk", specifier = ">=0.2.152,<0.3" },
     { name = "h11", marker = "extra == 'agentos'", specifier = ">=0.14" },
     { name = "h11", marker = "extra == 'all'", specifier = ">=0.14" },
+    { name = "h11", marker = "extra == 'server'", specifier = ">=0.14" },
     { name = "httpx", marker = "extra == 'agentos'", specifier = ">=0.27" },
     { name = "httpx", marker = "extra == 'all'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'server'", specifier = ">=0.27" },
     { name = "openai", marker = "extra == 'all'", specifier = ">=1,<2" },
     { name = "openai", marker = "extra == 'gitagent'", specifier = ">=1,<2" },
     { name = "opentelemetry-api", marker = "extra == 'all'", specifier = ">=1.27" },
@@ -485,9 +495,13 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'all'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'gap'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'gitagent'", specifier = ">=6,<7" },
+    { name = "starlette", marker = "extra == 'all'", specifier = ">=0.37" },
+    { name = "starlette", marker = "extra == 'server'", specifier = ">=0.37" },
     { name = "typing-extensions", specifier = ">=4.12" },
+    { name = "uvicorn", marker = "extra == 'all'", specifier = ">=0.30" },
+    { name = "uvicorn", marker = "extra == 'server'", specifier = ">=0.30" },
 ]
-provides-extras = ["otel", "agentos", "mongo", "cedar", "gitagent", "gap", "all"]
+provides-extras = ["otel", "agentos", "mongo", "cedar", "gitagent", "gap", "server", "all"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -680,3 +680,62 @@ cooperative and cannot enforce a deadline on a wedged turn.
 `capture_content` defaults to **False**. Without `telemetry_url`, an agent
 sends no telemetry at all. Nothing is written to your console unless you build your own pipeline with
 `configure(exporter="console")` and pass it as `telemetry_pipeline=`.
+
+---
+
+## 14. The app server (stage images)
+
+A stage image (Lambda MicroVM or AgentCore) runs the agent behind CAS's harness REST API. The SDK
+ships that server:
+
+```bash
+pip install 'computer-agent-py[server]'
+python -m computeragent.server        # 0.0.0.0:8080; PORT overrides the port
+```
+
+The image bakes in the agent's settings (`COMPUTERAGENT_*`, §3). CAS creates one session per sandbox
+and the server builds one `ComputerAgent` for it, with no `api_key=`:
+
+- `envs.LYZR_API_KEY` in `POST /v1/sessions` (the sandbox token) seeds `LYZR_API_KEY`; every other
+  `envs` key is ignored.
+- Each `POST /v1/sessions/:id/messages` may carry the turn's `credential`; it replaces
+  `LYZR_API_KEY` before the turn. The key is process-wide, so turns run one at a time per process.
+- `identity` is not read (the agent is baked into the image). `engine` must be a registered engine;
+  the image's own engine runs.
+- `messages` are the session's first turns, and `streamingInput: false` closes its input after
+  them. Resume across sandboxes comes from the `http` session store (`sessionStore`, §7), keyed by
+  `sessionId`.
+
+| Route | Answer |
+|---|---|
+| `POST /aws/lambda-microvms/runtime/v1/{ready,validate,run,suspend,resume,terminate}` | 200 (MicroVM lifecycle hooks) |
+| `GET /v1/health` | `{ok, version, engines, loaders}` |
+| `POST /v1/sessions` | 201 `{sessionId, engine, identity, capabilities, eventsUrl}` |
+| `GET /v1/sessions/:id` | `{sessionId, engine, identity, status}` |
+| `DELETE /v1/sessions/:id` | `{ok: true}`; cancels the session and disposes its agent |
+| `POST /v1/sessions/:id/messages` | `{ok: true}`; `409 SESSION_ENDED` once the session ended |
+| `GET /v1/sessions/:id/events` | Server-sent events, `Last-Event-ID` (or `?lastEventId=`) replay, `:keepalive` every 20 s |
+| `POST /v1/sessions/:id/end-input`, `/cancel` | `{ok: true}` |
+| `POST /v1/sessions/:id/permission/:callId` | `{decision: allow \| deny \| modify, input?, reason?}` → `{ok: true}` |
+| `GET\|PUT\|DELETE /v1/sessions/:id/fs/file`, `GET …/fs/tree`, `POST …/fs/{edit,mkdir,move}` | Files in the agent's workspace, confined to it |
+
+**Events** follow CAS's `sse-events.ts`:
+- `ca_session_started` comes once, when the session is created.
+- Each turn sends `ca_turn_started` (the message after the input guardrail), then
+  `ca_redaction_decision` (the guardrail's outcome), then one `sdk_message` per engine message, in
+  the TS Claude Agent SDK's JSON shape.
+- Tool-gate decisions arrive as `ca_permission_decision` (`source: "policy"`); approvals as
+  `ca_permission_request` and the client's `ca_permission_decision`.
+- `ca_usage_snapshot` comes last before the result. A turn ends with its `result` message; a
+  blocked input gets a `result` carrying the policy's reason and `ca_policy_blocked: true`.
+- `ca_session_ended` comes once, when the session ends: input closed, cancel, delete or an engine
+  error.
+
+Errors have CAS's harness shape: `{detail, code, retry, severity, source, meta}`.
+
+**Files.** Paths are relative to the workspace (`gap_dir` in GAP mode, else the working directory)
+and may not leave it, through `..`, an absolute path or a symlink (`400 PATH_ESCAPE_REJECTED`). A
+delete removes a file or an empty directory only: a non-empty directory answers
+`409 WORKDIR_DIRECTORY_NOT_EMPTY`, also with `recursive=true`.
+
+The server never logs `envs`, a `credential`, a request header or a body.
