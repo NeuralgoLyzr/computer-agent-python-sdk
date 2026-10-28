@@ -40,9 +40,12 @@ class FakeEngine:
         budget=False,
     )
 
-    def __init__(self, *, ask_permission: bool = False, fail: bool = False) -> None:
+    def __init__(
+        self, *, ask_permission: bool = False, fail: bool = False, hold: Any = None
+    ) -> None:
         self.ask_permission = ask_permission
         self.fail = fail
+        self.hold = hold  # an asyncio.Event the turn waits on
         self.contexts: list[EngineContext] = []
         self.messages: list[Any] = []
         self.decisions: list[Any] = []
@@ -54,6 +57,8 @@ class FakeEngine:
             break
         if self.fail:
             raise RuntimeError("engine exploded")
+        if self.hold is not None:
+            await self.hold.wait()
         if self.ask_permission:
             decision = await ctx.on_permission_request(
                 PermissionRequest(call_id="call_1", tool_name="Write", input={"path": "a.txt"})

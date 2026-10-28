@@ -12,6 +12,10 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 
 ### Added
 
+- **AgentCore on the app server.** The same process serves `GET /ping`
+  (`Healthy` / `HealthyBusy`) and `POST /invocations` (relay envelope v1,
+  dispatched in-process; streamed answers keep the `: ca-relay` head frame).
+  One image covers Lambda MicroVM and AgentCore (`computeragent.server.relay`).
 - **The app server for stage images** (`computeragent.server`, extra `server`).
   `python -m computeragent.server` serves CAS's harness REST API on `0.0.0.0:8080`:
   - the Lambda MicroVM lifecycle hooks, health, sessions, messages, events,
