@@ -9,6 +9,7 @@ Anthropic-shaped engines only.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -226,9 +227,14 @@ async def test_bound_servers_reach_the_engine(agent_doc):
 
     async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hi")
+        bound = agent._coordinator._mcp_servers  # type: ignore[attr-defined]
 
+    assert bound["jira"]["url"] == f"{MCP_URL}/srv_1"
     options = engine.contexts[0].manifest.options
-    assert options["mcp_servers"]["jira"]["url"] == f"{MCP_URL}/srv_1"
+    # The Claude CLI reaches it through the loopback forwarder, path unchanged.
+    sent = urlsplit(options["mcp_servers"]["jira"]["url"])
+    assert sent.hostname == "127.0.0.1"
+    assert sent.path == urlsplit(f"{MCP_URL}/srv_1").path
     assert "mcp__jira" in options["allowed_tools"]
 
 

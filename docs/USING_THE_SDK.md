@@ -450,6 +450,31 @@ async with ComputerAgent(...) as agent:
 Skipping `async with` (or an explicit `await agent.dispose()`) drops the final `session_ended` event
 and loses buffered telemetry.
 
+### 8a. Sandbox token reissue
+
+Before a sandbox token expires, the egress proxy may answer a request with its successor
+(`X-Cas-Token`, `X-Cas-Token-Expires-At`). The SDK adopts it when the token starts with `sbt_`, the
+expiry is later than the one it replaces, and the request was sent with the newest token it holds.
+From then on **every later egress request from every SDK client** carries the new token:
+
+- the agent-document read, the guardrails checks, and gitagent's in-process Anthropic and OpenAI
+  clients (httpx hooks; an httpx client you inject gets them too);
+- the Claude CLI's model and MCP calls, which go through a loopback forwarder on `127.0.0.1` (below).
+
+`Settings.api_key()` returns the newest token, and `LYZR_API_KEY` is updated so processes spawned
+later inherit it. A key passed as `api_key=` follows its own chain the same way. A late reissue of an
+older token never replaces a newer key. Tokens are never logged; one INFO line records each reissue
+with its expiry.
+
+Not covered: programs the agent's own tools start (e.g. a Bash `curl` with `$LYZR_API_KEY`) carry
+the environment they were spawned with, and the SDK never sees their traffic.
+
+**The Claude CLI's forwarder.** The CLI's env and MCP headers are fixed when it is spawned, so on
+the `claude-agent-sdk` engine its `ANTHROPIC_BASE_URL` and every MCP server URL on an egress origin
+are pointed at a loopback listener (path unchanged). The listener replays each request on the egress
+proxy with the newest token and streams the answer back. It forwards only to egress origins and
+answers `502` when the proxy cannot be reached. It is closed with the agent (`dispose()`).
+
 ---
 
 ## 9. Guardrails, permissions and telemetry
@@ -565,6 +590,8 @@ turn, tool calls, the reply — so a failure localises itself.
 - **A turn has no timeout and nothing retries.** Impose your own with `asyncio.wait_for`.
 - **`cancel()` is cooperative**, not a kill.
 - **`gitagent` tool execution is MCP-only.**
+- **The Claude CLI's egress calls take one loopback hop** through the SDK's forwarder (§8a); a
+  forwarder fault fails those calls with `502` rather than bypassing the proxy.
 
 ---
 

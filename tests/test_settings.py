@@ -238,3 +238,18 @@ def test_events_url_is_unknown():
     assert not hasattr(settings, "events_url")
     with pytest.raises(TypeError, match="events_url"):
         resolve(FULL_ENV, events_url="http://egress/ingest")
+
+
+@pytest.mark.parametrize("explicit", [None, "sbt_root"])
+def test_api_key_resolves_the_chain(explicit):
+    from datetime import datetime, timedelta, timezone
+
+    from computeragent.harness.egress_token import CREDENTIAL
+
+    env = {**FULL_ENV, "LYZR_API_KEY": "sbt_root"}
+    settings = resolve(env, api_key=explicit)
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+    CREDENTIAL.adopt("sbt_root", "sbt_next", expiry)
+
+    assert settings.api_key() == "sbt_next"

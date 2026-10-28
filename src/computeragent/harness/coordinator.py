@@ -130,6 +130,10 @@ class HarnessCoordinator:
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
         parent_agent_id: str | None = None,
+        # Route the Claude CLI's model and MCP calls on an egress origin
+        # through a loopback forwarder (see `egress_forwarder`), so they carry
+        # the newest sandbox token and their answers are observed.
+        forward_cli: bool = False,
     ) -> None:
         self._engine = engine
         self._substrate = substrate
@@ -157,6 +161,8 @@ class HarnessCoordinator:
         self._mcp_servers: dict[str, Any] = dict(mcp_servers or {})
         self._mcp_allowed_tools: list[str] = list(mcp_allowed_tools or [])
         self._turn_guard = turn_guard
+        self._forward_cli = forward_cli
+        self._forwarder: Any = None
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -257,6 +263,10 @@ class HarnessCoordinator:
         if self._substrate_handle is not None:
             with suppress(Exception):
                 await self._substrate_handle.close()
+        if self._forwarder is not None:
+            with suppress(Exception):
+                await self._forwarder.aclose()
+            self._forwarder = None
         with suppress(Exception):
             await self._pipeline.flush()
 
@@ -315,6 +325,26 @@ class HarnessCoordinator:
 
     # ── one chat turn ──────────────────────────────────────────────────────
 
+    async def _engine_envs_and_manifest(self) -> tuple[dict[str, str], Any]:
+        """The env and manifest this turn's engine starts with: for the Claude
+        CLI, egress URLs point at the loopback forwarder."""
+        if not self._forward_cli:
+            return self._envs, self._manifest
+        from dataclasses import replace
+
+        from .egress_forwarder import EgressForwarder
+
+        if self._forwarder is None:
+            self._forwarder = EgressForwarder()
+        options = self._manifest.options
+        envs, rewritten = await self._forwarder.rewrite(
+            self._envs, options if isinstance(options, dict) else None
+        )
+        manifest = (
+            self._manifest if rewritten is None else replace(self._manifest, options=rewritten)
+        )
+        return envs, manifest
+
     async def run_chat(
         self, message: Any
     ) -> tuple[
@@ -364,11 +394,12 @@ class HarnessCoordinator:
         if blocked_reply is None:
             await _enqueue_user_message(state.user_queue, message)
 
+        envs, manifest = await self._engine_envs_and_manifest()
         ctx = EngineContext(
             session_id=session_id,
-            manifest=self._manifest,
+            manifest=manifest,
             workspace_path=self._workspace_path,
-            envs=self._envs,
+            envs=envs,
             user_message_queue=_QueueAsyncIterable(state.user_queue),
             on_permission_request=self._build_permission_resolver(state),
             cancel_event=state.cancel_event,

@@ -315,3 +315,29 @@ def test_mcp_server_names_of_tolerates_any_shape():
     assert mcp_server_names_of({"mcp_servers": {"jira": {}, "gh": {}}}) == ["jira", "gh"]
     assert mcp_server_names_of({"mcp_servers": []}) == []
     assert mcp_server_names_of(None) == []
+
+
+@pytest.mark.parametrize("injected", [False, True])
+@respx.mock
+async def test_reissue_adopted(injected):
+    from datetime import datetime, timedelta, timezone
+
+    from computeragent.harness.egress_token import CREDENTIAL
+
+    CREDENTIAL.configure([GUARDRAILS])
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    respx.post(CHECK).mock(
+        return_value=httpx.Response(
+            200,
+            json={"data": {"decision": "allow"}},
+            headers={"x-cas-token": "sbt_next", "x-cas-token-expires-at": expiry},
+        )
+    )
+    client = httpx.AsyncClient() if injected else None
+
+    await check_text(GUARDRAILS, api_key="sbt_first", text="x", client=client)
+
+    assert CREDENTIAL.resolve("sbt_first") == "sbt_next"
+    route = respx.post(CHECK).mock(return_value=answer())
+    await check_text(GUARDRAILS, api_key="sbt_first", text="x", client=client)
+    assert route.calls.last.request.headers["x-api-key"] == "sbt_next"
