@@ -62,15 +62,52 @@ def test_no_events_sink(agent_doc):
     assert not hasattr(sinks, "AgentOSHttpSink")
 
 
-def test_telemetry_url_builds_an_otlp_sink_with_the_key():
+def test_otlp_uses_stamping_session_and_cap():
     otel = pytest.importorskip("computeragent.telemetry.sinks.otel")
+    from computeragent.telemetry.sinks.otlp_size import SizeCappedSpanExporter
 
     (sink,) = build_pipeline(telemetry_url=OTLP, api_key=lambda: KEY)._sinks
 
     assert isinstance(sink, otel.OtelSink)
     assert sink._endpoint == OTLP  # type: ignore[attr-defined]
-    assert sink._headers == {"x-api-key": KEY}  # type: ignore[attr-defined]
+    assert sink._headers == {}  # type: ignore[attr-defined]
     assert sink._exporter == "otlp-http"  # type: ignore[attr-defined]
+    assert type(sink._session).__name__ == "StampingSession"  # type: ignore[attr-defined]
+    processors = sink._tracer_provider._active_span_processor._span_processors  # type: ignore[attr-defined]
+    (processor,) = processors
+    exporter = processor._batch_processor._exporter
+    assert isinstance(exporter, SizeCappedSpanExporter)
+    assert exporter._inner._session is sink._session  # type: ignore[attr-defined]
+    assert processor._batch_processor._max_export_batch_size == 128
+
+
+def test_otlp_session_sets_the_key_per_request():
+    pytest.importorskip("requests")
+    import requests
+
+    from computeragent.harness.egress_token import CREDENTIAL, stamping_session
+
+    CREDENTIAL.configure([OTLP])
+    keys = iter(["k1", "k2"])
+    session = stamping_session(lambda: next(keys))
+    seen = []
+
+    class Adapter(requests.adapters.BaseAdapter):
+        def send(self, request, **kwargs):
+            seen.append(request.headers.get("x-api-key"))
+            resp = requests.Response()
+            resp.status_code = 200
+            resp.request = request
+            return resp
+
+        def close(self):
+            pass
+
+    session.mount("http://egress.internal", Adapter())
+    session.post(f"{OTLP}/v1/traces", data=b"x")
+    session.post(f"{OTLP}/v1/traces", data=b"x")
+
+    assert seen == ["k1", "k2"]
 
 
 @respx.mock

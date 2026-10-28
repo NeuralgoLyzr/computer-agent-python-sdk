@@ -121,7 +121,7 @@ The requests made from each route, all with `x-api-key: <api_key>`:
 | `guardrails_url` | `POST {guardrails_url}/v1/check`: one `input` check per text block of the user's message, one `tool-input` check per tool call |
 | `llm_url` | the engine's own model calls (`/v1/messages`, `/chat/completions`) |
 | `mcp_url` | the engine's MCP calls |
-| `telemetry_url` | `POST /v1/traces`, `/v1/metrics`, `/v1/logs` |
+| `telemetry_url` | `POST {telemetry_url}/v1/traces`, `/v1/metrics`, `/v1/logs` — behind the egress proxy `telemetry_url` is `http://egress/otlp`, so `http://egress/otlp/v1/traces`; each request stays under 1 MiB |
 
 ### `base_url` — three accepted spellings
 
@@ -522,7 +522,7 @@ A `ComputerAgent` builds its pipeline from its telemetry route:
 
 | Route | Sink | Auth |
 |---|---|---|
-| `telemetry_url` | OTLP (`OtelSink`, needs the `otel` extra) | `x-api-key`, read when the agent is built |
+| `telemetry_url` | OTLP (`OtelSink`, needs the `otel` extra) | `x-api-key`, set on every request (the newest sandbox token, §8a) |
 
 An unset `telemetry_url` turns telemetry off. There is no AgentOS dashboard events sink. `AGENTOS_DISCOVERY_URL`, `AGENTOS_INGEST_URL`, `AGENTOS_OTEL_URL`
 and `OTEL_EXPORTER_OTLP_ENDPOINT` are **not** consulted, so telemetry never goes around the egress
@@ -530,6 +530,13 @@ proxy. Content capture and attribute limits still come from `COMPUTERAGENT_CAPTU
 `COMPUTERAGENT_CAPTURE_CONTENT_MODE`, `COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH` and
 `COMPUTERAGENT_OTEL_TEMPORALITY`. Pass `telemetry_pipeline=` to use your own pipeline instead; a
 pipeline the agent built is closed on dispose.
+
+**Size limit.** The egress proxy accepts OTLP bodies up to 1 MiB. Each export is encoded and, when
+it is larger than 960 KiB, split in halves until every part fits; spans and log records are exported
+128 at a time. A single span, log record or metric larger than the limit is dropped with a WARN
+`dropped N telemetry record(s) over the OTLP size budget` (the count only). The export fails if any
+part failed. The proxy answers `409 telemetry_not_configured` when the agent has no telemetry sink
+configured in the gateway.
 
 ---
 

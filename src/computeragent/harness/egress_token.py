@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from collections.abc import Iterable, MutableMapping
+from collections.abc import Callable, Iterable, MutableMapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -268,14 +268,17 @@ def install(client: Any) -> Any:
 # ── requests ─────────────────────────────────────────────────────────────────
 
 
-def stamping_session() -> Any:
+def stamping_session(api_key: Callable[[], str] | None = None) -> Any:
     """A ``requests.Session`` that stamps egress requests and observes their
-    answers (``requests`` has response hooks but no request hook)."""
+    answers (``requests`` has response hooks but no request hook). With
+    ``api_key``, every egress request first gets ``x-api-key: api_key()``."""
     import requests
 
     class StampingSession(requests.Session):
         def send(self, request: Any, **kwargs: Any) -> Any:
             url = str(request.url)
+            if api_key is not None and CREDENTIAL.is_egress(url):
+                request.headers["x-api-key"] = api_key()
             CREDENTIAL.stamp(url, request.headers)
             response = super().send(request, **kwargs)
             CREDENTIAL.observe(url, sent_key(request.headers), response.headers)
