@@ -18,6 +18,7 @@ from typing import Any, cast
 
 from ..harness.errors import UnknownSessionStoreError
 from ..protocol_types import SessionStore
+from .http import with_base_url
 from .memory import InMemorySessionStore
 
 logger = logging.getLogger("computeragent.session_stores")
@@ -67,8 +68,13 @@ def resolve_session_store(spec: str | Mapping[str, Any]) -> SessionStore:
         kind = spec.get("kind")
         options = spec.get("options")
         if not isinstance(kind, str) or not kind:
+            # Names the shape only: a descriptor may carry a URL or a credential.
+            keys = sorted(str(k) for k in spec)
+            option_keys = sorted(str(k) for k in options) if isinstance(options, Mapping) else []
+            detail = f"keys {keys}" + (f", options keys {option_keys}" if option_keys else "")
             raise UnknownSessionStoreError(
-                f"session store descriptor needs a string 'kind'; got {spec!r}"
+                f"session store descriptor needs a string 'kind'; got a "
+                f"{type(spec).__name__} with {detail}"
             )
     elif isinstance(spec, str):
         kind, options = spec, None
@@ -120,4 +126,5 @@ __all__ = [
     "SessionStoreBuilder",
     "register_session_store",
     "resolve_session_store",
+    "with_base_url",
 ]

@@ -1,13 +1,16 @@
 """``HttpSessionStore`` — transcripts over HTTP, with the server doing the write.
 
-Port of the TS ``@open-gitagent/session-store-http``. Two authenticated verbs
-against the ComputerAgent server, which performs the database write in-pod::
+Port of the TS ``@open-gitagent/session-store-http``. Two verbs against the
+session-store service, which performs the database write::
 
     GET  {base}/session-store/entries?sessionId=&projectKey=  -> {entries}
     POST {base}/session-store/entries  {sessionId, projectKey, entries}
 
 It exists so a harness that cannot reach a VPC-private database — and must not
-hold its credential — can still persist transcripts.
+hold its credential — can still persist transcripts. Behind the egress proxy
+``base`` is ``http://egress/computer-agent-api``; the only credential sent is
+``x-api-key`` (the newest sandbox token), which the proxy swaps for the Lyzr
+key, adding the session it scopes entries to.
 
 Only ``append`` and ``load`` are implemented, and the omissions are deliberate:
 see the note on :meth:`load` and the class docstring's tail.
@@ -16,26 +19,16 @@ see the note on :meth:`load` and the class docstring's tail.
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import contextlib
-import json
 import logging
+import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from ..protocol_types import SessionKey, SessionStoreEntry
 
 logger = logging.getLogger("computeragent.session_stores.http")
-
-#: The token travels on its own header, never ``Authorization`` or
-#: ``x-api-key``. This is structural, not stylistic: the same listener hosts the
-#: Anthropic-to-OpenAI translator and the MCP bridge, and BOTH read the caller's
-#: credential from exactly those two headers and forward it verbatim to a third
-#: party. A dedicated header makes handing this signed token to an external
-#: service impossible rather than merely unlikely.
-TOKEN_HEADER = "x-ca-session-store-token"
 
 #: Appends are frequent and off the turn's critical path; the SDK retries behind
 #: us and gives up at 60s.
@@ -46,31 +39,6 @@ DEFAULT_APPEND_TIMEOUT = 10.0
 #: session start for an agent that quietly forgot the conversation.
 DEFAULT_LOAD_TIMEOUT = 15.0
 
-#: Refresh at this fraction of remaining lifetime (kubelet's ratio).
-REFRESH_AT_FRACTION = 0.8
-MIN_REFRESH_DELAY = 5.0
-
-
-def expiry_of(token: str) -> int | None:
-    """Read ``exp`` out of a JWT **without verifying it**.
-
-    Unverified on purpose: this client is not the verifier — the server is, and
-    it holds the only key. All that is needed is a hint for when to refresh, and
-    a wrong hint costs at most one wasted call, because the server still refuses
-    anything invalid. ``None`` for an opaque or malformed token, in which case
-    no refresh is scheduled at all.
-    """
-    parts = token.split(".")
-    if len(parts) != 3 or not parts[1]:
-        return None
-    try:
-        padded = parts[1] + "=" * (-len(parts[1]) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-    except (ValueError, binascii.Error, UnicodeDecodeError):
-        return None
-    exp = payload.get("exp")
-    return exp if isinstance(exp, int) else None
-
 
 class HttpSessionStore:
     kind = "http"
@@ -79,25 +47,23 @@ class HttpSessionStore:
         self,
         *,
         base_url: str,
-        token: str,
         append_timeout: float = DEFAULT_APPEND_TIMEOUT,
         load_timeout: float = DEFAULT_LOAD_TIMEOUT,
-        auto_refresh: bool = True,
+        api_key: Callable[[], str | None] | None = None,
         client: Any | None = None,
     ) -> None:
         if not base_url:
             raise ValueError("HttpSessionStore: base_url is required")
-        if not token:
-            raise ValueError("HttpSessionStore: token is required")
         self._base = base_url.rstrip("/")
-        self._token = token
         self._append_timeout = append_timeout
         self._load_timeout = load_timeout
-        self._auto_refresh = auto_refresh
-        self._refresh_task: asyncio.Task[None] | None = None
+        self._api_key = api_key or _env_api_key
+
+        from ..harness.egress_token import egress_event_hooks, install
 
         if client is not None:
-            self._client = client
+            self._client = install(client)
+            self._owns_client = False
         else:
             try:
                 import httpx
@@ -106,7 +72,8 @@ class HttpSessionStore:
                     "HttpSessionStore requires httpx. "
                     "Install with: pip install 'computer-agent-py[agentos]'"
                 ) from exc
-            self._client = httpx.AsyncClient()
+            self._client = httpx.AsyncClient(event_hooks=egress_event_hooks(True))
+            self._owns_client = True
 
         # The contract makes ordering ours to keep — "within a single process,
         # persist entries in append-call order" — and the SDK may fire the next
@@ -115,12 +82,10 @@ class HttpSessionStore:
         # lock removes the concurrency at the source.
         self._append_lock = asyncio.Lock()
 
-    @property
-    def token(self) -> str:
-        return self._token
-
     def _headers(self) -> dict[str, str]:
-        return {TOKEN_HEADER: self._token}
+        """``x-api-key`` when a key is set; none for an unauthenticated local store."""
+        key = self._api_key()
+        return {"x-api-key": key} if key else {}
 
     async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
         """Load a session for resume. **Never raises.**
@@ -132,7 +97,6 @@ class HttpSessionStore:
         logged with its elapsed time: that line is the only signal an operator
         gets that an agent is about to start with no memory.
         """
-        self._arm_refresh()
         started = time.monotonic()
         params = {"sessionId": key["session_id"], "projectKey": key["project_key"]}
         if key.get("subpath"):
@@ -168,7 +132,6 @@ class HttpSessionStore:
         """
         if not entries:
             return
-        self._arm_refresh()
         body: dict[str, Any] = {
             "sessionId": key["session_id"],
             "projectKey": key["project_key"],
@@ -221,54 +184,12 @@ class HttpSessionStore:
     # absence is the correct way to say "this backend does not do that" — a
     # well-meaning stub would change behaviour.
 
-    async def refresh_token(self) -> bool:
-        """Exchange the current token for a fresh one. Failure is non-fatal —
-        the existing token stays in use and the server mints a new one at the
-        next dispatch anyway."""
-        try:
-            resp = await self._client.post(
-                f"{self._base}/v1/auth/token",
-                json={},
-                headers={**self._headers(), "content-type": "application/json"},
-                timeout=self._append_timeout,
-            )
-            if resp.status_code >= 400:
-                logger.warning("session store token refresh failed: HTTP %s", resp.status_code)
-                return False
-            token = resp.json().get("token")
-            if isinstance(token, str) and token:
-                self._token = token
-                return True
-        except Exception as exc:  # noqa: BLE001 — never fatal
-            logger.warning("session store token refresh failed: %s", exc)
-        return False
-
-    def _arm_refresh(self) -> None:
-        if not self._auto_refresh or self._refresh_task is not None:
-            return
-        exp = expiry_of(self._token)
-        if exp is None:
-            return  # opaque token — nothing to schedule against
-        remaining = exp - time.time()
-        if remaining <= 0:
-            return
-        delay = max(MIN_REFRESH_DELAY, remaining * REFRESH_AT_FRACTION)
-
-        async def _later() -> None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.sleep(delay)
-                await self.refresh_token()
-
-        with contextlib.suppress(RuntimeError):  # no running loop yet
-            self._refresh_task = asyncio.ensure_future(_later())
-
     async def close(self) -> None:
-        """Stop refreshing. Idempotent, and safe on a store that never armed."""
-        if self._refresh_task is not None:
-            self._refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._refresh_task
-            self._refresh_task = None
+        """Close the client this store opened. Idempotent."""
+        if self._owns_client:
+            with contextlib.suppress(Exception):
+                await self._client.aclose()
+            self._owns_client = False
 
     def _warn_load(self, key: SessionKey, started: float, reason: str) -> None:
         logger.warning(
@@ -284,36 +205,70 @@ class SessionStoreAppendError(RuntimeError):
     """An append the server refused, or that failed twice in a row."""
 
 
+def _env_api_key() -> str | None:
+    """``LYZR_API_KEY`` as it stands now, as the newest token of its chain."""
+    from ..harness.egress_token import CREDENTIAL
+
+    value = os.environ.get("LYZR_API_KEY", "").strip()
+    return CREDENTIAL.resolve(value) if value else None
+
+
 def http_session_store_builder(**defaults: Any) -> Callable[[Any], HttpSessionStore]:
     """Registry builder.
 
-    Unlike the mongo one this takes no connection defaults, and that is the
-    point: ``base_url`` and ``token`` are per-session values the server mints
-    and sends in the descriptor, so an image can register the kind without
-    baking in an endpoint or a credential.
+    Takes no connection defaults: ``base_url`` comes per session (from
+    ``COMPUTERAGENT_SESSION_STORE_URL`` through :func:`with_base_url`, or the
+    descriptor). A ``token`` option, which older dispatchers still send, is
+    dropped: the store sends only ``x-api-key``.
     """
 
     def _build(options: Any = None) -> HttpSessionStore:
-        merged = {**defaults, **(dict(options) if isinstance(options, dict) else {})}
+        merged = {**defaults, **(dict(options) if isinstance(options, Mapping) else {})}
+        merged.pop("token", None)
+        merged.pop("baseUrl", None)
+        merged.pop("auto_refresh", None)
         if not merged.get("base_url"):
             raise ValueError(
-                "http session store: options.base_url is required — the server sends it per session"
-            )
-        if not merged.get("token"):
-            raise ValueError(
-                "http session store: options.token is required — the server mints it per session"
+                "http session store: options.base_url is required — set "
+                "COMPUTERAGENT_SESSION_STORE_URL or send it in the descriptor"
             )
         return HttpSessionStore(**merged)
 
     return _build
 
 
+def with_base_url(spec: Any, url: str | None) -> Any:
+    """Apply ``COMPUTERAGENT_SESSION_STORE_URL`` to a session-store spec.
+
+    A store instance, or a kind other than ``http``, is returned unchanged.
+    For kind ``http`` with ``url`` set, ``options.base_url`` becomes ``url``
+    and any ``base_url``/``baseUrl``/``token`` in the descriptor is dropped.
+    Without ``url`` the spec is returned unchanged.
+    """
+    if url is None:
+        return spec
+    if isinstance(spec, str):
+        if spec != "http":
+            logger.debug("session store URL setting ignored for this kind")
+            return spec
+        options: dict[str, Any] = {}
+    elif isinstance(spec, Mapping) and spec.get("kind") == "http":
+        raw = spec.get("options")
+        options = dict(raw) if isinstance(raw, Mapping) else {}
+        for name in ("base_url", "baseUrl", "token"):
+            options.pop(name, None)
+    else:
+        logger.debug("session store URL setting ignored for this kind")
+        return spec
+    logger.info("session store base URL taken from COMPUTERAGENT_SESSION_STORE_URL")
+    return {"kind": "http", "options": {**options, "base_url": url}}
+
+
 __all__ = [
     "DEFAULT_APPEND_TIMEOUT",
     "DEFAULT_LOAD_TIMEOUT",
-    "TOKEN_HEADER",
     "HttpSessionStore",
     "SessionStoreAppendError",
-    "expiry_of",
     "http_session_store_builder",
+    "with_base_url",
 ]

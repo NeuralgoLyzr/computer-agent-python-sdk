@@ -49,6 +49,7 @@ from ..protocol_types import (
     SessionStore,
 )
 from ..session_stores import is_session_store, resolve_session_store
+from ..session_stores.http import with_base_url
 from ..substrates import LocalSubstrate
 from ..telemetry.pipeline import Pipeline
 from .agentos_agent import (
@@ -263,6 +264,9 @@ class ComputerAgent:
         # Optional egress route for telemetry: OTLP to `telemetry_url`. Unset
         # is off.
         telemetry_url: str | None = None,
+        # Optional egress route for the `http` session store
+        # (`http://egress/computer-agent-api`); see `with_base_url`.
+        session_store_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
@@ -293,6 +297,7 @@ class ComputerAgent:
             guardrails_url=guardrails_url,
             telemetry_url=telemetry_url,
             gap_dir=gap_dir,
+            session_store_url=session_store_url,
         )
         engine = self._settings.engine
         gap_dir = self._settings.gap_dir
@@ -305,6 +310,7 @@ class ComputerAgent:
                 self._settings.mcp_url,
                 self._settings.guardrails_url,
                 self._settings.telemetry_url,
+                self._settings.session_store_url,
             ]
         )
         self._api_base = api_base(self._settings.base_url)
@@ -367,7 +373,10 @@ class ComputerAgent:
                 resolved_store = cast("SessionStore", session_store)
             else:
                 resolved_store = resolve_session_store(
-                    cast("str | Mapping[str, Any]", session_store)
+                    with_base_url(
+                        cast("str | Mapping[str, Any]", session_store),
+                        self._settings.session_store_url,
+                    )
                 )
 
         # `on_tool_call` is only consulted by engines that emit permission

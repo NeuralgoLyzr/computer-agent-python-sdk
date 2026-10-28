@@ -1,29 +1,27 @@
 """The HTTP session store.
 
-Two behaviours here are contractual rather than incidental, and both have a
-failure mode that is silent if you get them wrong: ``load`` must never raise
-(the engine awaits it at session start), and the capability token must never
-travel on a header that the co-hosted translator and MCP bridge forward to a
-third party.
+``load`` must never raise (the engine awaits it at session start), and the
+only credential is ``x-api-key``: the newest sandbox token, which the egress
+proxy swaps for the Lyzr key.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
-import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 import respx
 
+from computeragent.harness.egress_token import CREDENTIAL
+from computeragent.session_stores import resolve_session_store
 from computeragent.session_stores.http import (
-    TOKEN_HEADER,
     HttpSessionStore,
     SessionStoreAppendError,
-    expiry_of,
     http_session_store_builder,
+    with_base_url,
 )
 
 BASE = "https://cas.example"
@@ -32,18 +30,9 @@ KEY = {"project_key": "proj", "session_id": "sess-1"}
 
 
 def store(**kw) -> HttpSessionStore:
-    params = {"base_url": BASE, "token": "opaque-token", "auto_refresh": False}
+    params = {"base_url": BASE}
     params.update(kw)
     return HttpSessionStore(**params)
-
-
-def jwt_expiring_in(seconds: int) -> str:
-    payload = (
-        base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + seconds}).encode())
-        .rstrip(b"=")
-        .decode()
-    )
-    return f"header.{payload}.signature"
 
 
 # ── construction ─────────────────────────────────────────────────────────────
@@ -51,21 +40,16 @@ def jwt_expiring_in(seconds: int) -> str:
 
 def test_base_url_is_required():
     with pytest.raises(ValueError, match="base_url"):
-        HttpSessionStore(base_url="", token="t")
+        HttpSessionStore(base_url="")
 
 
-def test_token_is_required():
-    with pytest.raises(ValueError, match="token"):
-        HttpSessionStore(base_url=BASE, token="")
-
-
-def test_builder_refuses_without_per_session_options():
-    """Unlike mongo, this builder holds no defaults — the server sends them."""
+def test_builder_requires_only_a_base_url():
     build = http_session_store_builder()
     with pytest.raises(ValueError, match="base_url"):
         build({})
-    with pytest.raises(ValueError, match="token"):
-        build({"base_url": BASE})
+    with pytest.raises(ValueError, match="base_url"):
+        build({"baseUrl": BASE})  # the camel-case key is not read
+    assert isinstance(build({"base_url": BASE, "token": "dropped"}), HttpSessionStore)
 
 
 # ── load ─────────────────────────────────────────────────────────────────────
@@ -222,73 +206,108 @@ async def test_appends_are_serialised_in_call_order():
     assert seen == ["first", "second"]
 
 
-# ── the token header ─────────────────────────────────────────────────────────
+# ── the credential ───────────────────────────────────────────────────────────
+
+
+def later(hours: float = 4) -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
 
 
 @respx.mock
-async def test_token_travels_on_its_own_header_only():
-    """Structural, not stylistic: the same listener hosts the Anthropic-OpenAI
-    translator and the MCP bridge, and both forward `authorization` /
-    `x-api-key` verbatim to a third party."""
+async def test_sends_only_the_api_key(monkeypatch):
+    monkeypatch.setenv("LYZR_API_KEY", "sbt_a")
+    CREDENTIAL.configure([BASE])
+    load = respx.get(ENTRIES_URL).mock(return_value=httpx.Response(200, json={"entries": []}))
+    append = respx.post(ENTRIES_URL).mock(return_value=httpx.Response(200, json={}))
+    refresh = respx.post(f"{BASE}/v1/auth/token").mock(return_value=httpx.Response(200))
+    s = store()
+
+    await s.load(KEY)
+    await s.append(KEY, [{"type": "user"}])
+    for route in (load, append):
+        headers = route.calls.last.request.headers
+        assert headers["x-api-key"] == "sbt_a"
+        assert "x-ca-session-store-token" not in headers
+        assert "authorization" not in headers
+
+    CREDENTIAL.adopt("sbt_a", "sbt_b", later())
+    await s.load(KEY)
+    assert load.calls.last.request.headers["x-api-key"] == "sbt_b"
+    assert not refresh.called
+    await s.close()
+
+
+@respx.mock
+async def test_no_key_means_no_credential(monkeypatch):
+    monkeypatch.delenv("LYZR_API_KEY", raising=False)
     route = respx.get(ENTRIES_URL).mock(return_value=httpx.Response(200, json={"entries": []}))
 
     await store().load(KEY)
 
-    headers = route.calls.last.request.headers
-    assert headers[TOKEN_HEADER] == "opaque-token"
-    assert "authorization" not in headers
-    assert "x-api-key" not in headers
-
-
-# ── token refresh ────────────────────────────────────────────────────────────
-
-
-def test_expiry_of_a_valid_jwt():
-    assert expiry_of(jwt_expiring_in(3600)) is not None
-
-
-@pytest.mark.parametrize("token", ["opaque", "a.b", "a.!!!.c", "", "a..c"])
-def test_expiry_of_an_unreadable_token_is_none(token):
-    """No hint means no refresh scheduled — harmless, because the server mints
-    a fresh token at the next dispatch anyway."""
-    assert expiry_of(token) is None
+    assert "x-api-key" not in route.calls.last.request.headers
 
 
 @respx.mock
-async def test_refresh_swaps_the_token():
-    respx.post(f"{BASE}/v1/auth/token").mock(
-        return_value=httpx.Response(200, json={"token": "fresher", "expiresIn": 3600})
+async def test_proxy_401_is_not_a_store_error(caplog, monkeypatch):
+    monkeypatch.setenv("LYZR_API_KEY", "sbt_a")
+    respx.get(ENTRIES_URL).mock(
+        return_value=httpx.Response(
+            401, json={"error": {"code": "TOKEN_INVALID", "message": "leak"}}
+        )
     )
+
+    with caplog.at_level("WARNING", logger="computeragent.session_stores.http"):
+        assert await store().load(KEY) is None
+
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "HTTP 401" in text
+    assert "leak" not in text
+
+
+async def test_close_is_idempotent():
     s = store()
-
-    assert await s.refresh_token() is True
-    assert s.token == "fresher"
-
-
-@respx.mock
-async def test_a_failed_refresh_keeps_the_old_token_and_does_not_raise():
-    respx.post(f"{BASE}/v1/auth/token").mock(return_value=httpx.Response(500))
-    s = store()
-
-    assert await s.refresh_token() is False
-    assert s.token == "opaque-token"
-
-
-@respx.mock
-async def test_close_cancels_a_pending_refresh():
-    respx.get(ENTRIES_URL).mock(return_value=httpx.Response(200, json={"entries": []}))
-    s = store(token=jwt_expiring_in(3600), auto_refresh=True)
-
-    await s.load(KEY)  # arms the timer
-    assert s._refresh_task is not None
-
+    await s.close()
     await s.close()
 
-    assert s._refresh_task is None
+
+# ── COMPUTERAGENT_SESSION_STORE_URL ──────────────────────────────────────────
+
+EGRESS_STORE = "http://egress/computer-agent-api"
 
 
-async def test_close_is_safe_on_a_store_that_never_armed():
-    await store().close()
+@respx.mock
+async def test_session_store_url_precedence(caplog, monkeypatch):
+    monkeypatch.setenv("LYZR_API_KEY", "sbt_a")
+    route = respx.get(f"{EGRESS_STORE}/session-store/entries").mock(
+        return_value=httpx.Response(200, json={"entries": []})
+    )
+
+    with caplog.at_level("INFO", logger="computeragent.session_stores.http"):
+        spec = with_base_url(
+            {"kind": "http", "options": {"baseUrl": "http://cas:8786", "token": "t"}}, EGRESS_STORE
+        )
+    assert spec == {"kind": "http", "options": {"base_url": EGRESS_STORE}}
+    await resolve_session_store(spec).load(KEY)
+    assert route.called
+    (info,) = [r for r in caplog.records if r.levelname == "INFO"]
+    assert "http" not in info.getMessage().replace("COMPUTERAGENT_SESSION_STORE_URL", "")
+
+    spec = with_base_url({"kind": "http", "options": {"base_url": "http://other"}}, EGRESS_STORE)
+    assert spec["options"]["base_url"] == EGRESS_STORE
+
+    assert with_base_url("http", EGRESS_STORE) == {
+        "kind": "http",
+        "options": {"base_url": EGRESS_STORE},
+    }
+
+    unset = {"kind": "http", "options": {"base_url": BASE}}
+    assert with_base_url(unset, None) is unset
+    with pytest.raises(ValueError, match="base_url is required"):
+        resolve_session_store(with_base_url({"kind": "http", "options": {"baseUrl": BASE}}, None))
+
+    assert with_base_url("memory", EGRESS_STORE) == "memory"
+    instance = store()
+    assert with_base_url(instance, EGRESS_STORE) is instance
 
 
 # ── deliberate omissions ─────────────────────────────────────────────────────

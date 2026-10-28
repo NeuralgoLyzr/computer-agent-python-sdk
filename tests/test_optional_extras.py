@@ -172,7 +172,7 @@ def test_http_session_store_without_httpx_names_its_extra():
         sys.meta_path.insert(0, finder)
         try:
             with pytest.raises(ImportError) as exc:
-                HttpSessionStore(base_url="https://h", token="t")
+                HttpSessionStore(base_url="https://h")
             assert "computer-agent-py[agentos]" in str(exc.value)
         finally:
             sys.meta_path.remove(finder)

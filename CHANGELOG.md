@@ -30,6 +30,11 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   Span and log processors export 128 records at a time. The OTLP exporters set
   `x-api-key` on every request through a stamping `requests` session, so a
   reissued sandbox token applies to telemetry too.
+- **`COMPUTERAGENT_SESSION_STORE_URL` / `session_store_url`.** The base URL of
+  the `http` session store behind the egress proxy
+  (`http://egress/computer-agent-api`); it overrides a descriptor's `base_url`
+  for kind `http` and is ignored for other kinds and store instances
+  (`computeragent.session_stores.with_base_url`).
 
 ### Changed
 
@@ -47,6 +52,13 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   engine's `PreToolUse` hook passes it, `PolicyToolAuthorizer` puts it in the
   policy input as `call_id`, and a call without one is denied.
 - A rewritten message carries the gateway's masked text (`[EMAIL]`).
+- **BREAKING: the `http` session store sends only `x-api-key`.** The store
+  token (`x-ca-session-store-token`), its refresh against `/v1/auth/token`, the
+  `token` / `auto_refresh` arguments, `TOKEN_HEADER` and `expiry_of` are gone;
+  a `token` option is ignored. The key is `LYZR_API_KEY` at each request, as
+  the newest sandbox token.
+- A session-store descriptor without a `kind` is reported by its keys, never
+  its values.
 
 ### Removed
 
