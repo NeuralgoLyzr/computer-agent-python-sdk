@@ -19,13 +19,14 @@ BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "sbx_key"
 OTLP = "http://egress.internal/otlp"
-AGENT_API = "http://egress.internal/agent-api"
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK_URL = f"{GUARDRAILS}/v1/check"
 
 
 def build(agent_doc, **kwargs) -> ComputerAgent:
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-    respx.get(f"{AGENT_API}/v3/org/rai-policy").mock(
-        return_value=httpx.Response(200, json={"policies": []})
+    respx.post("http://egress.internal/guardrails/v1/check").mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "allow"}})
     )
     params: dict = {
         "agent_id": AGENT_ID,
@@ -34,8 +35,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "engine": "gitagent",
         "llm_url": "http://egress.internal/llm",
         "mcp_url": "http://egress.internal/mcp",
-        "agent_api_url": AGENT_API,
-        "srs_url": "http://egress.internal/srs",
+        "guardrails_url": "http://egress.internal/guardrails",
     }
     params.update(kwargs)
     return ComputerAgent(**params)

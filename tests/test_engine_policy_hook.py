@@ -107,3 +107,21 @@ async def test_hook_fails_closed_on_decider_exception():
     out = await matcher.hooks[0]({"tool_name": "Bash", "tool_input": {}}, None, None)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "policy evaluation failed" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+@pytest.mark.asyncio
+async def test_hook_passes_tool_use_id():
+    """The guardrails check identifies a tool call by the engine's own id."""
+    seen: list[Any] = []
+
+    async def decider(_name: str, _input: dict[str, Any], context: Any) -> dict[str, Any]:
+        seen.append(context)
+        return {"behavior": "allow"}
+
+    matcher = _policy_pretooluse_matcher(decider)
+    await matcher.hooks[0]({"tool_name": "Bash", "tool_input": {}}, "toolu_1", None)
+    await matcher.hooks[0](
+        {"tool_name": "Bash", "tool_input": {}, "tool_use_id": "toolu_2"}, None, None
+    )
+
+    assert [getattr(c, "tool_use_id", None) for c in seen] == ["toolu_1", "toolu_2"]

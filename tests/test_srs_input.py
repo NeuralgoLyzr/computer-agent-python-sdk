@@ -1,7 +1,7 @@
-"""The user's message through SRS ``llm_input`` before the turn.
+"""The user's message through the guardrails ``input`` check before the turn.
 
-Ported from CAS harness-server ``session.ts`` (redactUserMessage /
-aggregateRedaction) and the redactInput cases of ``srs-policy-decider.test.ts``.
+Folding ported from CAS harness-server ``session.ts`` (redactUserMessage /
+aggregateRedaction); the gateway owns policy selection and fail-open.
 """
 
 from __future__ import annotations
@@ -12,66 +12,55 @@ import httpx
 import pytest
 import respx
 
-from computeragent.policy.srs_gate import TurnPolicy
-from computeragent.policy.srs_input import (
-    DEFAULT_BLOCK_REPLY,
-    check_user_message,
-)
+from computeragent.policy.srs_input import DEFAULT_BLOCK_REPLY, check_user_message
 
-SRS = "http://egress.internal/srs"
-INFERENCE = f"{SRS}/v1/rai/inference"
-KEY = "sbx_key"
-TURN = TurnPolicy(policy_ids=("org1", "local1"), fail_open=None, timeout_s=5.0)
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK = f"{GUARDRAILS}/v1/check"
+KEY = "sbt_key"
 
 
-async def check(message, turn=TURN):
-    return await check_user_message(
-        message, turn, srs_url=SRS, api_key=KEY, principal_id="my-agent"
-    )
+async def check(message):
+    return await check_user_message(message, guardrails_url=GUARDRAILS, api_key=KEY)
 
 
-def masking_srs():
-    """Echoes each text back with emails masked and blocks on 'BLOCKME'."""
+def data(**fields):
+    return httpx.Response(200, json={"data": {"op": "input", **fields}})
+
+
+def masking_gateway():
+    """Masks emails with a rewrite and blocks on 'BLOCKME'."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        text = json.loads(request.content)["input_text"]
+        text = json.loads(request.content)["subject"]["text"]
         if "BLOCKME" in text:
-            return httpx.Response(
-                200,
-                json={"blocked": True, "block_reason": "nope", "blocked_by_policy_id": "local1"},
-            )
-        masked = text.replace("a@b.com", "<EMAIL_ADDRESS_1>")
-        return httpx.Response(
-            200,
-            json={
-                "processed_text": masked,
-                "redaction_map": {"a@b.com": "<EMAIL_ADDRESS_1>"} if masked != text else {},
-            },
-        )
+            return data(decision="block", blockReason="nope", blockedByPolicyId="local1")
+        if "a@b.com" in text:
+            return data(decision="rewrite", text=text.replace("a@b.com", "[EMAIL]"))
+        return data(decision="allow")
 
-    return respx.post(INFERENCE).mock(side_effect=handler)
+    return respx.post(CHECK).mock(side_effect=handler)
 
 
 @respx.mock
 async def test_a_string_message_is_masked():
-    route = masking_srs()
+    route = masking_gateway()
 
     decision = await check("mail a@b.com")
 
-    assert decision.message == "mail <EMAIL_ADDRESS_1>"
+    assert decision.message == "mail [EMAIL]"
     assert decision.outcome == "redacted"
     assert decision.blocked is False
-    assert decision.entity_counts == {"EMAIL_ADDRESS": 1}
     assert decision.checked is True
-    sent = json.loads(route.calls.last.request.content)
-    assert sent["policy_ids"] == ["org1", "local1"]
-    assert sent["stage"] == "llm_input"
-    assert sent["principal_id"] == "my-agent"
+    assert json.loads(route.calls.last.request.content) == {
+        "op": "input",
+        "subject": {"text": "mail a@b.com"},
+    }
+    assert route.calls.last.request.headers["x-api-key"] == KEY
 
 
 @respx.mock
 async def test_every_text_block_is_checked_and_other_blocks_kept():
-    route = masking_srs()
+    route = masking_gateway()
     message = {
         "role": "user",
         "content": [
@@ -84,39 +73,38 @@ async def test_every_text_block_is_checked_and_other_blocks_kept():
     decision = await check(message)
 
     assert route.call_count == 2
-    assert decision.message["content"][0]["text"] == "mail <EMAIL_ADDRESS_1>"
+    assert decision.message["content"][0]["text"] == "mail [EMAIL]"
     assert decision.message["content"][1] == {"type": "image", "source": {"data": "..."}}
-    assert decision.message["content"][2]["text"] == "and <EMAIL_ADDRESS_1> again"
-    assert decision.entity_counts == {"EMAIL_ADDRESS": 2}
+    assert decision.message["content"][2]["text"] == "and [EMAIL] again"
     # The caller's own message is not modified.
     assert message["content"][0]["text"] == "mail a@b.com"
 
 
 @respx.mock
 async def test_an_sdk_shaped_user_message_is_checked():
-    masking_srs()
+    masking_gateway()
     message = {"type": "user", "message": {"role": "user", "content": "mail a@b.com"}}
 
     decision = await check(message)
 
-    assert decision.message["message"]["content"] == "mail <EMAIL_ADDRESS_1>"
+    assert decision.message["message"]["content"] == "mail [EMAIL]"
 
 
 @respx.mock
 async def test_a_list_of_messages_is_checked():
-    masking_srs()
+    masking_gateway()
 
     decision = await check(
         [{"role": "user", "content": "a@b.com"}, {"role": "user", "content": "hi"}]
     )
 
-    assert decision.message[0]["content"] == "<EMAIL_ADDRESS_1>"
+    assert decision.message[0]["content"] == "[EMAIL]"
     assert decision.message[1]["content"] == "hi"
 
 
 @respx.mock
 async def test_one_blocked_block_blocks_the_message():
-    masking_srs()
+    masking_gateway()
 
     decision = await check(
         {"content": [{"type": "text", "text": "fine"}, {"type": "text", "text": "BLOCKME"}]}
@@ -131,7 +119,7 @@ async def test_one_blocked_block_blocks_the_message():
 
 @respx.mock
 async def test_a_block_with_no_reason_has_the_default_reply():
-    respx.post(INFERENCE).mock(return_value=httpx.Response(200, json={"blocked": True}))
+    respx.post(CHECK).mock(return_value=data(decision="block"))
 
     decision = await check("x")
 
@@ -140,7 +128,7 @@ async def test_a_block_with_no_reason_has_the_default_reply():
 
 @respx.mock
 async def test_a_clean_message_is_unchanged():
-    masking_srs()
+    masking_gateway()
 
     decision = await check("hello")
 
@@ -149,90 +137,69 @@ async def test_a_clean_message_is_unchanged():
 
 
 @respx.mock
-async def test_no_policies_makes_no_call():
-    route = masking_srs()
-
-    decision = await check("a@b.com", TurnPolicy(policy_ids=(), fail_open=None, timeout_s=5))
-
-    assert decision.message == "a@b.com"
-    assert decision.checked is False
-    assert route.call_count == 0
-
-
-@respx.mock
 async def test_empty_text_makes_no_call():
-    route = masking_srs()
+    route = masking_gateway()
 
     decision = await check({"content": [{"type": "image"}, {"type": "text", "text": ""}]})
 
     assert decision.outcome == "clean"
+    assert decision.checked is False
     assert route.call_count == 0
 
 
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    [
+        (
+            httpx.Response(502, json={"error": {"code": "rai_unavailable"}}),
+            "guardrails 502 (rai_unavailable)",
+        ),
+        (httpx.Response(413), "guardrails 413"),
+        (httpx.Response(400), "guardrails 400"),
+    ],
+)
 @respx.mock
-async def test_an_unresolved_turn_blocks_without_a_call():
-    route = masking_srs()
+async def test_no_verdict_blocks(response, reason):
+    respx.post(CHECK).mock(return_value=response)
 
-    decision = await check("hello", TurnPolicy.unresolvable())
+    decision = await check("a@b.com")
+
+    assert decision.blocked is True
+    assert decision.outcome == "error"
+    assert decision.reply == f"[Content blocked: RAI policy check failed: {reason}]"
+
+
+@respx.mock
+async def test_a_timeout_blocks():
+    respx.post(CHECK).mock(side_effect=httpx.ReadTimeout("slow"))
+
+    decision = await check("hello")
 
     assert decision.blocked is True
     assert decision.reply == (
-        "[Content blocked: RAI policy check failed: org RAI policy could not be loaded]"
+        "[Content blocked: RAI policy check failed: guardrails unreachable: ReadTimeout]"
     )
-    assert route.call_count == 0
-
-
-@respx.mock
-async def test_no_verdict_blocks_when_an_org_policy_is_fail_closed():
-    respx.post(INFERENCE).mock(return_value=httpx.Response(503))
-
-    decision = await check("hello", TurnPolicy(policy_ids=("o1",), fail_open=False, timeout_s=5))
-
-    assert decision.blocked is True
-    assert decision.outcome == "error"
-    assert decision.reply == "[Content blocked: RAI policy check failed: SRS 503]"
-
-
-@pytest.mark.parametrize("fail_open", [True, None])
-@respx.mock
-async def test_no_verdict_passes_unchanged_otherwise(fail_open):
-    """Every org policy fail-open, or only the agent's own policies (whose
-    lyzr-agent default is fail-open)."""
-    respx.post(INFERENCE).mock(side_effect=httpx.ConnectError("down"))
-
-    decision = await check(
-        "a@b.com", TurnPolicy(policy_ids=("o1",), fail_open=fail_open, timeout_s=5)
-    )
-
-    assert decision.blocked is False
-    assert decision.outcome == "error"
-    assert decision.message == "a@b.com"
 
 
 @respx.mock
 async def test_the_worst_outcome_wins():
     """error > blocked > redacted > clean."""
-    calls = iter(
-        [
-            httpx.Response(200, json={"processed_text": "<X_1>", "redaction_map": {"v": "<X_1>"}}),
-            httpx.Response(500),
-        ]
-    )
-    respx.post(INFERENCE).mock(side_effect=lambda request: next(calls))
+    calls = iter([data(decision="rewrite", text="[X]"), httpx.Response(500)])
+    respx.post(CHECK).mock(side_effect=lambda request: next(calls))
 
     decision = await check(
-        {"content": [{"type": "text", "text": "v"}, {"type": "text", "text": "w"}]},
-        TurnPolicy(policy_ids=("o1",), fail_open=True, timeout_s=5),
+        {"content": [{"type": "text", "text": "v"}, {"type": "text", "text": "w"}]}
     )
 
     assert decision.outcome == "error"
-    assert decision.message["content"][0]["text"] == "<X_1>"
+    assert decision.blocked is True
+    assert decision.message["content"][0]["text"] == "[X]"
     assert decision.message["content"][1]["text"] == "w"
 
 
 @respx.mock
 async def test_a_streamed_message_is_checked_entry_by_entry():
-    route = masking_srs()
+    route = masking_gateway()
 
     async def stream():
         yield {"role": "user", "content": "mail a@b.com"}
@@ -242,15 +209,15 @@ async def test_a_streamed_message_is_checked_entry_by_entry():
 
     assert route.call_count == 2
     assert decision.message == [
-        {"role": "user", "content": "mail <EMAIL_ADDRESS_1>"},
-        {"role": "user", "content": "and <EMAIL_ADDRESS_1>"},
+        {"role": "user", "content": "mail [EMAIL]"},
+        {"role": "user", "content": "and [EMAIL]"},
     ]
     assert decision.outcome == "redacted"
 
 
 @respx.mock
 async def test_one_blocked_entry_in_a_stream_blocks_the_turn():
-    masking_srs()
+    masking_gateway()
 
     async def stream():
         yield {"role": "user", "content": "fine"}
@@ -264,20 +231,9 @@ async def test_one_blocked_entry_in_a_stream_blocks_the_turn():
 
 @respx.mock
 async def test_bare_string_entries_in_a_list_are_checked():
-    route = masking_srs()
+    route = masking_gateway()
 
     decision = await check(["a@b.com", {"role": "user", "content": "hi"}])
 
     assert route.call_count == 2
-    assert decision.message[0] == {"role": "user", "content": "<EMAIL_ADDRESS_1>"}
-
-
-async def test_a_stream_is_left_unread_with_no_policies():
-    async def stream():
-        yield {"role": "user", "content": "hi"}
-
-    message = stream()
-    decision = await check(message, TurnPolicy(policy_ids=(), fail_open=None, timeout_s=5))
-
-    assert decision.outcome == "clean"
-    assert decision.message is message
+    assert decision.message[0] == {"role": "user", "content": "[EMAIL]"}

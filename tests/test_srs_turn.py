@@ -1,8 +1,8 @@
-"""SRS guardrails through a ComputerAgent run.
+"""Guardrails through a ComputerAgent run.
 
-Every turn combines the org (global) policies from ``agent_api_url`` with the
-agent's own (local) ``rai_policy_id`` from the agent document; the user's
-message and every tool call are checked against that one set.
+The user's message and every tool call go to ``{guardrails_url}/v1/check``
+through the egress proxy; the gateway applies the org's and the agent's
+policies. The SDK reads no policies and sends no policy ids.
 """
 
 from __future__ import annotations
@@ -26,11 +26,8 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "sbx_key"
 LLM_URL = "http://egress.internal/llm"
 MCP_URL = "http://egress.internal/mcp"
-AGENT_API = "http://egress.internal/agent-api"
-ORG_URL = f"{AGENT_API}/v3/org/rai-policy"
-SRS = "http://egress.internal/srs"
-INFERENCE = f"{SRS}/v1/rai/inference"
-TOOL_CALL = f"{SRS}/v1/guardrails/evaluate-tool-call"
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK = f"{GUARDRAILS}/v1/check"
 
 
 class RecordingEngine:
@@ -57,25 +54,28 @@ class RecordingEngine:
         )
 
 
-def org_policies(*rows):
-    return respx.get(ORG_URL).mock(return_value=httpx.Response(200, json={"policies": list(rows)}))
+def gateway(tool_decision="allow", **tool_data):
+    """Masks emails, blocks on 'BLOCKME', answers tool calls with ``tool_decision``."""
 
-
-def masking_srs():
     def handler(request: httpx.Request) -> httpx.Response:
-        text = json.loads(request.content)["input_text"]
-        if "BLOCKME" in text:
-            return httpx.Response(
-                200,
-                json={"blocked": True, "block_reason": "nope", "blocked_by_policy_id": "local1"},
-            )
-        return httpx.Response(200, json={"processed_text": text.replace("a@b.com", "<EMAIL_1>")})
+        body = json.loads(request.content)
+        if body["op"] == "tool-input":
+            data = {"decision": tool_decision, "op": "tool-input", **tool_data}
+        elif "BLOCKME" in body["subject"]["text"]:
+            data = {"decision": "block", "blockReason": "nope", "blockedByPolicyId": "local1"}
+        elif "a@b.com" in body["subject"]["text"]:
+            data = {
+                "decision": "rewrite",
+                "text": body["subject"]["text"].replace("a@b.com", "[EMAIL]"),
+            }
+        else:
+            data = {"decision": "allow"}
+        return httpx.Response(200, json={"data": data})
 
-    return respx.post(INFERENCE).mock(side_effect=handler)
+    return respx.post(CHECK).mock(side_effect=handler)
 
 
-def build(agent_doc, *, rai_policy_id="local1", **kwargs) -> ComputerAgent:
-    agent_doc["rai_policy_id"] = rai_policy_id
+def build(agent_doc, **kwargs) -> ComputerAgent:
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
     params: dict = {
         "agent_id": AGENT_ID,
@@ -84,73 +84,67 @@ def build(agent_doc, *, rai_policy_id="local1", **kwargs) -> ComputerAgent:
         "engine": RecordingEngine(),
         "llm_url": LLM_URL,
         "mcp_url": MCP_URL,
-        "agent_api_url": AGENT_API,
-        "srs_url": SRS,
+        "guardrails_url": GUARDRAILS,
     }
     params.update(kwargs)
     return ComputerAgent(**params)
 
 
-@pytest.mark.parametrize("missing", ["agent_api_url", "srs_url"])
-def test_the_guardrail_urls_are_required(missing):
-    params = {
-        "agent_id": AGENT_ID,
-        "base_url": BASE,
-        "api_key": KEY,
-        "engine": "gitagent",
-        "llm_url": LLM_URL,
-        "mcp_url": MCP_URL,
-        "agent_api_url": AGENT_API,
-        "srs_url": SRS,
-    }
-    del params[missing]
-
-    with pytest.raises(SettingsError, match=missing):
-        ComputerAgent(**params)
+def test_the_guardrails_url_is_required():
+    with pytest.raises(SettingsError, match="guardrails_url"):
+        ComputerAgent(
+            agent_id=AGENT_ID,
+            base_url=BASE,
+            api_key=KEY,
+            engine="gitagent",
+            llm_url=LLM_URL,
+            mcp_url=MCP_URL,
+        )
 
 
 @respx.mock
-def test_the_local_policy_comes_from_the_agent_document(agent_doc):
-    agent = build(agent_doc, rai_policy_id=" local1 ")
-
-    assert agent.agent.rai_policy_id == "local1"
-
-
-@respx.mock
-async def test_the_input_check_uses_org_then_local_policies(agent_doc):
-    org = org_policies(
-        {"policy_id": "org1", "enabled": True}, {"policy_id": "org2", "enabled": True}
-    )
-    srs = masking_srs()
+async def test_the_message_is_checked_and_masked_before_the_engine(agent_doc):
+    route = gateway()
     engine = RecordingEngine()
 
     async with build(agent_doc, engine=engine) as agent:
         await agent.chat("mail a@b.com")
 
-    assert org.calls.last.request.headers["x-api-key"] == KEY
-    sent = json.loads(srs.calls.last.request.content)
-    assert sent["policy_ids"] == ["org1", "org2", "local1"]
-    assert sent["stage"] == "llm_input"
-    assert sent["principal_id"] == agent_doc["name"]
-    assert engine.messages[0]["content"] == "mail <EMAIL_1>"
+    assert json.loads(route.calls.last.request.content) == {
+        "op": "input",
+        "subject": {"text": "mail a@b.com"},
+    }
+    assert route.calls.last.request.headers["x-api-key"] == KEY
+    assert engine.messages[0]["content"] == "mail [EMAIL]"
 
 
 @respx.mock
-async def test_org_policies_are_read_again_every_turn(agent_doc):
-    org = org_policies()
-    masking_srs()
+async def test_no_org_policy_route_is_called(agent_doc):
+    gateway()
+    agent = build(agent_doc)
+    others = respx.route().mock(return_value=httpx.Response(599))
+
+    async with agent:
+        await agent.chat("hello")
+
+    # Only the agent document and the check were requested.
+    assert not others.called
+
+
+@respx.mock
+async def test_every_turn_is_checked(agent_doc):
+    route = gateway()
 
     async with build(agent_doc) as agent:
         await agent.chat("one")
         await agent.chat("two")
 
-    assert org.call_count == 2
+    assert route.call_count == 2
 
 
 @respx.mock
 async def test_a_blocked_message_never_starts_the_engine(agent_doc, stub_sink):
-    org_policies()
-    masking_srs()
+    gateway()
     engine = RecordingEngine()
 
     async with build(
@@ -165,6 +159,7 @@ async def test_a_blocked_message_never_starts_the_engine(agent_doc, stub_sink):
     assert final.is_error is False
     decisions = [e for e in stub_sink.events if e.kind == "policy_decision"]
     assert len(decisions) == 1
+    assert decisions[0].payload["engine"] == "guardrails"
     assert decisions[0].payload["stage"] == "llm_input"
     assert decisions[0].payload["outcome"] == "blocked"
     assert decisions[0].payload["policy_id"] == "local1"
@@ -173,8 +168,7 @@ async def test_a_blocked_message_never_starts_the_engine(agent_doc, stub_sink):
 
 @respx.mock
 async def test_the_turn_after_a_block_runs(agent_doc):
-    org_policies()
-    masking_srs()
+    gateway()
     engine = RecordingEngine()
 
     async with build(agent_doc, engine=engine) as agent:
@@ -186,9 +180,10 @@ async def test_the_turn_after_a_block_runs(agent_doc):
 
 
 @respx.mock
-async def test_unreadable_org_policies_block_the_turn(agent_doc):
-    respx.get(ORG_URL).mock(return_value=httpx.Response(500))
-    srs = masking_srs()
+async def test_no_verdict_blocks_the_turn(agent_doc):
+    respx.post(CHECK).mock(
+        return_value=httpx.Response(502, json={"error": {"code": "rai_unavailable"}})
+    )
     engine = RecordingEngine()
 
     async with build(agent_doc, engine=engine) as agent:
@@ -196,63 +191,49 @@ async def test_unreadable_org_policies_block_the_turn(agent_doc):
 
     assert engine.starts == 0
     assert result.messages[0].result == (
-        "[Content blocked: RAI policy check failed: org RAI policy could not be loaded]"
+        "[Content blocked: RAI policy check failed: guardrails 502 (rai_unavailable)]"
     )
-    assert srs.call_count == 0
 
 
 @respx.mock
-async def test_no_policies_anywhere_makes_no_srs_call(agent_doc):
-    org_policies()
-    srs = masking_srs()
-    engine = RecordingEngine()
-
-    async with build(agent_doc, engine=engine, rai_policy_id=None) as agent:
-        await agent.chat("mail a@b.com")
-
-    assert srs.call_count == 0
-    assert engine.messages[0]["content"] == "mail a@b.com"
-
-
-@respx.mock
-async def test_tool_calls_are_checked_against_the_same_combined_set(agent_doc):
-    org_policies({"policy_id": "org1", "enabled": True})
-    masking_srs()
-    tool_call = respx.post(TOOL_CALL).mock(
-        return_value=httpx.Response(
-            200, json={"allowed": False, "denied_by": "cedar", "reason": "no rm"}
-        )
+async def test_tool_calls_are_checked_with_the_engines_id(agent_doc):
+    route = gateway(
+        "block", results=[{"decision": "block", "deniedBy": "cedar", "reason": "no rm"}]
     )
 
     async with build(agent_doc) as agent:
-        await agent.chat("hello")
         decider = agent._coordinator._policy_decider  # type: ignore[attr-defined]
-        result = await decider("Bash", {"command": "rm -rf /"}, {"session_id": "s1"})
+        result = await decider(
+            "Bash", {"command": "rm -rf /"}, {"session_id": "s1", "tool_use_id": "toolu_7"}
+        )
 
     assert isinstance(result, PermissionResultDeny)
     assert result.message == "no rm"
-    sent = json.loads(tool_call.calls.last.request.content)
-    assert sent["policy_ids"] == ["org1", "local1"]
-    assert sent["tool_name"] == "claude-agent-sdk__Bash"
-    assert sent["principal_id"] == agent_doc["name"]
+    (call,) = json.loads(route.calls.last.request.content)["subject"]["toolCalls"]
+    assert call == {
+        "id": "toolu_7",
+        "name": "claude-agent-sdk__Bash",
+        "arguments": {"command": "rm -rf /"},
+    }
 
 
 @respx.mock
-async def test_a_tool_call_before_any_turn_is_denied(agent_doc):
+async def test_a_tool_call_without_an_id_is_denied(agent_doc):
+    route = gateway()
     agent = build(agent_doc)
     decider = agent._coordinator._policy_decider  # type: ignore[attr-defined]
 
     result = await decider("Bash", {"command": "ls"}, {"session_id": "s1"})
 
     assert isinstance(result, PermissionResultDeny)
+    assert route.call_count == 0
 
 
 @respx.mock
 async def test_a_callers_policy_decider_replaces_the_tool_gate_but_not_the_input_check(
     agent_doc,
 ):
-    org_policies()
-    srs = masking_srs()
+    route = gateway()
 
     async def mine(tool_name, tool_input, context):
         return PermissionResultAllow(updated_input=tool_input)
@@ -261,13 +242,12 @@ async def test_a_callers_policy_decider_replaces_the_tool_gate_but_not_the_input
         await agent.chat("hello")
         assert agent._coordinator._policy_decider is mine  # type: ignore[attr-defined]
 
-    assert srs.call_count == 1
+    assert route.call_count == 1
 
 
 @respx.mock
 async def test_a_streamed_message_is_checked_before_the_engine_sees_it(agent_doc):
-    org_policies()
-    srs = masking_srs()
+    route = gateway()
     engine = RecordingEngine()
 
     async def stream():
@@ -276,14 +256,13 @@ async def test_a_streamed_message_is_checked_before_the_engine_sees_it(agent_doc
     async with build(agent_doc, engine=engine) as agent:
         await agent.chat(stream())
 
-    assert srs.call_count == 1
-    assert engine.messages[0]["content"] == "mail <EMAIL_1>"
+    assert route.call_count == 1
+    assert engine.messages[0]["content"] == "mail [EMAIL]"
 
 
 @respx.mock
 async def test_a_blocked_streamed_message_never_starts_the_engine(agent_doc):
-    org_policies()
-    masking_srs()
+    gateway()
     engine = RecordingEngine()
 
     async def stream():

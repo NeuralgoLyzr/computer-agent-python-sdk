@@ -30,14 +30,13 @@ ENV_VARS: dict[str, str] = {
     "api_key": "LYZR_API_KEY",
     "llm_url": "COMPUTERAGENT_LLM_URL",
     "mcp_url": "COMPUTERAGENT_MCP_URL",
-    "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
-    "srs_url": "COMPUTERAGENT_SRS_URL",
+    "guardrails_url": "COMPUTERAGENT_GUARDRAILS_URL",
     "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
     "gap_dir": "COMPUTERAGENT_GAP_DIR",
 }
 
 #: Egress routes: required, and each must be an http(s) URL.
-URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url", "agent_api_url", "srs_url")
+URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url", "guardrails_url")
 
 #: Egress routes that may be unset (the feature is then off), but must be
 #: http(s) URLs when set.
@@ -78,8 +77,7 @@ class Settings:
     base_url: str
     llm_url: str
     mcp_url: str
-    agent_api_url: str
-    srs_url: str
+    guardrails_url: str
     telemetry_url: str | None
     gap_dir: str | Path | None
     _explicit_api_key: str | None
@@ -99,7 +97,7 @@ class Settings:
         return (
             f"Settings(agent_id={self.agent_id!r}, engine={self.engine!r}, "
             f"base_url={self.base_url!r}, llm_url={self.llm_url!r}, mcp_url={self.mcp_url!r}, "
-            f"agent_api_url={self.agent_api_url!r}, srs_url={self.srs_url!r}, "
+            f"guardrails_url={self.guardrails_url!r}, "
             f"telemetry_url={self.telemetry_url!r}, "
             f"gap_dir={self.gap_dir!r}, api_key=<hidden>)"
         )
@@ -113,8 +111,7 @@ def resolve_settings(
     api_key: str | None,
     llm_url: str | None,
     mcp_url: str | None,
-    agent_api_url: str | None,
-    srs_url: str | None,
+    guardrails_url: str | None,
     telemetry_url: str | None,
     gap_dir: str | Path | None,
     env: Mapping[str, str] | None = None,
@@ -134,8 +131,7 @@ def resolve_settings(
     given_urls = {
         "llm_url": llm_url,
         "mcp_url": mcp_url,
-        "agent_api_url": agent_api_url,
-        "srs_url": srs_url,
+        "guardrails_url": guardrails_url,
         "telemetry_url": telemetry_url,
     }
     urls = {
@@ -177,8 +173,7 @@ def resolve_settings(
         base_url=resolved_base_url,
         llm_url=str(urls["llm_url"]).rstrip("/"),
         mcp_url=str(urls["mcp_url"]).rstrip("/"),
-        agent_api_url=str(urls["agent_api_url"]).rstrip("/"),
-        srs_url=str(urls["srs_url"]).rstrip("/"),
+        guardrails_url=str(urls["guardrails_url"]).rstrip("/"),
         telemetry_url=_optional_url(urls["telemetry_url"]),
         gap_dir=resolved_gap_dir,
         _explicit_api_key=explicit_key,

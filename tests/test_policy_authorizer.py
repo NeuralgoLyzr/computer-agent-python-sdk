@@ -187,3 +187,35 @@ def test_engine_protocol_is_satisfied_by_real_engines():
     # Structural Protocol — both must duck-type as PolicyEngine.
     eng: PolicyEngine = opa  # noqa: F841 - mypy/type-checker assertion
     eng = cedar  # noqa: F841
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context", "expected"),
+    [
+        ({"session_id": "s", "tool_use_id": "toolu_1"}, "toolu_1"),
+        ({"session_id": "s", "call_id": "c_1"}, "c_1"),
+        ({"session_id": "s"}, ""),
+    ],
+)
+async def test_call_id_reaches_policy_input(context, expected):
+    engine = StubEngine(PolicyDecision.ALLOW)
+    auth = PolicyToolAuthorizer(engine=engine, principal_resolver=lambda c: PolicyPrincipal(id="a"))
+
+    await auth("Bash", {}, context)
+
+    assert engine.calls[0].context["call_id"] == expected
+
+
+@pytest.mark.asyncio
+async def test_a_context_resolvers_call_id_is_kept():
+    engine = StubEngine(PolicyDecision.ALLOW)
+    auth = PolicyToolAuthorizer(
+        engine=engine,
+        principal_resolver=lambda c: PolicyPrincipal(id="a"),
+        context_resolver=lambda c: {"call_id": "mine"},
+    )
+
+    await auth("Bash", {}, {"tool_use_id": "toolu_1"})
+
+    assert engine.calls[0].context["call_id"] == "mine"
