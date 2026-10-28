@@ -771,3 +771,13 @@ it `linux/arm64` for AgentCore):
   - any other answer is `{relay: 1, instance, status, headers, body | bodyBase64}`;
   - a malformed envelope is that JSON with `status: 400` and code `AGENTCORE_RELAY_REQUEST_INVALID`.
 - `instance` is minted on the first invocation, so CAS can tell when AgentCore replaced the microVM.
+  The relay logs it once at INFO as `relay.instance id=<id>`.
+- Streams can be closed: AgentCore never forwards a caller's disconnect, so CAS names each answer in
+  the envelope header `x-ca-relay-stream` (a UUID v4, any case; stripped before the routes see the
+  request). `DELETE /_relay/streams/<id>` is answered by the relay itself: it closes that open
+  answer as a dropped connection would (the relayed stream ends, `/events` detaches) → relayed
+  `204`; an unknown id or one that is not a UUID v4 → relayed `404`. The relay logs
+  `relay.stream.opened` / `relay.stream.closed` with the id only.
+- A JSON answer whose envelope exceeds AgentCore's 100 MiB payload cap (roughly 75 MiB of binary
+  body, after base64) is replaced by a relayed `502` with code `AGENTCORE_RESPONSE_TOO_LARGE`
+  (`meta.maxBytes`); event streams are not capped.

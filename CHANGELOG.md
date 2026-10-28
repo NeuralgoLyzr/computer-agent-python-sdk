@@ -16,6 +16,11 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   (`Healthy` / `HealthyBusy`) and `POST /invocations` (relay envelope v1,
   dispatched in-process; streamed answers keep the `: ca-relay` head frame).
   One image covers Lambda MicroVM and AgentCore (`computeragent.server.relay`).
+  CAS can close an abandoned relayed stream: the `x-ca-relay-stream` envelope
+  header (a UUID v4) is stripped before dispatch and `DELETE /_relay/streams/<id>`
+  closes that answer (relayed 204, unknown id 404). A JSON envelope over
+  AgentCore's 100 MiB cap becomes a relayed 502 `AGENTCORE_RESPONSE_TOO_LARGE`.
+  The relay logs `relay.instance id=…` once, and stream open/close with the id only.
 - **The app server for stage images** (`computeragent.server`, extra `server`).
   `python -m computeragent.server` serves CAS's harness REST API on `0.0.0.0:8080`:
   - the Lambda MicroVM lifecycle hooks, health, sessions, messages, events,
