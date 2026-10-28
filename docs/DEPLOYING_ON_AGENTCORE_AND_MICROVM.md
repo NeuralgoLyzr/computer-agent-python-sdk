@@ -438,13 +438,16 @@ CAS itself must be allowed to use the resource: `lambda:RunMicrovm` on the Micro
 | Session start: `502 AGENT_BUILD_FAILED … SettingsError: missing required settings: …` | The image lacks an egress route or the engine | Set them in the image's `.env` (§2) |
 | A pushed fix does not show up on MicroVM | MicroVM images are snapshots | `update-microvm-image` (§6.4) and move the agent's `version` pin |
 
-## Appendix: the example resources in Lyzr UAT
+## Appendix: the UAT default sandboxes
 
-Built from `examples/` on branch `feat/p1-sdk-12-agentcore-relay`, account `425642439121`,
-`us-east-1`. They point at an egress proxy on a development tunnel (`ngrok-free.dev`), so treat them
-as a worked example, not as production resources.
+UAT CAS boots these when an agent names no image of its own (`LAMBDA_MICROVM_IMAGE_ARN` and
+`AGENTCORE_RUNTIME_ARN` on `computeragent-server`). They are built from
+`examples/sdk_default_lambda_microvm/` and `examples/sdk_default_agentcore/`, bake no egress route
+(CAS passes them per session), and are managed by Terraform in `lyzr-studio-infra`
+(`infrastructure/serverless/lambda-microvm/sdk-default.tf`, `infrastructure/ecr`). Account
+`425642439121`, `us-east-1`.
 
 | Runtime | Resource | Image |
 |---|---|---|
-| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:python-sdk-example-lambda-microvm`, version `5.0` | `computer-agent/python-sdk-example-lambda-microvm@sha256:00dd5c580b1baa7e2c136a168b38e144ba9078634f38d9a899074cf30ec4b86a` |
-| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/python_sdk_example_agentcore_runtime-aICRZZ5e7i`, version `5` (endpoint `DEFAULT`) | `computer-agent/python-sdk-example-agentcore-runtime@sha256:12186d9e0654bb1a864fb042d4826ac9f513032d7e80d52c8d10adcf77795e97` |
+| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:lyzr-studio-uat-computeragent-sdk-default`, version `1.0` | `computer-agent/sdk-default-lambda-microvm@sha256:a8a1f7288d87609f46040d18202e6a886a71142b88094f996f1d4301dc023cf4` |
+| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/lyzr_studio_uat_computeragent_sdk_default-wzY4Av5AO0`, version `1` (endpoint `DEFAULT`) | `computer-agent/sdk-default-agentcore@sha256:36366184d84e2f3bd36de74549e7e60c110e958e72352feb9dce23febb994aff` |
