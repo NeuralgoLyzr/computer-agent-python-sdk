@@ -9,6 +9,7 @@ Anthropic-shaped engines only.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -29,16 +30,14 @@ BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
-MCP_URL = "http://egress.internal/mcp"
-AGENT_API = "http://egress.internal/agent-api"
-SRS = "http://egress.internal/srs"
-ORG_URL = f"{AGENT_API}/v3/org/rai-policy"
+MCP_URL = "http://egress.internal/mcp/v1"
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK_URL = f"{GUARDRAILS}/v1/check"
 
 
-def build_servers(bindings, *, mcp_mode="engine", anthropic_shaped=True):
+def build_servers(bindings, *, anthropic_shaped=True):
     return build_mcp_servers(
         tuple(bindings),
-        mcp_mode=mcp_mode,
         mcp_url=MCP_URL,
         api_key=KEY,
         anthropic_shaped=anthropic_shaped,
@@ -50,16 +49,20 @@ def build_servers(bindings, *, mcp_mode="engine", anthropic_shaped=True):
 
 def test_parses_every_field():
     (binding,) = parse_bindings(
-        [
-            {
-                "server_id": "srv_creator",
-                "tool_name": "jira",
-                "action_names": ["search", "create"],
-                "persist_auth": False,
-                "your_server_id": "srv_mine",
-                "needs_your_connection": False,
-            }
-        ]
+        {
+            "provider": "lyzr-mcp",
+            "servers": [
+                {
+                    "server_id": "srv_creator",
+                    "tool_name": "jira",
+                    "action_names": ["search", "create"],
+                    "persist_auth": False,
+                    "your_server_id": "srv_mine",
+                    "needs_your_connection": False,
+                    "standard_server_id": "std_1",
+                }
+            ],
+        }
     )
 
     assert binding == McpBinding(
@@ -71,24 +74,28 @@ def test_parses_every_field():
     )
 
 
-def test_no_bindings():
+def test_parses_mcp_section():
     assert parse_bindings(None) == ()
-    assert parse_bindings([]) == ()
+    assert parse_bindings({"servers": []}) == ()
+    assert parse_bindings({"servers": None}) == ()
+    assert parse_bindings({"provider": "lyzr-mcp"}) == ()
 
 
 def test_persist_auth_defaults_to_shared():
-    (binding,) = parse_bindings([{"server_id": "s", "tool_name": "t"}])
+    (binding,) = parse_bindings({"servers": [{"server_id": "s", "tool_name": "t"}]})
     assert binding.persist_auth is True
 
 
 @pytest.mark.parametrize(
     ("raw", "match"),
     [
-        ("nope", "must be a list"),
-        (["nope"], r"mcp_servers\[0\] must be an object"),
-        ([{"tool_name": "t"}], r"mcp_servers\[0\] has no server_id"),
-        ([{"server_id": "s"}], r"mcp_servers\[0\] \(s\) has no tool_name"),
-        ([{"server_id": "  ", "tool_name": "t"}], "no server_id"),
+        ("nope", "mcp must be an object"),
+        ([], "mcp must be an object"),
+        ({"servers": "nope"}, "mcp.servers must be a list"),
+        ({"servers": ["nope"]}, r"mcp\.servers\[0\] must be an object"),
+        ({"servers": [{"tool_name": "t"}]}, r"mcp\.servers\[0\] has no server_id"),
+        ({"servers": [{"server_id": "s"}]}, r"mcp\.servers\[0\] \(s\) has no tool_name"),
+        ({"servers": [{"server_id": "  ", "tool_name": "t"}]}, "no server_id"),
     ],
 )
 def test_a_malformed_binding_is_refused(raw, match):
@@ -105,7 +112,7 @@ def test_a_shared_binding_becomes_a_server_on_mcp_url():
     assert servers == {
         "jira": {
             "type": "http",
-            "url": f"{MCP_URL}/srv_1?tools=search%2Ccreate",
+            "url": f"{MCP_URL}/jira",
             "headers": {"x-api-key": KEY},
             "alwaysLoad": True,
         }
@@ -113,22 +120,42 @@ def test_a_shared_binding_becomes_a_server_on_mcp_url():
     assert allowed == ["mcp__jira"]
 
 
-def test_no_action_names_means_no_tools_query():
-    servers, _ = build_servers([McpBinding("srv_1", "jira")])
-    assert servers["jira"]["url"] == f"{MCP_URL}/srv_1"
+@pytest.mark.parametrize(
+    "binding",
+    [McpBinding("srv_1", "jira", ("search", "create")), McpBinding("a/b c&d", "jira")],
+)
+def test_the_url_has_no_query(binding):
+    servers, _ = build_servers([binding])
+
+    url = urlsplit(servers["jira"]["url"])
+    assert url.query == ""
+    assert url.path.endswith("/jira")
 
 
-def test_server_id_and_tools_are_url_encoded():
-    servers, _ = build_servers([McpBinding("a/b c", "x", ("t&1",))])
-    assert servers["x"]["url"] == f"{MCP_URL}/a%2Fb%20c?tools=t%261"
-
-
-def test_a_sign_in_binding_uses_the_callers_own_server():
+def test_a_sign_in_binding_is_addressed_by_name():
     servers, _ = build_servers(
         [McpBinding("srv_creator", "jira", persist_auth=False, your_server_id="srv_mine")]
     )
 
-    assert servers["jira"]["url"] == f"{MCP_URL}/srv_mine"
+    assert servers["jira"]["url"] == f"{MCP_URL}/jira"
+
+
+@pytest.mark.parametrize(
+    ("name", "segment"),
+    [
+        ("My Server", "My%20Server"),
+        ("jira-cloud", "jira-cloud"),
+        ("a/b", "a%2Fb"),
+        ("a.b~c", "a.b~c"),
+        ("9lives", "9lives"),
+        ("n" * 128, "n" * 128),
+    ],
+)
+def test_ascii_names_are_one_encoded_segment(name, segment):
+    servers, allowed = build_servers([McpBinding("srv_1", name)])
+
+    assert servers[name]["url"] == f"{MCP_URL}/{segment}"
+    assert allowed == [f"mcp__{name}"]
 
 
 def test_a_sign_in_binding_without_a_connection_is_withheld(caplog):
@@ -145,10 +172,6 @@ def test_a_sign_in_binding_without_a_connection_is_withheld(caplog):
     assert any("jira" in r.getMessage() for r in caplog.records)
 
 
-def test_studio_mode_attaches_nothing():
-    assert build_servers([McpBinding("srv_1", "jira")], mcp_mode="studio") == ({}, [])
-
-
 def test_gitagent_gets_servers_but_no_allowed_tools_entries():
     """gitclaw treats allowedTools as a strict allowlist; an mcp__ entry would
     filter out every tool it has."""
@@ -161,12 +184,11 @@ def test_gitagent_gets_servers_but_no_allowed_tools_entries():
 def test_a_trailing_slash_on_mcp_url_does_not_double_up():
     servers, _ = build_mcp_servers(
         (McpBinding("srv_1", "jira"),),
-        mcp_mode="engine",
         mcp_url=MCP_URL + "/",
         api_key=KEY,
         anthropic_shaped=True,
     )
-    assert servers["jira"]["url"] == f"{MCP_URL}/srv_1"
+    assert servers["jira"]["url"] == f"{MCP_URL}/jira"
 
 
 # ── through ComputerAgent ────────────────────────────────────────────────────
@@ -196,7 +218,9 @@ class FakeEngine:
 
 def build(agent_doc, **kwargs) -> ComputerAgent:
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-    respx.get(ORG_URL).mock(return_value=httpx.Response(200, json={"policies": []}))
+    respx.post(CHECK_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "allow"}})
+    )
     params: dict = {
         "agent_id": AGENT_ID,
         "base_url": BASE,
@@ -204,8 +228,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "engine": FakeEngine(),
         "llm_url": LLM_URL,
         "mcp_url": MCP_URL,
-        "agent_api_url": AGENT_API,
-        "srs_url": SRS,
+        "guardrails_url": "http://egress.internal/guardrails",
     }
     params.update(kwargs)
     return ComputerAgent(**params)
@@ -221,14 +244,22 @@ def test_mcp_url_is_required():
 @pytest.mark.asyncio
 @respx.mock
 async def test_bound_servers_reach_the_engine(agent_doc):
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "tool_name": "jira"}]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+    }
     engine = FakeEngine()
 
     async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hi")
+        bound = agent._coordinator._mcp_servers  # type: ignore[attr-defined]
 
+    assert bound["jira"]["url"] == f"{MCP_URL}/jira"
     options = engine.contexts[0].manifest.options
-    assert options["mcp_servers"]["jira"]["url"] == f"{MCP_URL}/srv_1"
+    # The Claude CLI reaches it through the loopback forwarder, path unchanged.
+    sent = urlsplit(options["mcp_servers"]["jira"]["url"])
+    assert sent.hostname == "127.0.0.1"
+    assert sent.path == urlsplit(f"{MCP_URL}/jira").path
     assert "mcp__jira" in options["allowed_tools"]
 
 
@@ -237,7 +268,10 @@ async def test_bound_servers_reach_the_engine(agent_doc):
 async def test_gap_tools_and_bound_servers_are_both_kept(agent_doc, tmp_path):
     """The bound servers are added to the loader's own, not swapped for them."""
     (tmp_path / "agent.yaml").write_text("name: fixture\ntools: [Read]\n", encoding="utf-8")
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "tool_name": "jira"}]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+    }
     engine = FakeEngine()
 
     async with build(agent_doc, engine=engine, gap_dir=tmp_path) as agent:
@@ -251,7 +285,10 @@ async def test_gap_tools_and_bound_servers_are_both_kept(agent_doc, tmp_path):
 @pytest.mark.asyncio
 @respx.mock
 async def test_a_caller_mcp_servers_option_still_wins(agent_doc):
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "tool_name": "jira"}]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+    }
     engine = FakeEngine()
 
     async with build(agent_doc, engine=engine, options={"mcp_servers": {}}) as agent:

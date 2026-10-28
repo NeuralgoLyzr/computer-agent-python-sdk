@@ -108,7 +108,7 @@ Spans print to stdout in OTLP-JSON. Useful for offline debugging or shape-verify
 export COMPUTERAGENT_OTEL=disabled
 ```
 
-The OtelSink is not auto-attached; AgentOS persistence still happens via `AgentOSHttpSink` (POSTing to the agentos-server, which owns the Mongo writes).
+The OtelSink is not auto-attached. The SDK has no AgentOS events sink.
 
 ## Programmatic equivalent
 

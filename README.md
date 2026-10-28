@@ -7,20 +7,20 @@ You name the agent by id. The SDK fetches its definition from AgentOS and reprod
 dispatch path would have sent to a ComputerAgent server — same model, same engine environment, same
 permission mode — except the engine runs here.
 
-**Every call goes through an egress proxy.** The agent config, the global RAI policies, SRS, the
-model, MCP and telemetry are each reached at a URL you configure, with no direct path to any of them.
+**Every call goes through an egress proxy.** The agent config, the guardrails check, the model, MCP
+and telemetry are each reached at a URL you configure, with no direct path to any of them.
 
 ```bash
-export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
-export COMPUTERAGENT_ENGINE=claude-agent-sdk
-export COMPUTERAGENT_BASE_URL=http://egress/agentos/api     # agent config, local policy, MCP bindings
-export COMPUTERAGENT_AGENT_API_URL=http://egress/agent-api  # global (org) RAI policies
-export COMPUTERAGENT_SRS_URL=http://egress/srs              # guardrail checks
-export COMPUTERAGENT_LLM_URL=http://egress/llm              # every model call
-export COMPUTERAGENT_MCP_URL=http://egress/mcp              # MCP servers bound in AgentOS
-export LYZR_API_KEY=...                                     # sent as x-api-key; swapped by the proxy
-# optional: COMPUTERAGENT_TELEMETRY_URL (OTLP), COMPUTERAGENT_EVENTS_URL (dashboard events),
-#           COMPUTERAGENT_GAP_DIR (GAP mode)
+export COMPUTER_AGENT_ID=6aa93f1b3817a13d3103d2c1
+export COMPUTER_AGENT_ENGINE=claude-agent-sdk
+export COMPUTER_AGENT_EGRESS_API_URL=http://egress/computer-agent-api/agentos/api  # agent config, MCP bindings
+export COMPUTER_AGENT_EGRESS_GUARDRAILS_URL=http://egress/guardrails                # guardrail checks
+export COMPUTER_AGENT_EGRESS_LLM_URL=http://egress/llm                              # every model call
+export COMPUTER_AGENT_EGRESS_MCP_URL=http://egress/mcp/v1                           # MCP servers bound in AgentOS
+export COMPUTER_AGENT_EGRESS_PROXY_SECRET=...  # the sandbox token: sent as x-api-key, swapped by the proxy
+# optional: COMPUTER_AGENT_EGRESS_TELEMETRY_URL=http://egress/otlp (OTLP),
+#   COMPUTER_AGENT_EGRESS_SESSION_STORE_URL=http://egress/computer-agent-api (http session store),
+#   COMPUTER_AGENT_GAP_DIR (GAP mode)
 ```
 
 ```python
@@ -36,15 +36,15 @@ asyncio.run(main())
 ```
 
 Every setting can also be passed as a constructor argument of the same name (`base_url=`,
-`srs_url=`, …), which wins over its environment variable. Missing settings are reported together, in
+`guardrails_url=`, …), which wins over its environment variable. Missing settings are reported together, in
 one `SettingsError`, before any request is made.
 
 ## Guardrails
 
-Each turn combines the org (global) RAI policies, read from `agent_api_url`, with the agent's own
-(local) policy from its AgentOS config. Against that one set, SRS checks the user's message before the
-turn (`llm_input`: block or mask) and every tool call before it runs (a content check, then Cedar/OPA).
-No policy ids come from the environment.
+The user's message is checked before the turn (block or mask) and every tool call before it runs,
+each with `POST {guardrails_url}/v1/check`. The agent gateway behind the egress proxy applies the org's
+and the agent's own RAI policies and decides fail-open; the SDK reads no policies and sends no policy
+ids. A check that reaches no verdict blocks.
 
 ## The agent
 
@@ -59,12 +59,17 @@ pip install 'computer-agent-py[agentos]'
 ```
 
 `[agentos]` is not optional in practice — every call the SDK makes is HTTP. Add `[otel]` for OTLP
-telemetry and `[gap]` for GAP mode.
+telemetry, `[gap]` for GAP mode, and `[server]` for the app server a stage image runs
+(`python -m computeragent.server`; see `docs/USING_THE_SDK.md` §14).
 
 ## Documentation
 
 **[`docs/USING_THE_SDK.md`](docs/USING_THE_SDK.md)** is the developer reference: every setting and
 the requests made from it, the guardrail flow, MCP, session stores, errors and troubleshooting.
+
+**[`docs/DEPLOYING_ON_AGENTCORE_AND_MICROVM.md`](docs/DEPLOYING_ON_AGENTCORE_AND_MICROVM.md)** walks
+through integrating the SDK into an existing service, building a sandbox image with the app server,
+and registering it as a Lambda MicroVM image or an AgentCore runtime for an AgentOS agent.
 
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) covers how the pieces fit together, for anyone
 changing the SDK rather than using it.

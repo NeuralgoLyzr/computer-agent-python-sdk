@@ -48,7 +48,8 @@ from ..protocol_types import (
     PolicyDecider,
     SessionStore,
 )
-from ..session_stores import is_session_store, resolve_session_store
+from ..session_stores import PinnedSessionStore, is_session_store, resolve_session_store
+from ..session_stores.http import with_base_url
 from ..substrates import LocalSubstrate
 from ..telemetry.pipeline import Pipeline
 from .agentos_agent import (
@@ -59,6 +60,7 @@ from .agentos_agent import (
     resolve_agent,
 )
 from .coordinator import HarnessCoordinator, _SessionState
+from .egress_token import CREDENTIAL
 from .errors import (
     HarnessError,
     UnknownEngineError,
@@ -253,17 +255,18 @@ class ComputerAgent:
         # The egress route every model call is sent to.
         llm_url: str | None = None,
         # The egress route for MCP: each server bound to the agent in AgentOS
-        # becomes `{mcp_url}/{server_id}`.
+        # becomes `{mcp_url}/{name}`.
         mcp_url: str | None = None,
-        # The egress routes for guardrails: the org (global) RAI policies are
-        # read from `{agent_api_url}/v3/org/rai-policy` every turn, and every
-        # check is made against SRS at `srs_url`.
-        agent_api_url: str | None = None,
-        srs_url: str | None = None,
-        # Optional egress routes for telemetry: OTLP to `telemetry_url`, the
-        # AgentOS dashboard events to `{events_url}/events`. Unset is off.
+        # The egress route for guardrails: the user's message and every tool
+        # call are checked at `{guardrails_url}/v1/check`; the agent gateway
+        # applies the org's and the agent's policies.
+        guardrails_url: str | None = None,
+        # Optional egress route for telemetry: OTLP to `telemetry_url`. Unset
+        # is off.
         telemetry_url: str | None = None,
-        events_url: str | None = None,
+        # Optional egress route for the `http` session store
+        # (`http://egress/computer-agent-api`); see `with_base_url`.
+        session_store_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
@@ -291,14 +294,25 @@ class ComputerAgent:
             api_key=api_key,
             llm_url=llm_url,
             mcp_url=mcp_url,
-            agent_api_url=agent_api_url,
-            srs_url=srs_url,
+            guardrails_url=guardrails_url,
             telemetry_url=telemetry_url,
-            events_url=events_url,
             gap_dir=gap_dir,
+            session_store_url=session_store_url,
         )
         engine = self._settings.engine
         gap_dir = self._settings.gap_dir
+        # Every request to these origins is stamped with the newest sandbox
+        # token, and every answer observed for a reissue.
+        CREDENTIAL.configure(
+            [
+                self._settings.base_url,
+                self._settings.llm_url,
+                self._settings.mcp_url,
+                self._settings.guardrails_url,
+                self._settings.telemetry_url,
+                self._settings.session_store_url,
+            ]
+        )
         self._api_base = api_base(self._settings.base_url)
 
         # 1. Ask AgentOS what this agent is. Fails fast and by field name, so a
@@ -328,9 +342,7 @@ class ComputerAgent:
             )
 
         # 3. Where the model calls go: always llm_url.
-        gateway_envs = build_gateway_envs(
-            api_key=self._settings.api_key(), llm_url=self._settings.llm_url
-        )
+        gateway_envs = build_gateway_envs(llm_url=self._settings.llm_url)
         merged_envs = merge_envs(envs, gateway_envs)
         merged_options = build_options(self.agent, engine_name=engine_name, caller_options=options)
         # `budget_max_usd` used to be carried to the engine context and read by
@@ -359,8 +371,16 @@ class ComputerAgent:
                 resolved_store = cast("SessionStore", session_store)
             else:
                 resolved_store = resolve_session_store(
-                    cast("str | Mapping[str, Any]", session_store)
+                    with_base_url(
+                        cast("str | Mapping[str, Any]", session_store),
+                        self._settings.session_store_url,
+                    )
                 )
+
+        # A conversation id keys the store, so any process (sandbox) serving
+        # this conversation finds its transcript (see PinnedSessionStore).
+        if resolved_store is not None and session_id:
+            resolved_store = cast("SessionStore", PinnedSessionStore(resolved_store, session_id))
 
         # `on_tool_call` is only consulted by engines that emit permission
         # requests. On claude-agent-sdk gating runs through `policy_decider`,
@@ -376,21 +396,19 @@ class ComputerAgent:
         # 5. MCP servers bound to the agent, all through mcp_url.
         mcp_servers, mcp_allowed_tools = build_mcp_servers(
             self.agent.mcp_bindings,
-            mcp_mode=self.agent.mcp_mode,
             mcp_url=self._settings.mcp_url,
             api_key=self._settings.api_key(),
             anthropic_shaped=engine_name in ANTHROPIC_SHAPED,
         )
 
-        # 6. SRS guardrails. Each turn combines the org (global) policies with
-        #    the agent's own (local) one; the user's message and every tool
-        #    call are checked against that set. A caller's own policy_decider
-        #    replaces the tool-call gate; the input check always runs.
+        # 6. Guardrails through the egress proxy: the user's message and every
+        #    tool call are checked at guardrails_url, where the agent gateway
+        #    applies the policies. A caller's own policy_decider replaces the
+        #    tool-call gate; the input check always runs.
         policy_agent_name = self.agent.name
         self._srs_gate = SrsToolGate(
-            srs_url=self._settings.srs_url,
+            guardrails_url=self._settings.guardrails_url,
             api_key=self._settings.api_key,
-            agent_name=policy_agent_name,
             engine_name=engine_name,
             mcp_server_names=list(mcp_servers),
         )
@@ -409,12 +427,9 @@ class ComputerAgent:
                 ),
             )
         turn_guard = SrsTurnGuard(
-            agent_api_url=self._settings.agent_api_url,
-            srs_url=self._settings.srs_url,
+            guardrails_url=self._settings.guardrails_url,
             api_key=self._settings.api_key,
             agent_name=policy_agent_name,
-            local_policy_ids=[self.agent.rai_policy_id] if self.agent.rai_policy_id else [],
-            gate=self._srs_gate,
         )
 
         # 7. Telemetry through its egress routes, unless the caller brought a
@@ -423,10 +438,11 @@ class ComputerAgent:
         if telemetry_pipeline is None:
             self._owned_pipeline = build_pipeline(
                 telemetry_url=self._settings.telemetry_url,
-                events_url=self._settings.events_url,
                 api_key=self._settings.api_key,
             )
             telemetry_pipeline = self._owned_pipeline
+        self._telemetry_pipeline = telemetry_pipeline
+        self._workspace = workspace
 
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
@@ -447,6 +463,10 @@ class ComputerAgent:
             mcp_servers=mcp_servers,
             mcp_allowed_tools=mcp_allowed_tools,
             turn_guard=turn_guard,
+            forward_cli=engine_name == "claude-agent-sdk",
+            # The key is read at every turn: the engine's key variables and
+            # the bound MCP servers' x-api-key follow it.
+            api_key=self._settings.api_key,
         )
 
     async def __aenter__(self) -> ComputerAgent:
@@ -464,6 +484,17 @@ class ComputerAgent:
                 with suppress(Exception):
                     await self._owned_pipeline.aclose()
                 self._owned_pipeline = None
+
+    @property
+    def telemetry_pipeline(self) -> Pipeline:
+        """The pipeline this agent's turns emit to (its own, or the caller's)."""
+        return self._telemetry_pipeline
+
+    @property
+    def workspace(self) -> Path:
+        """The directory the engine runs in: ``gap_dir`` in GAP mode, else the
+        working directory at construction."""
+        return self._workspace
 
     def chat(self, message: ChatInput) -> ChatHandle:
         """Start one chat turn. Returns immediately; iterate or await the

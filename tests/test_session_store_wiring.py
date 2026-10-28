@@ -47,8 +47,8 @@ class OptionsCapturingEngine:
 
 def build(agent_doc, **kwargs) -> ComputerAgent:
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-    respx.get("http://egress.internal/agent-api/v3/org/rai-policy").mock(
-        return_value=httpx.Response(200, json={"policies": []})
+    respx.post("http://egress.internal/guardrails/v1/check").mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "allow"}})
     )
     params: dict = {
         "agent_id": AGENT_ID,
@@ -57,8 +57,7 @@ def build(agent_doc, **kwargs) -> ComputerAgent:
         "engine": "claude-agent-sdk",
         "llm_url": "http://egress.internal/llm",
         "mcp_url": "http://egress.internal/mcp",
-        "agent_api_url": "http://egress.internal/agent-api",
-        "srs_url": "http://egress.internal/srs",
+        "guardrails_url": "http://egress.internal/guardrails",
     }
     params.update(kwargs)
     return ComputerAgent(**params)
@@ -167,3 +166,17 @@ async def test_an_object_that_is_not_a_store_is_refused(agent_doc, tmp_path):
 
     with pytest.raises((UnknownSessionStoreError, TypeError, AttributeError)):
         build(agent_doc, session_store=object())
+
+
+def test_descriptor_error_never_echoes_values():
+    from computeragent.harness.errors import UnknownSessionStoreError
+    from computeragent.session_stores import resolve_session_store
+
+    with pytest.raises(UnknownSessionStoreError) as exc:
+        resolve_session_store({"options": {"base_url": "http://x", "token": "sekrit"}})
+
+    message = str(exc.value)
+    for name in ("options", "base_url", "token"):
+        assert name in message
+    assert "sekrit" not in message
+    assert "http://x" not in message

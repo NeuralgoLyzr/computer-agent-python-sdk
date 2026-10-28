@@ -11,22 +11,21 @@ ComputerAgent(…)            every setting: argument, else its environment vari
         │  constructor, synchronous — fails before anything runs
         ├─▶ settings.resolve_settings()        → Settings (missing ones reported together)
         ├─▶ agentos_agent.resolve_agent()      GET {base_url}/v1/agents/{id}   x-api-key
-        │       └─ ResolvedAgent: harness, model, rai_policy_id, mcp_mode, mcp_bindings
+        │       └─ ResolvedAgent: harness, model, mcp_bindings
         ├─▶ gateway_envs.build_gateway_envs()  → the engine's environment (llm_url)
         ├─▶ gateway_envs.build_options()       → permission mode, model, caller options
         ├─▶ mcp.build_mcp_servers()            → engine MCP servers on mcp_url
         ├─▶ SrsToolGate + PolicyToolAuthorizer → the tool-call gate
-        ├─▶ telemetry.build_pipeline()         → sinks on telemetry_url / events_url
+        ├─▶ telemetry.build_pipeline()         → the OTLP sink on telemetry_url
         │
         └─▶ HarnessCoordinator
                 │  lazily, on the first chat()
                 ├─▶ LocalSubstrate.boot()        → workspace (gap_dir, or the cwd)
                 ├─▶ identity loader              → AgentManifest (gap | passthrough)
                 │  every chat()
-                ├─▶ SrsTurnGuard.start_turn()    → org policies (agent_api_url) + local,
-                │                                  input check (srs_url), set on the gate
+                ├─▶ SrsTurnGuard.start_turn()    → input check (guardrails_url /v1/check)
                 └─▶ EngineDriver.start_session() → EngineEvent stream
-                        │   every tool call → SrsToolGate (content check, then Cedar/OPA)
+                        │   every tool call → SrsToolGate (tool-input check, by tool-use id)
                         └─▶ TelemetryEvent → middleware → sinks
 ```
 
@@ -35,8 +34,8 @@ has no knowledge of what is underneath it.
 
 ## Every call goes through an egress route
 
-Each downstream service is reached only at a configured URL: `base_url`, `agent_api_url`,
-`srs_url`, `llm_url`, `mcp_url`, and optionally `telemetry_url` and `events_url`. There is no
+Each downstream service is reached only at a configured URL: `base_url`, `guardrails_url`,
+`llm_url`, `mcp_url`, and optionally `telemetry_url`. There is no
 fallback to a discovered or default destination, and the engine env switches off the Claude CLI's
 own background traffic. Every request carries `x-api-key: <api_key>`, which the egress proxy swaps.
 `Settings.api_key()` reads the environment at each use, so the key can be replaced while an agent
@@ -57,19 +56,20 @@ despite being an HTTP call.
 | `harness/agentos_agent.py` | Fetch and validate the agent document; refuse unimplemented shapes by field name. |
 | `harness/gateway_envs.py` | The engine environment for `llm_url`, and the model string per the TS dispatch. |
 | `harness/mcp.py` | AgentOS MCP bindings → engine MCP servers on `mcp_url` (port of CAS `applyMcpServers`). |
-| `harness/guardrails.py` | Per-turn policy resolution and the input check. |
-| `harness/telemetry.py` | The pipeline built from `telemetry_url` / `events_url`. |
+| `harness/guardrails.py` | The per-turn input check and its telemetry. |
+| `harness/telemetry.py` | The pipeline built from `telemetry_url`. |
 | `harness/__init__.py` | `ComputerAgent`, `ChatHandle`, `ChatResult`, and the wiring above. |
 | `harness/coordinator.py` | Boot, turn lifecycle, the turn guard hook, engine-event → telemetry translation. |
-| `policy/org_policy.py`, `policy/srs_client.py`, `policy/srs_gate.py`, `policy/srs_input.py` | Ports of CAS's org-policy fetch, SRS v1 calls, tool gate and input check. |
+| `policy/guardrails_client.py`, `policy/srs_gate.py`, `policy/srs_input.py` | The `/v1/check` client, the tool gate and the input check (folding ported from CAS). |
 | `engines/claude_agent.py` | Wraps `claude_agent_sdk.query()`; builds `ClaudeAgentOptions`. |
 
 ## Decisions worth knowing before you change something
 
-**One combined policy set per turn.** The org (global) policies are read fresh at every turn start
-and placed before the agent's own, de-duplicated. The input check and every tool call send that whole
-set in one SRS call, so SRS attributes a block to the first policy that denied. The set is handed to
-the tool gate with `set_turn`; a tool call before any turn is denied.
+**The gateway owns policies and fail-open.** The SDK sends `input` and `tool-input` checks to
+`{guardrails_url}/v1/check` with no policy ids; the agent gateway applies the org's policies and then
+the agent's own. A check with no verdict blocks: when the gateway fails open it answers `allow` with
+`skipped: true`. A tool call is identified by the engine's own tool-use id, which
+`PolicyToolAuthorizer` puts in the policy input as `call_id`; a call without one is denied.
 
 **A blocked input never starts the engine.** The coordinator streams a single `ResultMessage`
 carrying the reply instead, through the normal event path, so `ChatResult` and telemetry look like
@@ -107,8 +107,7 @@ that raises fails closed.
 
 ## Telemetry
 
-A `ComputerAgent` builds its own pipeline from `telemetry_url` (OTLP) and `events_url` (dashboard
-events); unset routes are off and the module-level, environment-driven pipeline is not used. The
+A `ComputerAgent` builds its own pipeline from `telemetry_url` (OTLP); unset, telemetry is off and the module-level, environment-driven pipeline is not used. The
 coordinator owns the hot path — engines never call `pipeline.emit`, or events would double-fire
 when an engine is composed under the harness. One `ComputerAgent` is one logical session:
 `session_started` on the first chat, `session_ended` on dispose, so N chats are N turns of one

@@ -26,9 +26,8 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
 MCP_URL = "http://egress.internal/mcp"
-AGENT_API = "http://egress.internal/agent-api"
-SRS = "http://egress.internal/srs"
-ORG_URL = f"{AGENT_API}/v3/org/rai-policy"
+GUARDRAILS = "http://egress.internal/guardrails"
+CHECK_URL = f"{GUARDRAILS}/v1/check"
 
 
 class FakeEngine:
@@ -59,15 +58,16 @@ class FakeEngine:
 def build(agent_doc, **kwargs) -> ComputerAgent:
     """Construct against a mocked AgentOS, with sensible defaults."""
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-    respx.get(ORG_URL).mock(return_value=httpx.Response(200, json={"policies": []}))
+    respx.post(CHECK_URL).mock(
+        return_value=httpx.Response(200, json={"data": {"decision": "allow"}})
+    )
     params: dict = {
         "agent_id": AGENT_ID,
         "base_url": BASE,
         "api_key": KEY,
         "llm_url": LLM_URL,
         "mcp_url": MCP_URL,
-        "agent_api_url": AGENT_API,
-        "srs_url": SRS,
+        "guardrails_url": "http://egress.internal/guardrails",
         "engine": FakeEngine(),
     }
     params.update(kwargs)
@@ -82,8 +82,8 @@ def test_exposes_the_resolved_agent(agent_doc):
     agent = build(agent_doc)
 
     assert agent.agent.agent_id == AGENT_ID
-    assert agent.agent.model == "6aa93f1a75ce74c4e6772b20"
-    assert agent.agent.has_native_gateway
+    assert agent.agent.model == "claude-sonnet-4-5"
+    assert not hasattr(agent.agent, "has_native_gateway")
 
 
 @respx.mock
@@ -105,15 +105,6 @@ def test_missing_llm_url_is_refused_at_construction():
         ComputerAgent(agent_id=AGENT_ID, base_url=BASE, api_key=KEY, engine=FakeEngine())
 
 
-@respx.mock
-def test_the_agent_documents_gateway_url_is_not_used(agent_doc):
-    """Model calls go to llm_url only, never to the document's gateway."""
-    agent = build(agent_doc)
-    envs = agent._coordinator._envs  # type: ignore[attr-defined]
-
-    assert agent_doc["model_gateway"]["baseUrl"] not in "".join(envs.values())
-
-
 # ── engine selection ─────────────────────────────────────────────────────────
 
 
@@ -128,8 +119,7 @@ def test_engine_is_required():
             api_key=KEY,
             llm_url=LLM_URL,
             mcp_url=MCP_URL,
-            agent_api_url=AGENT_API,
-            srs_url=SRS,
+            guardrails_url=GUARDRAILS,
         )
 
 
@@ -143,8 +133,7 @@ def test_a_named_engine_resolves_to_the_registered_driver(agent_doc):
         api_key=KEY,
         llm_url=LLM_URL,
         mcp_url=MCP_URL,
-        agent_api_url=AGENT_API,
-        srs_url=SRS,
+        guardrails_url=GUARDRAILS,
         engine="claude-agent-sdk",
     )
 
@@ -164,8 +153,7 @@ def test_an_unregistered_engine_name_is_refused(agent_doc):
             api_key=KEY,
             llm_url=LLM_URL,
             mcp_url=MCP_URL,
-            agent_api_url=AGENT_API,
-            srs_url=SRS,
+            guardrails_url=GUARDRAILS,
             engine="langgraph",
         )
 
@@ -182,8 +170,7 @@ def test_an_engine_that_differs_from_the_harness_is_logged(agent_doc, caplog):
             engine="gitagent",
             llm_url=LLM_URL,
             mcp_url=MCP_URL,
-            agent_api_url=AGENT_API,
-            srs_url=SRS,
+            guardrails_url=GUARDRAILS,
         )
 
     assert any("overrides agent" in r.getMessage() for r in caplog.records)
@@ -201,8 +188,7 @@ def test_engine_can_be_named(agent_doc):
         engine="gitagent",
         llm_url=LLM_URL,
         mcp_url=MCP_URL,
-        agent_api_url=AGENT_API,
-        srs_url=SRS,
+        guardrails_url=GUARDRAILS,
     )
 
     assert agent._coordinator._engine.name == "gitagent"  # type: ignore[attr-defined]
@@ -260,10 +246,12 @@ def test_gap_dir_as_a_string_is_accepted(agent_doc, tmp_path):
 @respx.mock
 def test_gateway_envs_reach_the_coordinator(agent_doc):
     agent = build(agent_doc)
-    envs = agent._coordinator._envs  # type: ignore[attr-defined]
+    coordinator = agent._coordinator  # type: ignore[attr-defined]
+    envs = coordinator._envs
 
-    assert envs["ANTHROPIC_API_KEY"] == KEY
-    assert envs["LYZR_API_KEY"] == KEY
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "COMPUTER_AGENT_EGRESS_PROXY_SECRET"):
+        assert name not in envs  # added at every turn
+    assert coordinator._api_key() == KEY
     assert envs["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
     assert envs["ANTHROPIC_BASE_URL"] == LLM_URL
 
@@ -282,7 +270,7 @@ def test_options_overlay_carries_dispatch_defaults_and_caller_options(agent_doc)
 
     assert overlay["permission_mode"] == "bypassPermissions"
     assert overlay["setting_sources"] == ["project"]
-    assert overlay["model"] == "6aa93f1a75ce74c4e6772b20"
+    assert overlay["model"] == "claude-sonnet-4-5"
     assert overlay["system_prompt"] == "You are terse."
 
 
@@ -388,4 +376,4 @@ async def test_the_resolved_model_reaches_the_engine_context(agent_doc, tmp_path
     async with build(agent_doc, engine=engine) as agent:
         await agent.chat("hello")
 
-    assert engine.contexts[0].manifest.options["model"] == "6aa93f1a75ce74c4e6772b20"
+    assert engine.contexts[0].manifest.options["model"] == "claude-sonnet-4-5"

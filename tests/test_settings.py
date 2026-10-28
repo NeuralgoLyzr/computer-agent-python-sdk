@@ -22,14 +22,13 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 LLM_URL = "http://egress.internal/llm"
 
 FULL_ENV = {
-    "COMPUTERAGENT_AGENT_ID": AGENT_ID,
-    "COMPUTERAGENT_ENGINE": "claude-agent-sdk",
-    "COMPUTERAGENT_BASE_URL": BASE,
-    "LYZR_API_KEY": "env-key",
-    "COMPUTERAGENT_LLM_URL": LLM_URL,
-    "COMPUTERAGENT_MCP_URL": "http://egress.internal/mcp",
-    "COMPUTERAGENT_AGENT_API_URL": "http://egress.internal/agent-api",
-    "COMPUTERAGENT_SRS_URL": "http://egress.internal/srs",
+    "COMPUTER_AGENT_ID": AGENT_ID,
+    "COMPUTER_AGENT_ENGINE": "claude-agent-sdk",
+    "COMPUTER_AGENT_EGRESS_API_URL": BASE,
+    "COMPUTER_AGENT_EGRESS_PROXY_SECRET": "env-key",
+    "COMPUTER_AGENT_EGRESS_LLM_URL": LLM_URL,
+    "COMPUTER_AGENT_EGRESS_MCP_URL": "http://egress.internal/mcp",
+    "COMPUTER_AGENT_EGRESS_GUARDRAILS_URL": "http://egress.internal/guardrails",
 }
 
 
@@ -41,10 +40,8 @@ def resolve(env, **kw):
         api_key=None,
         llm_url=None,
         mcp_url=None,
-        agent_api_url=None,
-        srs_url=None,
+        guardrails_url=None,
         telemetry_url=None,
-        events_url=None,
         gap_dir=None,
     )
     params.update(kw)
@@ -53,17 +50,16 @@ def resolve(env, **kw):
 
 def test_every_setting_has_an_env_var():
     assert ENV_VARS == {
-        "agent_id": "COMPUTERAGENT_AGENT_ID",
-        "engine": "COMPUTERAGENT_ENGINE",
-        "base_url": "COMPUTERAGENT_BASE_URL",
-        "api_key": "LYZR_API_KEY",
-        "llm_url": "COMPUTERAGENT_LLM_URL",
-        "mcp_url": "COMPUTERAGENT_MCP_URL",
-        "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
-        "srs_url": "COMPUTERAGENT_SRS_URL",
-        "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
-        "events_url": "COMPUTERAGENT_EVENTS_URL",
-        "gap_dir": "COMPUTERAGENT_GAP_DIR",
+        "agent_id": "COMPUTER_AGENT_ID",
+        "engine": "COMPUTER_AGENT_ENGINE",
+        "base_url": "COMPUTER_AGENT_EGRESS_API_URL",
+        "api_key": "COMPUTER_AGENT_EGRESS_PROXY_SECRET",
+        "llm_url": "COMPUTER_AGENT_EGRESS_LLM_URL",
+        "mcp_url": "COMPUTER_AGENT_EGRESS_MCP_URL",
+        "guardrails_url": "COMPUTER_AGENT_EGRESS_GUARDRAILS_URL",
+        "telemetry_url": "COMPUTER_AGENT_EGRESS_TELEMETRY_URL",
+        "session_store_url": "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL",
+        "gap_dir": "COMPUTER_AGENT_GAP_DIR",
     }
 
 
@@ -76,9 +72,20 @@ def test_env_vars_alone_are_enough():
     assert settings.api_key() == "env-key"
     assert settings.llm_url == LLM_URL
     assert settings.mcp_url == "http://egress.internal/mcp"
-    assert settings.agent_api_url == "http://egress.internal/agent-api"
-    assert settings.srs_url == "http://egress.internal/srs"
+    assert settings.guardrails_url == "http://egress.internal/guardrails"
     assert settings.gap_dir is None
+
+
+def test_the_old_srs_and_agent_api_env_vars_are_not_read():
+    env = {
+        **{k: v for k, v in FULL_ENV.items() if k != "COMPUTER_AGENT_EGRESS_GUARDRAILS_URL"},
+        "COMPUTERAGENT_SRS_URL": "http://egress.internal/srs",
+        "AGENT_API_URL": "http://egress.internal/agent-api",
+        "COMPUTERAGENT_AGENT_API_URL": "http://egress.internal/agent-api",
+    }
+
+    with pytest.raises(SettingsError, match="guardrails_url"):
+        resolve(env)
 
 
 def test_the_argument_wins_over_the_env_var():
@@ -99,24 +106,24 @@ def test_an_engine_instance_is_kept_as_is():
 
 
 def test_gap_dir_comes_from_its_env_var():
-    settings = resolve({**FULL_ENV, "COMPUTERAGENT_GAP_DIR": "/opt/agent"})
+    settings = resolve({**FULL_ENV, "COMPUTER_AGENT_GAP_DIR": "/opt/agent"})
 
     assert settings.gap_dir == "/opt/agent"
 
 
 def test_gap_dir_argument_wins(tmp_path):
-    settings = resolve({**FULL_ENV, "COMPUTERAGENT_GAP_DIR": "/opt/agent"}, gap_dir=tmp_path)
+    settings = resolve({**FULL_ENV, "COMPUTER_AGENT_GAP_DIR": "/opt/agent"}, gap_dir=tmp_path)
 
     assert settings.gap_dir == tmp_path
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_a_blank_value_counts_as_unset(blank):
-    settings = resolve({**FULL_ENV, "COMPUTERAGENT_BASE_URL": blank}, base_url="http://arg")
+    settings = resolve({**FULL_ENV, "COMPUTER_AGENT_EGRESS_API_URL": blank}, base_url="http://arg")
     assert settings.base_url == "http://arg"
 
     with pytest.raises(SettingsError, match="base_url"):
-        resolve({**FULL_ENV, "COMPUTERAGENT_BASE_URL": blank})
+        resolve({**FULL_ENV, "COMPUTER_AGENT_EGRESS_API_URL": blank})
 
 
 def test_every_missing_setting_is_reported_at_once():
@@ -125,7 +132,7 @@ def test_every_missing_setting_is_reported_at_once():
 
     message = str(exc.value)
     for name, var in ENV_VARS.items():
-        if name in ("gap_dir", "telemetry_url", "events_url"):
+        if name in ("gap_dir", "telemetry_url", "session_store_url"):
             assert name not in message
             continue
         assert f"{name} (or {var})" in message
@@ -136,7 +143,7 @@ def test_an_env_api_key_is_read_on_every_use():
     settings = resolve(env)
     assert settings.api_key() == "env-key"
 
-    env["LYZR_API_KEY"] = "rotated-key"
+    env["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] = "rotated-key"
 
     assert settings.api_key() == "rotated-key"
 
@@ -145,7 +152,7 @@ def test_an_explicit_api_key_ignores_the_env_var():
     env = dict(FULL_ENV)
     settings = resolve(env, api_key="arg-key")
 
-    env["LYZR_API_KEY"] = "rotated-key"
+    env["COMPUTER_AGENT_EGRESS_PROXY_SECRET"] = "rotated-key"
 
     assert settings.api_key() == "arg-key"
 
@@ -153,9 +160,9 @@ def test_an_explicit_api_key_ignores_the_env_var():
 def test_an_api_key_removed_from_the_env_fails_when_used():
     env = dict(FULL_ENV)
     settings = resolve(env)
-    del env["LYZR_API_KEY"]
+    del env["COMPUTER_AGENT_EGRESS_PROXY_SECRET"]
 
-    with pytest.raises(SettingsError, match="LYZR_API_KEY"):
+    with pytest.raises(SettingsError, match="COMPUTER_AGENT_EGRESS_PROXY_SECRET"):
         settings.api_key()
 
 
@@ -184,7 +191,7 @@ def test_computeragent_gap_dir_from_env(agent_doc, monkeypatch, tmp_path):
     (tmp_path / "agent.yaml").write_text("name: fixture\n", encoding="utf-8")
     for name, value in FULL_ENV.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setenv("COMPUTERAGENT_GAP_DIR", str(tmp_path))
+    monkeypatch.setenv("COMPUTER_AGENT_GAP_DIR", str(tmp_path))
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     agent = ComputerAgent()
@@ -206,29 +213,64 @@ def test_llm_url_argument_wins_and_loses_its_trailing_slash():
 @pytest.mark.parametrize("bad", ["egress/llm", "ftp://egress/llm"])
 def test_a_url_setting_must_be_http(bad):
     with pytest.raises(SettingsError, match="http\\(s\\) URLs: llm_url"):
-        resolve({**FULL_ENV, "COMPUTERAGENT_LLM_URL": bad})
+        resolve({**FULL_ENV, "COMPUTER_AGENT_EGRESS_LLM_URL": bad})
 
 
-def test_the_telemetry_urls_are_optional():
-    settings = resolve(FULL_ENV)
-
-    assert settings.telemetry_url is None
-    assert settings.events_url is None
+def test_the_telemetry_url_is_optional():
+    assert resolve(FULL_ENV).telemetry_url is None
 
 
-def test_the_telemetry_urls_come_from_their_env_vars():
-    settings = resolve(
-        {
-            **FULL_ENV,
-            "COMPUTERAGENT_TELEMETRY_URL": "http://egress/otlp/",
-            "COMPUTERAGENT_EVENTS_URL": "http://egress/ingest",
-        }
-    )
+def test_the_telemetry_url_comes_from_its_env_var():
+    settings = resolve({**FULL_ENV, "COMPUTER_AGENT_EGRESS_TELEMETRY_URL": "http://egress/otlp/"})
 
     assert settings.telemetry_url == "http://egress/otlp"
-    assert settings.events_url == "http://egress/ingest"
 
 
 def test_an_optional_url_must_still_be_http_when_set():
-    with pytest.raises(SettingsError, match="events_url"):
-        resolve({**FULL_ENV, "COMPUTERAGENT_EVENTS_URL": "egress/ingest"})
+    with pytest.raises(SettingsError, match="telemetry_url"):
+        resolve({**FULL_ENV, "COMPUTER_AGENT_EGRESS_TELEMETRY_URL": "egress/otlp"})
+
+
+def test_events_url_is_unknown():
+    """The dashboard events sink is gone: its variable is not read and the
+    resolver takes no events_url."""
+    settings = resolve({**FULL_ENV, "COMPUTERAGENT_EVENTS_URL": "http://egress/ingest"})
+
+    assert not hasattr(settings, "events_url")
+    with pytest.raises(TypeError, match="events_url"):
+        resolve(FULL_ENV, events_url="http://egress/ingest")
+
+
+@pytest.mark.parametrize("explicit", [None, "sbt_root"])
+def test_api_key_resolves_the_chain(explicit):
+    from datetime import datetime, timedelta, timezone
+
+    from computeragent.harness.egress_token import CREDENTIAL
+
+    env = {**FULL_ENV, "COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_root"}
+    settings = resolve(env, api_key=explicit)
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+
+    CREDENTIAL.adopt("sbt_root", "sbt_next", expiry)
+
+    assert settings.api_key() == "sbt_next"
+
+
+def test_session_store_url():
+    assert resolve(FULL_ENV).session_store_url is None
+    assert (
+        resolve(
+            {
+                **FULL_ENV,
+                "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL": "http://egress/computer-agent-api/",
+            }
+        ).session_store_url
+        == "http://egress/computer-agent-api"
+    )
+
+
+@pytest.mark.parametrize("bad", ["egress/x", "ftp://x", "http://e/x?y=1", "http://e/x#f"])
+def test_session_store_url_is_validated(bad):
+    with pytest.raises(SettingsError, match="session_store_url") as exc:
+        resolve(FULL_ENV, session_store_url=bad)
+    assert bad not in str(exc.value)

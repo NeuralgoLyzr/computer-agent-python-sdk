@@ -43,23 +43,37 @@ def strip_provider_prefix(model: str) -> str:
 def dispatch_model(agent: ResolvedAgent, *, engine_name: str) -> str | None:
     """The model string to hand the engine, per ``modelForDispatch``.
 
-    gitclaw resolves its provider from the model prefix, so a gateway model with
-    no prefix gets ``openai:`` — that is how an OpenAI-shaped gateway model
-    finds ``OPENAI_API_KEY`` instead of failing with "No API key for provider".
-    The Claude engine wants the opposite: any prefix stripped.
+    gitclaw resolves its provider from the model prefix, and every model call
+    goes to ``llm_url`` (the agent gateway, OpenAI-shaped for gitagent), so a
+    model with no prefix gets ``openai:`` — that is how it finds
+    ``OPENAI_API_KEY`` instead of failing with "No API key for provider". A
+    prefixed model is unchanged. The Claude engine wants the opposite: any
+    prefix stripped.
     """
     model = agent.model
     if model is None:
         return None
     if engine_name == "gitagent":
-        if agent.has_native_gateway and ":" not in model:
+        if ":" not in model:
             return f"openai:{model}"
         return model
     return strip_provider_prefix(model)
 
 
-def build_gateway_envs(*, api_key: str, llm_url: str) -> dict[str, str]:
-    """Environment variables that send the engine's model calls to ``llm_url``."""
+def key_envs(api_key: str) -> dict[str, str]:
+    """The key variables for one turn: one credential under three names. The
+    engine presents it on every model call and the egress proxy swaps it for
+    the real key."""
+    return {
+        "ANTHROPIC_API_KEY": api_key,
+        "OPENAI_API_KEY": api_key,
+        "COMPUTER_AGENT_EGRESS_PROXY_SECRET": api_key,
+    }
+
+
+def build_gateway_envs(*, llm_url: str) -> dict[str, str]:
+    """Environment variables that send the engine's model calls to ``llm_url``.
+    Holds no key: :func:`key_envs` is added at every turn."""
     if not isinstance(llm_url, str) or not llm_url.startswith(("http://", "https://")):
         raise GatewayConfigError(
             f"llm_url must be an http(s) URL, got {llm_url!r}. Every model call is sent to it, "
@@ -70,11 +84,6 @@ def build_gateway_envs(*, api_key: str, llm_url: str) -> dict[str, str]:
         "ANTHROPIC_BASE_URL": base,
         "GITAGENT_MODEL_BASE_URL": base,
         "GITCLAW_MODEL_BASE_URL": base,
-        # One credential under three names: the engine presents it on every
-        # model call and the egress proxy swaps it for the real key.
-        "ANTHROPIC_API_KEY": api_key,
-        "OPENAI_API_KEY": api_key,
-        "LYZR_API_KEY": api_key,
         # The Claude CLI otherwise injects Claude-Code-only experimental betas
         # (a `context_management` body field plus beta headers) that a
         # spec-compliant gateway rejects outright with

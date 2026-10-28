@@ -138,6 +138,10 @@ def test_envvar_fallback_when_config_empty(monkeypatch):
         ),
         # Self-hosted collector on a port — same rules.
         ("http://collector.internal:4318", "traces", "http://collector.internal:4318/v1/traces"),
+        # Behind the egress proxy telemetry_url is http://egress/otlp.
+        ("http://egress/otlp", "traces", "http://egress/otlp/v1/traces"),
+        ("http://egress/otlp", "metrics", "http://egress/otlp/v1/metrics"),
+        ("http://egress/otlp", "logs", "http://egress/otlp/v1/logs"),
     ],
 )
 def test_signal_url_appends_per_signal_path(endpoint, signal, expected):

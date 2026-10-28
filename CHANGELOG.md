@@ -5,6 +5,168 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — unreleased
+
+Every call the SDK makes now matches a route the CAS egress proxy serves (plan
+`.claude/plans/p1-sdk-egress-routes.md`).
+
+### Added
+
+- **AgentCore on the app server.** The same process serves `GET /ping`
+  (`Healthy` / `HealthyBusy`) and `POST /invocations` (relay envelope v1,
+  dispatched in-process; streamed answers keep the `: ca-relay` head frame).
+  One image covers Lambda MicroVM and AgentCore (`computeragent.server.relay`).
+  CAS can close an abandoned relayed stream: the `x-ca-relay-stream` envelope
+  header (a UUID v4) is stripped before dispatch and `DELETE /_relay/streams/<id>`
+  closes that answer (relayed 204, unknown id 404). A JSON envelope over
+  AgentCore's 100 MiB cap becomes a relayed 502 `AGENTCORE_RESPONSE_TOO_LARGE`.
+  The relay logs `relay.instance id=…` once, and stream open/close with the id only.
+- **The app server for stage images** (`computeragent.server`, extra `server`).
+  `python -m computeragent.server` serves CAS's harness REST API on `0.0.0.0:8080`:
+  - the Lambda MicroVM lifecycle hooks, health, sessions, messages, events,
+    end-input, cancel, approvals and the workspace file routes;
+  - one `ComputerAgent` per session, built from the image's settings;
+  - the sandbox token from the session's `envs`, replaced by each turn's
+    `credential`;
+  - events in CAS's `sse-events.ts` shapes, including the turn start, the
+    input-guardrail outcome, tool-gate decisions and usage.
+
+  `ComputerAgent.workspace` and `ComputerAgent.telemetry_pipeline`, and
+  `computeragent.engines.registered_engines()`, are new.
+- **Sandbox token reissue is adopted by every client.** An egress answer that
+  carries `X-Cas-Token` / `X-Cas-Token-Expires-At` (an `sbt_` token with a later
+  expiry, on a request sent with the newest token) makes every later egress
+  request carry the new token: the agent-document read, the guardrails checks,
+  gitagent's Anthropic/OpenAI clients and injected httpx clients.
+  `Settings.api_key()` returns the newest token and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` is updated
+  (`computeragent.harness.egress_token`).
+- **A loopback forwarder for the Claude CLI.** On the `claude-agent-sdk` engine
+  the CLI's `ANTHROPIC_BASE_URL` and MCP server URLs on an egress origin point at
+  a listener on `127.0.0.1` that replays each request on the proxy with the
+  newest token and streams the answer back
+  (`computeragent.harness.egress_forwarder`). `h11` joins the `agentos` extra.
+- **OTLP exports fit the egress proxy's 1 MiB limit.** Each export is split on
+  its encoded size (960 KiB budget, `computeragent.telemetry.sinks.otlp_size`);
+  a single record over the budget is dropped with a WARN carrying the count.
+  Span and log processors export 128 records at a time. The OTLP exporters set
+  `x-api-key` on every request through a stamping `requests` session, so a
+  reissued sandbox token applies to telemetry too.
+- **`COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` / `session_store_url`.** The base URL of
+  the `http` session store behind the egress proxy
+  (`http://egress/computer-agent-api`); it overrides a descriptor's `base_url`
+  for kind `http` and is ignored for other kinds and store instances
+  (`computeragent.session_stores.with_base_url`).
+
+### Changed
+
+- **`session_id` keys the session store.** With `ComputerAgent(session_id=…,
+  session_store=…)`, every `append` and `load` carries that id instead of the
+  Claude CLI's per-process UUID (`project_key` and `subpath` are kept), and
+  the CLI runs under a UUID derived from it. A new process or sandbox with the
+  same `session_id` resumes the conversation on its first turn. The app server
+  builds each session with `session_id = sessionId`, so the `http` store is
+  keyed by the CAS session, which agentos expects (old-CAS plan 10). Without
+  `session_id` nothing changes.
+
+- **BREAKING: the settings' environment variables are renamed**, so the names
+  say what each one is; the constructor arguments are unchanged. No old name is
+  read any more:
+
+  | Argument | Was | Now |
+  |---|---|---|
+  | `agent_id` | `COMPUTERAGENT_AGENT_ID` | `COMPUTER_AGENT_ID` |
+  | `engine` | `COMPUTERAGENT_ENGINE` | `COMPUTER_AGENT_ENGINE` |
+  | `api_key` | `LYZR_API_KEY` | `COMPUTER_AGENT_EGRESS_PROXY_SECRET` |
+  | `base_url` | `COMPUTERAGENT_BASE_URL` | `COMPUTER_AGENT_EGRESS_API_URL` |
+  | `llm_url` | `COMPUTERAGENT_LLM_URL` | `COMPUTER_AGENT_EGRESS_LLM_URL` |
+  | `mcp_url` | `COMPUTERAGENT_MCP_URL` | `COMPUTER_AGENT_EGRESS_MCP_URL` |
+  | `guardrails_url` | `COMPUTERAGENT_GUARDRAILS_URL` | `COMPUTER_AGENT_EGRESS_GUARDRAILS_URL` |
+  | `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | `COMPUTER_AGENT_EGRESS_TELEMETRY_URL` |
+  | `session_store_url` | `COMPUTERAGENT_SESSION_STORE_URL` | `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` |
+  | `gap_dir` | `COMPUTERAGENT_GAP_DIR` | `COMPUTER_AGENT_GAP_DIR` |
+
+  Old CAS passes the same names in `POST /v1/sessions` `envs`: the app server
+  seeds `COMPUTER_AGENT_EGRESS_PROXY_SECRET` from it (the `LYZR_API_KEY` field
+  is no longer read), builds the session's agent from `COMPUTER_AGENT_ID`
+  (falling back to the image's own), and takes each
+  `COMPUTER_AGENT_EGRESS_*_URL` route the image's own environment or the agent
+  factory does not set. The engine's per-turn environment carries the token as
+  `COMPUTER_AGENT_EGRESS_PROXY_SECRET`.
+
+- **BREAKING: guardrails go through the egress proxy.** The user's message and
+  every tool call are checked with `POST {guardrails_url}/v1/check` (ops
+  `input` and `tool-input`); the agent gateway applies the org's and the
+  agent's RAI policies and owns fail-open. `guardrails_url` /
+  `COMPUTER_AGENT_EGRESS_GUARDRAILS_URL` is required and replaces `srs_url` /
+  `COMPUTERAGENT_SRS_URL` and `agent_api_url` / `COMPUTERAGENT_AGENT_API_URL`,
+  which are no longer read.
+- A check that reaches no verdict (unreachable, 5 s timeout, non-2xx, a
+  malformed answer) blocks the message or denies the tool; the SDK applies no
+  fail-open of its own.
+- A tool call is identified by the engine's own tool-use id: the Claude
+  engine's `PreToolUse` hook passes it, `PolicyToolAuthorizer` puts it in the
+  policy input as `call_id`, and a call without one is denied.
+- A rewritten message carries the gateway's masked text (`[EMAIL]`).
+- **The Lyzr key is read at every turn.** The engine's `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY` and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` and the bound MCP servers' `x-api-key`
+  are set from `Settings.api_key()` when each turn starts (and at boot), so a
+  key replaced in `COMPUTER_AGENT_EGRESS_PROXY_SECRET` between turns, or a reissued token, is used
+  by the next turn. A missing key fails the turn with `SettingsError` before
+  the engine starts. `build_gateway_envs` no longer takes `api_key`;
+  `key_envs(api_key)` returns the three variables.
+- **BREAKING: the agent document is read from its gateway sections.** The
+  model is `llm.config.model` (the gateway agent's kong model; `null` → the
+  image's own model) and the MCP servers are `mcp.servers`, every one attached
+  to the engine. `guardrails` is not read. A document without these sections
+  resolves with no model and no MCP servers. For gitagent a model without a
+  `provider:` prefix always gets `openai:`.
+- **BREAKING: MCP servers are addressed by name.** Each bound server is
+  `{mcp_url}/{tool_name}` (one percent-encoded segment) with no query; the
+  server id path and the `?tools=` query are gone, since the gateway resolves
+  both from its registry. Behind the egress proxy `COMPUTER_AGENT_EGRESS_MCP_URL` is
+  `http://egress/mcp/v1`.
+- **BREAKING: the `http` session store sends only `x-api-key`.** The store
+  token (`x-ca-session-store-token`), its refresh against `/v1/auth/token`, the
+  `token` / `auto_refresh` arguments, `TOKEN_HEADER` and `expiry_of` are gone;
+  a `token` option is ignored. The key is `COMPUTER_AGENT_EGRESS_PROXY_SECRET` at each request, as
+  the newest sandbox token.
+- A session-store descriptor without a `kind` is reported by its keys, never
+  its values.
+
+### Removed
+
+- **`computeragent.agentos.policy_config_url` and `fetch_policy_binding`.** Nothing
+  in the SDK called them since 0.4.0, and AgentOS has dropped the
+  `ingest/policy-config/{name}` route they read (the agent gateway applies org
+  and agent policies), so a direct caller got a 404 that looked like "no policy".
+
+- **BREAKING: the SDK's own policy resolution.** No org RAI policies are read
+  (`/v3/org/rai-policy`), the agent document's `rai_policy_id` is ignored and
+  `ResolvedAgent.rai_policy_id` is gone, and no SRS route
+  (`/v1/rai/inference`, `/v1/guardrails/evaluate-tool-call`) is called.
+  `computeragent.policy.srs_client`, `computeragent.policy.org_policy`,
+  `TurnPolicy`, `build_turn_policy`, `SrsToolGate.set_turn` and
+  `SrsTurnGuard.resolve_turn` are deleted. The SDK no longer runs a separate
+  content check on a tool call's string arguments; the tool call goes to the
+  gateway as one `tool-input` check.
+- **BREAKING: model-gateway and MCP-mode handling.** `ResolvedAgent.gateway_type`,
+  `gateway_base_url`, `gateway_completions_url`, `has_native_gateway` and
+  `mcp_mode`, `DEFAULT_MCP_MODE`, `build_mcp_servers(mcp_mode=)`, the generic
+  gateway refusal and the unresolved-binding refusal are gone; `model`,
+  `model_gateway`, `modelGatewayId`, `mcp_servers` and `mcp_mode` are no longer
+  read.
+- **BREAKING: the standalone SRS policy engine.** `SrsPolicyEngine`,
+  `srs_authorizer_from_env` and `computeragent.policy.srs` are gone; nothing
+  fetches `{srs}/rai/policies/{id}` any more. Use the built-in guardrails gate,
+  or `OpaPolicyEngine` / `CedarPolicyEngine` for a gate of your own.
+- **BREAKING: the AgentOS dashboard events sink.** `AgentOSHttpSink`
+  (`computeragent.telemetry.sinks.agentos_http`), the `events_url` setting and
+  `COMPUTERAGENT_EVENTS_URL` are gone, and the drop-in path no longer
+  auto-attaches the sink from `AGENTOS_INGEST_URL` / discovery. The egress
+  proxy serves no `/events` route. `examples/with_agentos.py` is deleted;
+  `examples/multi_sink.py` and `examples/e2e/run_live_demo.py` keep their
+  `OtelSink`.
+
 ## [0.6.0] — 2026-10-23
 
 Every call the SDK and its engine make now goes through an egress proxy, the agent is baked into

@@ -69,12 +69,11 @@ def test_resolves_every_field(agent_doc):
     assert agent.agent_id == AGENT_ID
     assert agent.name == "private git test with client"
     assert agent.harness == "claude-agent-sdk"
-    assert agent.model == "6aa93f1a75ce74c4e6772b20"
-    assert agent.gateway_type == "native"
-    assert agent.has_native_gateway is True
-    assert agent.gateway_base_url == "https://excellent-flavor-glance-myspace.trycloudflare.com"
-    assert agent.gateway_completions_url.endswith("/v4/chat/completions")
+    assert agent.model == "claude-sonnet-4-5"
     assert agent.agent_type == "client"
+    assert agent.mcp_bindings == ()
+    for gone in ("gateway_type", "gateway_base_url", "gateway_completions_url", "mcp_mode"):
+        assert not hasattr(agent, gone)
 
 
 @respx.mock
@@ -97,48 +96,96 @@ def test_trailing_slash_on_base_url_does_not_double_the_path(agent_doc):
     assert str(route.calls.last.request.url) == URL
 
 
-# ── model precedence ─────────────────────────────────────────────────────────
+@respx.mock
+def test_rai_policy_id_ignored(agent_doc):
+    """Policies are applied by the gateway behind the guardrails check; the
+    SDK reads no policy id from the agent document."""
+    respx.get(URL).mock(return_value=httpx.Response(200, json={**agent_doc, "rai_policy_id": "p1"}))
+
+    agent = _resolve()
+
+    assert not hasattr(agent, "rai_policy_id")
 
 
-def test_external_model_id_wins(agent_doc):
-    assert model_of(agent_doc) == "6aa93f1a75ce74c4e6772b20"
+EGRESS_BASE = "http://egress/computer-agent-api/agentos/api"
 
 
-def test_falls_back_to_binding_model(agent_doc):
-    agent_doc["model_gateway"]["binding"]["externalModelId"] = None
-    assert model_of(agent_doc) == "Anthropic:anthropic/claude-sonnet-4-6"
+@pytest.mark.parametrize("base", [EGRESS_BASE, EGRESS_BASE + "/", EGRESS_BASE + "/v1"])
+@respx.mock
+def test_egress_base_builds_single_prefix(agent_doc, base):
+    """Behind the egress proxy the agent document is read from its
+    /computer-agent-api prefix, with exactly one /agentos/api."""
+    route = respx.get(f"{EGRESS_BASE}/v1/agents/{AGENT_ID}").mock(
+        return_value=httpx.Response(200, json=agent_doc)
+    )
+
+    _resolve(base_url=base)
+
+    request = route.calls.last.request
+    assert str(request.url) == f"{EGRESS_BASE}/v1/agents/{AGENT_ID}"
+    assert request.headers["x-api-key"] == KEY
 
 
-def test_falls_back_to_top_level_model(agent_doc):
-    agent_doc["model_gateway"]["binding"] = {"model": None, "externalModelId": None}
-    assert model_of(agent_doc) == "Anthropic:anthropic/claude-sonnet-4-6"
+# ── the model ────────────────────────────────────────────────────────────────
 
 
-def test_no_model_anywhere_is_none(agent_doc):
-    agent_doc["model_gateway"] = None
-    agent_doc["model"] = None
+def test_model_from_llm_config(agent_doc):
+    assert model_of(agent_doc) == "claude-sonnet-4-5"
+
+
+@pytest.mark.parametrize(
+    "llm",
+    [None, "absent", {}, {"config": None}, {"config": {"model": "  "}}, {"config": "x"}, "kong"],
+)
+def test_null_llm_uses_the_image_model(agent_doc, llm):
+    from computeragent.harness.gateway_envs import build_options
+
+    if llm == "absent":
+        del agent_doc["llm"]
+    else:
+        agent_doc["llm"] = llm
     assert model_of(agent_doc) is None
 
-
-def test_blank_strings_are_not_a_model(agent_doc):
-    agent_doc["model_gateway"]["binding"]["externalModelId"] = "   "
-    assert model_of(agent_doc) == "Anthropic:anthropic/claude-sonnet-4-6"
+    with respx.mock:
+        respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+        agent = _resolve()
+    assert "model" not in build_options(agent, engine_name="claude-agent-sdk")
 
 
 # ── accepted shapes ──────────────────────────────────────────────────────────
 
 
 @respx.mock
-def test_null_gateway_is_allowed(agent_doc):
-    """No gateway is a direct-Anthropic run, not an error."""
-    agent_doc["model_gateway"] = None
-    agent_doc["modelGatewayId"] = None
+def test_legacy_fields_are_ignored(agent_doc):
+    """A pre-#164 document resolves with no model and no MCP servers."""
+    agent_doc.update(
+        {
+            "llm": None,
+            "mcp": None,
+            "model": "Anthropic:anthropic/claude-sonnet-4-6",
+            "model_gateway": {"type": "generic", "binding": {"externalModelId": "x"}},
+            "modelGatewayId": "6a9a6c9893432debd1668743",
+            "mcp_servers": [{"server_id": "srv_1", "tool_name": "jira"}],
+            "mcp_mode": "studio",
+        }
+    )
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     agent = _resolve()
 
-    assert agent.gateway_type is None
-    assert agent.has_native_gateway is False
+    assert agent.model is None
+    assert agent.mcp_bindings == ()
+
+
+@respx.mock
+def test_guardrails_section_ignored(agent_doc):
+    agent_doc["guardrails"] = {"provider": "lyzr-srs", "config": {"id": "pol_1"}}
+    route = respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    agent = _resolve()
+
+    assert route.call_count == 1
+    assert not any("guardrail" in f or "polic" in f for f in vars(agent))
 
 
 @respx.mock
@@ -153,35 +200,35 @@ def test_gitagent_harness_is_allowed(agent_doc):
 
 
 @respx.mock
-def test_refuses_generic_gateway(agent_doc):
-    agent_doc["model_gateway"]["type"] = "generic"
-    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-
-    with pytest.raises(UnsupportedAgentError, match="model_gateway.type"):
-        _resolve()
-
-
-@respx.mock
 def test_bound_mcp_servers_are_resolved(agent_doc):
-    agent_doc["mcp_servers"] = [
-        {"server_id": "srv_1", "tool_name": "jira", "action_names": ["search"]}
-    ]
+    agent_doc["mcp"] = {
+        "provider": "lyzr-mcp",
+        "servers": [
+            {
+                "server_id": "srv_1",
+                "tool_name": "jira",
+                "action_names": ["search"],
+                "persist_auth": True,
+                "needs_your_connection": False,
+                "your_server_id": None,
+            }
+        ],
+    }
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     agent = _resolve()
 
-    assert agent.mcp_mode == "engine"
     assert [(b.server_id, b.tool_name, b.action_names) for b in agent.mcp_bindings] == [
         ("srv_1", "jira", ("search",))
     ]
 
 
 @respx.mock
-def test_a_binding_without_a_tool_name_is_refused_by_index(agent_doc):
-    agent_doc["mcp_servers"] = [{"server_id": "srv_1", "action_names": ["x"]}]
+def test_a_binding_without_a_name_refuses_the_agent(agent_doc):
+    agent_doc["mcp"] = {"servers": [{"server_id": "s"}]}
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    with pytest.raises(UnsupportedAgentError, match=r"mcp_servers\[0\].*tool_name"):
+    with pytest.raises(UnsupportedAgentError, match=r"mcp\.servers\[0\].*tool_name"):
         _resolve()
 
 
@@ -212,9 +259,6 @@ def test_unknown_harness_is_refused_when_no_engine_is_given(agent_doc):
         name="a",
         harness="deepagents",
         model=None,
-        gateway_type=None,
-        gateway_base_url=None,
-        gateway_completions_url=None,
         agent_type=None,
     )
 
@@ -231,25 +275,10 @@ def test_bringing_your_own_engine_rescues_an_unknown_harness(agent_doc):
         name="a",
         harness="deepagents",
         model=None,
-        gateway_type=None,
-        gateway_base_url=None,
-        gateway_completions_url=None,
         agent_type=None,
     )
 
     require_runnable_harness(agent, engine_given=True)
-
-
-@respx.mock
-def test_refuses_a_binding_whose_gateway_did_not_resolve(agent_doc):
-    """`requireConsistentGatewayBinding`: the one case where the catalog name
-    would reach the gateway and 500 it."""
-    agent_doc["model_gateway"] = None  # gateway failed to resolve for this caller
-    # modelGatewayId stays set — the agent still believes it is bound.
-    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
-
-    with pytest.raises(UnsupportedAgentError, match="did not resolve"):
-        _resolve()
 
 
 # ── HTTP errors ──────────────────────────────────────────────────────────────
@@ -356,3 +385,26 @@ def test_the_key_never_appears_in_the_resolved_repr(agent_doc):
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
     assert KEY not in repr(_resolve())
+
+
+def _reissue_headers():
+    from datetime import datetime, timedelta, timezone
+
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+    return {"x-cas-token": "sbt_next", "x-cas-token-expires-at": expiry}
+
+
+@pytest.mark.parametrize("injected", [False, True])
+@respx.mock
+def test_reissue_adopted(agent_doc, injected):
+    from computeragent.harness.egress_token import CREDENTIAL
+
+    CREDENTIAL.configure([BASE])
+    respx.get(URL).mock(
+        return_value=httpx.Response(200, json=agent_doc, headers=_reissue_headers())
+    )
+    client = httpx.Client() if injected else None
+
+    resolve_agent(AGENT_ID, base_url=BASE, api_key="sbt_first", client=client)
+
+    assert CREDENTIAL.resolve("sbt_first") == "sbt_next"

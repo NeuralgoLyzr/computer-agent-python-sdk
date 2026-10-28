@@ -7,15 +7,14 @@ a later one cannot pass if an earlier one failed.
 ComputerAgent reads every setting from its environment variable, so the run is
 configured the way a sandbox is:
 
-    export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
-    export COMPUTERAGENT_ENGINE=claude-agent-sdk
-    export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
-    export COMPUTERAGENT_AGENT_API_URL=http://egress/agent-api
-    export COMPUTERAGENT_SRS_URL=http://egress/srs
-    export COMPUTERAGENT_LLM_URL=http://egress/llm
-    export COMPUTERAGENT_MCP_URL=http://egress/mcp
-    export LYZR_API_KEY=...
-    # optional: COMPUTERAGENT_TELEMETRY_URL, COMPUTERAGENT_EVENTS_URL, COMPUTERAGENT_GAP_DIR
+    export COMPUTER_AGENT_ID=6aa93f1b3817a13d3103d2c1
+    export COMPUTER_AGENT_ENGINE=claude-agent-sdk
+    export COMPUTER_AGENT_EGRESS_API_URL=http://egress/agentos/api
+    export COMPUTER_AGENT_EGRESS_GUARDRAILS_URL=http://egress/guardrails
+    export COMPUTER_AGENT_EGRESS_LLM_URL=http://egress/llm
+    export COMPUTER_AGENT_EGRESS_MCP_URL=http://egress/mcp/v1
+    export COMPUTER_AGENT_EGRESS_PROXY_SECRET=...
+    # optional: COMPUTER_AGENT_EGRESS_TELEMETRY_URL, COMPUTER_AGENT_GAP_DIR
 
     uv run python examples/e2e/live_agent_run.py
 
@@ -102,18 +101,15 @@ async def main(args: argparse.Namespace) -> int:
     resolved = agent.agent
     settings = agent._settings  # noqa: SLF001 — diagnostics, not API
     ok(f"name={resolved.name!r} harness={resolved.harness} model={resolved.model}")
-    ok(f"local policy (rai_policy_id) = {resolved.rai_policy_id or 'none'}")
-    ok(f"MCP mode={resolved.mcp_mode} bindings={[b.tool_name for b in resolved.mcp_bindings]}")
+    ok(f"MCP bindings={[b.tool_name for b in resolved.mcp_bindings]}")
 
     stage(2, "The egress routes")
     routes = {
         "base_url": settings.base_url,
-        "agent_api_url": settings.agent_api_url,
-        "srs_url": settings.srs_url,
+        "guardrails_url": settings.guardrails_url,
         "llm_url": settings.llm_url,
         "mcp_url": settings.mcp_url,
         "telemetry_url": settings.telemetry_url,
-        "events_url": settings.events_url,
     }
     for name, url in routes.items():
         if url:
@@ -138,13 +134,16 @@ async def main(args: argparse.Namespace) -> int:
             except Exception as exc:
                 bad(f"{name} unreachable at {origin(url)} ({type(exc).__name__})")
 
-    stage(3, "This turn's policies (org from agent_api_url + the agent's own)")
-    guard = agent._coordinator._turn_guard  # noqa: SLF001
-    turn = await guard.resolve_turn()
-    if turn.unresolved:
-        bad("the org RAI policies could not be read — every check this turn would block")
-    else:
-        ok(f"policies={list(turn.policy_ids) or 'none'} fail_open={turn.fail_open}")
+    stage(3, "The guardrails check answers (guardrails_url /v1/check)")
+    from computeragent.policy.guardrails_client import GuardrailsUnavailable, check_text
+
+    try:
+        verdict = await check_text(
+            settings.guardrails_url, api_key=settings.api_key(), text="hello"
+        )
+        ok(f"outcome={verdict.outcome} skipped={verdict.skipped}")
+    except GuardrailsUnavailable as exc:
+        bad(f"no verdict ({exc}) — every turn would block")
 
     stage(4, "Load the identity")
     coordinator = agent._coordinator  # noqa: SLF001
@@ -185,7 +184,7 @@ async def main(args: argparse.Namespace) -> int:
     ok(f"tokens in={result.usage.input_tokens} out={result.usage.output_tokens}")
     ok(f"duration={result.duration_ms:.0f}ms")
 
-    stage(6, "Tool calls round-tripped (each one checked by SRS)")
+    stage(6, "Tool calls round-tripped (each one checked by the guardrails)")
     if tool_uses:
         ok(f"tools used: {', '.join(sorted(set(tool_uses)))}")
     else:
@@ -217,13 +216,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--engine",
         default=None,
-        help="'claude-agent-sdk' or 'gitagent' (else COMPUTERAGENT_ENGINE)",
+        help="'claude-agent-sdk' or 'gitagent' (else COMPUTER_AGENT_ENGINE)",
     )
     p.add_argument(
         "--gap-dir",
         default=None,
         type=lambda v: Path(v).resolve(),
-        help="run in GAP mode from this directory (else COMPUTERAGENT_GAP_DIR)",
+        help="run in GAP mode from this directory (else COMPUTER_AGENT_GAP_DIR)",
     )
     return p.parse_args()
 

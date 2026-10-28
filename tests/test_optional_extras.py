@@ -46,35 +46,13 @@ def test_otelsink_import_error_when_otel_missing(monkeypatch):
         _restore(removed)
 
 
-def test_agentos_http_sink_import_error_when_httpx_missing(monkeypatch):
-    removed = _strip_modules(["httpx", "computeragent.telemetry.sinks.agentos_http"])
-    try:
-
-        class _Blocker:
-            def find_spec(self, name, path=None, target=None):
-                if name == "httpx" or name.startswith("httpx."):
-                    raise ImportError(f"blocked {name} for test")
-                return
-
-        finder = _Blocker()
-        sys.meta_path.insert(0, finder)
-        try:
-            with pytest.raises(ImportError) as exc:
-                importlib.import_module("computeragent.telemetry.sinks.agentos_http")
-            assert "computer-agent-py[agentos]" in str(exc.value)
-        finally:
-            sys.meta_path.remove(finder)
-    finally:
-        _restore(removed)
-
-
 def test_lazy_attribute_access_on_sinks_package_works():
     """``from computeragent.telemetry.sinks import OtelSink`` works when the
     extra is installed (dev env has it). Verify the lazy ``__getattr__``."""
     from computeragent.telemetry import sinks
 
     assert sinks.OtelSink is not None
-    assert sinks.AgentOSHttpSink is not None
+    assert not hasattr(sinks, "AgentOSHttpSink")
     with pytest.raises(AttributeError):
         sinks.Nonexistent  # noqa: B018
 
@@ -98,13 +76,13 @@ def test_eagerly_imported_modules_do_not_bind_httpx():
     which imports httpx eagerly, so it is always present in a base install. What
     IS ours to keep is that no module reached by `import computeragent` binds it
     at import time, which is what `policy/__init__` promises when it says its
-    engines are lazy. `policy.srs` is the one that breaks that promise if left
-    unattended, because unlike `opa`/`cedar` it is imported eagerly there.
+    engines are lazy. The guardrails client is reached eagerly through the
+    harness, so it keeps httpx inside its functions.
     """
     import computeragent.policy as policy
-    import computeragent.policy.srs as srs
+    import computeragent.policy.guardrails_client as guardrails_client
 
-    assert not hasattr(srs, "httpx")
+    assert not hasattr(guardrails_client, "httpx")
     # opa/cedar are reached only through `policy.__getattr__`, so a module-level
     # import there costs the eager path nothing.
     assert "OpaPolicyEngine" not in vars(policy)
@@ -194,7 +172,7 @@ def test_http_session_store_without_httpx_names_its_extra():
         sys.meta_path.insert(0, finder)
         try:
             with pytest.raises(ImportError) as exc:
-                HttpSessionStore(base_url="https://h", token="t")
+                HttpSessionStore(base_url="https://h")
             assert "computer-agent-py[agentos]" in str(exc.value)
         finally:
             sys.meta_path.remove(finder)

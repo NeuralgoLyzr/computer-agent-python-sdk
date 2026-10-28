@@ -130,6 +130,13 @@ class HarnessCoordinator:
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
         parent_agent_id: str | None = None,
+        # Route the Claude CLI's model and MCP calls on an egress origin
+        # through a loopback forwarder (see `egress_forwarder`), so they carry
+        # the newest sandbox token and their answers are observed.
+        forward_cli: bool = False,
+        # Read at every turn (and at boot): the engine's ANTHROPIC_API_KEY /
+        # OPENAI_API_KEY / COMPUTER_AGENT_EGRESS_PROXY_SECRET and the bound MCP servers' x-api-key.
+        api_key: Callable[[], str] | None = None,
     ) -> None:
         self._engine = engine
         self._substrate = substrate
@@ -157,6 +164,9 @@ class HarnessCoordinator:
         self._mcp_servers: dict[str, Any] = dict(mcp_servers or {})
         self._mcp_allowed_tools: list[str] = list(mcp_allowed_tools or [])
         self._turn_guard = turn_guard
+        self._forward_cli = forward_cli
+        self._api_key = api_key
+        self._forwarder: Any = None
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -205,7 +215,9 @@ class HarnessCoordinator:
             )
         if self._substrate_handle is not None:
             return
-        self._substrate_handle = await self._substrate.boot(source=self._source, envs=self._envs)
+        self._substrate_handle = await self._substrate.boot(
+            source=self._source, envs=self._turn_envs()
+        )
         self._workspace_path = self._substrate_handle.workspace_path
         loaded = await self._identity_loader.load(
             source=self._source,
@@ -257,6 +269,10 @@ class HarnessCoordinator:
         if self._substrate_handle is not None:
             with suppress(Exception):
                 await self._substrate_handle.close()
+        if self._forwarder is not None:
+            with suppress(Exception):
+                await self._forwarder.aclose()
+            self._forwarder = None
         with suppress(Exception):
             await self._pipeline.flush()
 
@@ -315,6 +331,60 @@ class HarnessCoordinator:
 
     # ── one chat turn ──────────────────────────────────────────────────────
 
+    def _turn_envs(self) -> dict[str, str]:
+        """The static envs with this turn's key variables over them."""
+        if self._api_key is None:
+            return self._envs
+        from .gateway_envs import key_envs
+
+        return {**self._envs, **key_envs(self._api_key())}
+
+    def _turn_options(self, key: str | None) -> Any:
+        """The manifest options with this turn's key on the bound MCP servers.
+        A server the loader or the caller supplied is left as it is."""
+        options = self._manifest.options
+        if key is None or not isinstance(options, dict) or not self._mcp_servers:
+            return options
+        servers = options.get("mcp_servers")
+        if not isinstance(servers, dict):
+            return options
+        updated = dict(servers)
+        for name, bound in self._mcp_servers.items():
+            server = updated.get(name)
+            if isinstance(server, dict) and server.get("url") == bound.get("url"):
+                updated[name] = {
+                    **server,
+                    "headers": {**dict(server.get("headers") or {}), "x-api-key": key},
+                }
+        return {**options, "mcp_servers": updated}
+
+    async def _engine_envs_and_manifest(self) -> tuple[dict[str, str], Any]:
+        """The env and manifest this turn's engine starts with: the current key
+        in the env and on the bound MCP servers, and for the Claude CLI, egress
+        URLs pointed at the loopback forwarder."""
+        from dataclasses import replace
+
+        envs = self._turn_envs()
+        options = self._turn_options(
+            envs.get("COMPUTER_AGENT_EGRESS_PROXY_SECRET") if self._api_key else None
+        )
+        if self._forward_cli:
+            from .egress_forwarder import EgressForwarder
+
+            if self._forwarder is None:
+                self._forwarder = EgressForwarder()
+            envs, rewritten = await self._forwarder.rewrite(
+                envs, options if isinstance(options, dict) else None
+            )
+            if rewritten is not None:
+                options = rewritten
+        manifest = (
+            self._manifest
+            if options is self._manifest.options
+            else replace(self._manifest, options=options)
+        )
+        return envs, manifest
+
     async def run_chat(
         self, message: Any
     ) -> tuple[
@@ -336,6 +406,9 @@ class HarnessCoordinator:
         await self._ensure_booted()
         assert self._workspace_path is not None
         assert self._manifest is not None
+        # This turn's key, read now: a missing key fails the turn before the
+        # guardrails check or the engine runs.
+        envs, manifest = await self._engine_envs_and_manifest()
 
         # Reuse the same id across every chat on this coordinator so a
         # multi-turn conversation lands as ONE session doc in Mongo (with
@@ -366,9 +439,9 @@ class HarnessCoordinator:
 
         ctx = EngineContext(
             session_id=session_id,
-            manifest=self._manifest,
+            manifest=manifest,
             workspace_path=self._workspace_path,
-            envs=self._envs,
+            envs=envs,
             user_message_queue=_QueueAsyncIterable(state.user_queue),
             on_permission_request=self._build_permission_resolver(state),
             cancel_event=state.cancel_event,
@@ -382,7 +455,7 @@ class HarnessCoordinator:
         # treats N chats as one conversation. It carries identity + the first
         # prompt for the AgentOS server's first-turn seeding of
         # sessions[].entries (the server-side ingest projection owns that write;
-        # AgentOSHttpSink just forwards the event). Subsequent chats emit
+        # the sink just forwards the event). Subsequent chats emit
         # user_message events so each new prompt appends to entries without
         # re-seeding. The OtelSink captures per-turn content via turn_started
         # (emitted below), not via session_started.

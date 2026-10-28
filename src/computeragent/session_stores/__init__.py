@@ -17,7 +17,8 @@ from collections.abc import Callable, Mapping
 from typing import Any, cast
 
 from ..harness.errors import UnknownSessionStoreError
-from ..protocol_types import SessionStore
+from ..protocol_types import SessionKey, SessionStore, SessionStoreEntry
+from .http import with_base_url
 from .memory import InMemorySessionStore
 
 logger = logging.getLogger("computeragent.session_stores")
@@ -40,6 +41,28 @@ def is_session_store(candidate: Any) -> bool:
     return callable(getattr(candidate, "append", None)) and callable(
         getattr(candidate, "load", None)
     )
+
+
+class PinnedSessionStore:
+    """A store whose every key carries one ``session_id``.
+
+    The Claude CLI keys transcripts by its own per-process UUID, so a new
+    sandbox for the same conversation would look under a key nobody wrote.
+    Pinning ``session_id`` to the conversation's id (the CAS session behind the
+    egress proxy) makes every process read and write the same transcript;
+    ``project_key`` and ``subpath`` pass through. Only ``append`` and ``load``
+    are forwarded, the two verbs every store implements.
+    """
+
+    def __init__(self, inner: SessionStore, session_id: str) -> None:
+        self.inner = inner
+        self.pinned_session_id = session_id
+
+    async def append(self, key: SessionKey, entries: list[SessionStoreEntry]) -> None:
+        await self.inner.append({**key, "session_id": self.pinned_session_id}, entries)
+
+    async def load(self, key: SessionKey) -> list[SessionStoreEntry] | None:
+        return await self.inner.load({**key, "session_id": self.pinned_session_id})
 
 
 def register_session_store(name: str, store: SessionStore | SessionStoreBuilder) -> None:
@@ -67,8 +90,13 @@ def resolve_session_store(spec: str | Mapping[str, Any]) -> SessionStore:
         kind = spec.get("kind")
         options = spec.get("options")
         if not isinstance(kind, str) or not kind:
+            # Names the shape only: a descriptor may carry a URL or a credential.
+            keys = sorted(str(k) for k in spec)
+            option_keys = sorted(str(k) for k in options) if isinstance(options, Mapping) else []
+            detail = f"keys {keys}" + (f", options keys {option_keys}" if option_keys else "")
             raise UnknownSessionStoreError(
-                f"session store descriptor needs a string 'kind'; got {spec!r}"
+                f"session store descriptor needs a string 'kind'; got a "
+                f"{type(spec).__name__} with {detail}"
             )
     elif isinstance(spec, str):
         kind, options = spec, None
@@ -116,8 +144,10 @@ register_session_store("http", _http_builder)
 
 __all__ = [
     "InMemorySessionStore",
+    "PinnedSessionStore",
     "is_session_store",
     "SessionStoreBuilder",
     "register_session_store",
     "resolve_session_store",
+    "with_base_url",
 ]

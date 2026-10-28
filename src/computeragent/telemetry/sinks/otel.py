@@ -38,6 +38,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from .otlp_size import (
+    SizeCappedLogExporter,
+    SizeCappedSpanExporter,
+    size_capped_metric_exporter,
+)
+
 try:
     from opentelemetry import metrics, trace  # noqa: F401 - probe imports only
     from opentelemetry.context import Context
@@ -581,6 +587,7 @@ class OtelSink:
         exporter: str | None = None,
         endpoint: str | None = None,
         headers: dict[str, str] | None = None,
+        session: Any | None = None,
         temporality: Temporality | None = None,
         tracer_provider: Any | None = None,
         meter_provider: Any | None = None,
@@ -655,11 +662,15 @@ class OtelSink:
         except (TypeError, ValueError):
             self._max_attr_length = 4096
 
+        # A `requests` session for the OTLP HTTP exporters (the harness passes
+        # one that sets and stamps the sandbox key on every request).
+        self._session = session
         self._tracer_provider = tracer_provider or _build_tracer_provider(
             service_name=self._service_name,
             exporter=self._exporter,
             endpoint=self._endpoint,
             headers=self._headers,
+            session=session,
         )
         self._meter_provider = meter_provider or _build_meter_provider(
             service_name=self._service_name,
@@ -667,6 +678,7 @@ class OtelSink:
             endpoint=self._endpoint,
             headers=self._headers,
             temporality=self._temporality,
+            session=session,
         )
         self._tracer = self._tracer_provider.get_tracer(INSTRUMENTATION_SCOPE_NAME)
         self._meter = self._meter_provider.get_meter(INSTRUMENTATION_SCOPE_NAME)
@@ -684,6 +696,7 @@ class OtelSink:
                 exporter=self._exporter,
                 endpoint=self._endpoint,
                 headers=self._headers,
+                session=session,
             )
             self._logger = self._logger_provider.get_logger(INSTRUMENTATION_SCOPE_NAME)
 
@@ -1472,21 +1485,31 @@ def _delta_temporality_map() -> dict[Any, AggregationTemporality]:
     }
 
 
+#: Records per export, to bound the encoding work of the size cap.
+OTLP_MAX_EXPORT_BATCH = 128
+
+
 def _build_tracer_provider(
     *,
     service_name: str,
     exporter: str,
     endpoint: str | None,
     headers: dict[str, str],
+    session: Any | None = None,
 ) -> TracerProvider:
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
     if exporter == "otlp-http":
-        span_exporter = HttpSpanExporter(
-            endpoint=_signal_url(endpoint, "traces"),
-            headers=headers or None,
+        span_exporter = SizeCappedSpanExporter(
+            HttpSpanExporter(
+                endpoint=_signal_url(endpoint, "traces"),
+                headers=headers or None,
+                session=session,
+            )
         )
-        provider.add_span_processor(BatchSpanProcessor(span_exporter))
+        provider.add_span_processor(
+            BatchSpanProcessor(span_exporter, max_export_batch_size=OTLP_MAX_EXPORT_BATCH)  # type: ignore[arg-type]
+        )
     elif exporter == "console":
         provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
     return provider
@@ -1499,6 +1522,7 @@ def _build_meter_provider(
     endpoint: str | None,
     headers: dict[str, str],
     temporality: Temporality = "delta",
+    session: Any | None = None,
 ) -> MeterProvider:
     resource = Resource.create({"service.name": service_name})
     metric_exporter: Any
@@ -1506,10 +1530,11 @@ def _build_meter_provider(
         kwargs: dict[str, Any] = {
             "endpoint": _signal_url(endpoint, "metrics"),
             "headers": headers or None,
+            "session": session,
         }
         if temporality == "delta":
             kwargs["preferred_temporality"] = _delta_temporality_map()
-        metric_exporter = HttpMetricExporter(**kwargs)
+        metric_exporter = size_capped_metric_exporter(HttpMetricExporter(**kwargs))
     elif exporter == "console":
         metric_exporter = ConsoleMetricExporter()
     else:
@@ -1527,15 +1552,21 @@ def _build_logger_provider(
     exporter: str,
     endpoint: str | None,
     headers: dict[str, str],
+    session: Any | None = None,
 ) -> LoggerProvider:
     resource = Resource.create({"service.name": service_name})
     provider = LoggerProvider(resource=resource)
     if exporter == "otlp-http":
-        log_exporter = HttpLogExporter(
-            endpoint=_signal_url(endpoint, "logs"),
-            headers=headers or None,
+        log_exporter = SizeCappedLogExporter(
+            HttpLogExporter(
+                endpoint=_signal_url(endpoint, "logs"),
+                headers=headers or None,
+                session=session,
+            )
         )
-        provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+        provider.add_log_record_processor(
+            BatchLogRecordProcessor(log_exporter, max_export_batch_size=OTLP_MAX_EXPORT_BATCH)  # type: ignore[arg-type]
+        )
     elif exporter == "console":
         provider.add_log_record_processor(SimpleLogRecordProcessor(ConsoleLogExporter()))
     return provider

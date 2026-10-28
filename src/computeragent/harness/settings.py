@@ -18,31 +18,31 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..protocol_types import EngineDriver
 from .agentos_agent import AgentResolveError
 
 #: Argument name → environment variable.
 ENV_VARS: dict[str, str] = {
-    "agent_id": "COMPUTERAGENT_AGENT_ID",
-    "engine": "COMPUTERAGENT_ENGINE",
-    "base_url": "COMPUTERAGENT_BASE_URL",
-    "api_key": "LYZR_API_KEY",
-    "llm_url": "COMPUTERAGENT_LLM_URL",
-    "mcp_url": "COMPUTERAGENT_MCP_URL",
-    "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
-    "srs_url": "COMPUTERAGENT_SRS_URL",
-    "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
-    "events_url": "COMPUTERAGENT_EVENTS_URL",
-    "gap_dir": "COMPUTERAGENT_GAP_DIR",
+    "agent_id": "COMPUTER_AGENT_ID",
+    "engine": "COMPUTER_AGENT_ENGINE",
+    "base_url": "COMPUTER_AGENT_EGRESS_API_URL",
+    "api_key": "COMPUTER_AGENT_EGRESS_PROXY_SECRET",
+    "llm_url": "COMPUTER_AGENT_EGRESS_LLM_URL",
+    "mcp_url": "COMPUTER_AGENT_EGRESS_MCP_URL",
+    "guardrails_url": "COMPUTER_AGENT_EGRESS_GUARDRAILS_URL",
+    "telemetry_url": "COMPUTER_AGENT_EGRESS_TELEMETRY_URL",
+    "session_store_url": "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL",
+    "gap_dir": "COMPUTER_AGENT_GAP_DIR",
 }
 
 #: Egress routes: required, and each must be an http(s) URL.
-URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url", "agent_api_url", "srs_url")
+URL_SETTINGS: tuple[str, ...] = ("llm_url", "mcp_url", "guardrails_url")
 
 #: Egress routes that may be unset (the feature is then off), but must be
 #: http(s) URLs when set.
-OPTIONAL_URL_SETTINGS: tuple[str, ...] = ("telemetry_url", "events_url")
+OPTIONAL_URL_SETTINGS: tuple[str, ...] = ("telemetry_url", "session_store_url")
 
 
 class SettingsError(AgentResolveError):
@@ -79,30 +79,33 @@ class Settings:
     base_url: str
     llm_url: str
     mcp_url: str
-    agent_api_url: str
-    srs_url: str
+    guardrails_url: str
     telemetry_url: str | None
-    events_url: str | None
+    session_store_url: str | None
     gap_dir: str | Path | None
     _explicit_api_key: str | None
     _env: Mapping[str, str]
 
     def api_key(self) -> str:
         """The key to present, read now: the argument when one was given,
-        else the environment variable as it stands at this call."""
+        else the environment variable as it stands at this call; either way
+        the newest sandbox token of its chain (see ``egress_token``)."""
+        from .egress_token import CREDENTIAL
+
         if self._explicit_api_key is not None:
-            return self._explicit_api_key
+            return CREDENTIAL.resolve(self._explicit_api_key)
         value = _env(self._env, "api_key")
         if value is None:
             raise SettingsError(f"missing required setting: {_spelling('api_key')}")
-        return value
+        return CREDENTIAL.resolve(value)
 
     def __repr__(self) -> str:
         return (
             f"Settings(agent_id={self.agent_id!r}, engine={self.engine!r}, "
             f"base_url={self.base_url!r}, llm_url={self.llm_url!r}, mcp_url={self.mcp_url!r}, "
-            f"agent_api_url={self.agent_api_url!r}, srs_url={self.srs_url!r}, "
-            f"telemetry_url={self.telemetry_url!r}, events_url={self.events_url!r}, "
+            f"guardrails_url={self.guardrails_url!r}, "
+            f"telemetry_url={self.telemetry_url!r}, "
+            f"session_store_url={self.session_store_url!r}, "
             f"gap_dir={self.gap_dir!r}, api_key=<hidden>)"
         )
 
@@ -115,11 +118,10 @@ def resolve_settings(
     api_key: str | None,
     llm_url: str | None,
     mcp_url: str | None,
-    agent_api_url: str | None,
-    srs_url: str | None,
+    guardrails_url: str | None,
     telemetry_url: str | None,
-    events_url: str | None,
     gap_dir: str | Path | None,
+    session_store_url: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Settings:
     """Resolve each setting from its argument, else its environment variable.
@@ -137,10 +139,9 @@ def resolve_settings(
     given_urls = {
         "llm_url": llm_url,
         "mcp_url": mcp_url,
-        "agent_api_url": agent_api_url,
-        "srs_url": srs_url,
+        "guardrails_url": guardrails_url,
         "telemetry_url": telemetry_url,
-        "events_url": events_url,
+        "session_store_url": session_store_url,
     }
     urls = {
         name: given_urls[name] if _given(given_urls[name]) else _env(source, name)
@@ -165,12 +166,22 @@ def resolve_settings(
     if missing:
         raise SettingsError("missing required settings: " + ", ".join(missing))
     malformed = [
-        f"{_spelling(name)}={value!r}"
+        # The session-store URL is named without its value (see below).
+        _spelling(name) if name == "session_store_url" else f"{_spelling(name)}={value!r}"
         for name, value in urls.items()
         if value is not None and not str(value).startswith(("http://", "https://"))
     ]
     if malformed:
         raise SettingsError("settings must be http(s) URLs: " + ", ".join(malformed))
+    store_url = urls["session_store_url"]
+    if store_url is not None:
+        parts = urlsplit(str(store_url))
+        if not parts.hostname or parts.query or parts.fragment or "?" in str(store_url):
+            # The value is not echoed: a descriptor may carry a credential.
+            raise SettingsError(
+                f"{_spelling('session_store_url')} must be an absolute http(s) URL "
+                "without a query or fragment"
+            )
 
     assert resolved_agent_id is not None
     assert resolved_engine is not None
@@ -181,10 +192,9 @@ def resolve_settings(
         base_url=resolved_base_url,
         llm_url=str(urls["llm_url"]).rstrip("/"),
         mcp_url=str(urls["mcp_url"]).rstrip("/"),
-        agent_api_url=str(urls["agent_api_url"]).rstrip("/"),
-        srs_url=str(urls["srs_url"]).rstrip("/"),
+        guardrails_url=str(urls["guardrails_url"]).rstrip("/"),
         telemetry_url=_optional_url(urls["telemetry_url"]),
-        events_url=_optional_url(urls["events_url"]),
+        session_store_url=_optional_url(urls["session_store_url"]),
         gap_dir=resolved_gap_dir,
         _explicit_api_key=explicit_key,
         _env=source,

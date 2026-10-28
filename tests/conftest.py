@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def _reset_pipeline(monkeypatch):
     """Drop the cached telemetry pipeline before/after each test, and disable
-    env-driven auto-attachment of OtelSink / AgentOSHttpSink. Tests that
-    exercise those sinks attach them explicitly via ``configure(sinks=[...])``.
+    env-driven auto-attachment of OtelSink. Tests that
+    exercise that sink attach them explicitly via ``configure(sinks=[...])``.
     """
     monkeypatch.setenv("COMPUTERAGENT_OTEL", "disabled")
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
@@ -28,11 +28,14 @@ def _reset_pipeline(monkeypatch):
     for name in ENV_VARS.values():
         monkeypatch.delenv(name, raising=False)
 
+    from computeragent.harness.egress_token import CREDENTIAL
     from computeragent.telemetry import config as _cfg
 
     _cfg._reset_for_tests()
+    CREDENTIAL.reset()
     yield
     _cfg._reset_for_tests()
+    CREDENTIAL.reset()
 
 
 class StubSink:
