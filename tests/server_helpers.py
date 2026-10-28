@@ -123,16 +123,16 @@ def make_app(engine: FakeEngine, calls: list[dict[str, Any]] | None = None) -> A
     def factory(**kwargs: Any) -> ComputerAgent:
         if calls is not None:
             calls.append(dict(kwargs))
-        return ComputerAgent(
-            agent_id=AGENT_ID,
-            base_url=BASE,
-            engine=engine,
-            llm_url="http://egress.internal/llm",
-            mcp_url="http://egress.internal/mcp/v1",
-            guardrails_url=GUARDRAILS,
-            policy_decider=no_opinion if engine.ask_permission else None,
-            **kwargs,
-        )
+        kwargs.setdefault("agent_id", AGENT_ID)
+        fixed = {  # the factory's own arguments win over the session's (as in an image's code)
+            "base_url": BASE,
+            "engine": engine,
+            "llm_url": "http://egress.internal/llm",
+            "mcp_url": "http://egress.internal/mcp/v1",
+            "guardrails_url": GUARDRAILS,
+            "policy_decider": no_opinion if engine.ask_permission else None,
+        }
+        return ComputerAgent(**{**kwargs, **fixed})
 
     return create_app(agent_factory=factory)
 
@@ -145,7 +145,7 @@ def session_body(**overrides: Any) -> dict[str, Any]:
     body: dict[str, Any] = {
         "engine": "claude-agent-sdk",
         "identity": {"loader": "gitagentprotocol", "source": {"type": "local", "path": "/agent"}},
-        "envs": {"LYZR_API_KEY": "sbt_1", "OTHER": "x"},
+        "envs": {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_1", "OTHER": "x"},
         "sessionId": "s1",
         "streamingInput": True,
     }
@@ -172,4 +172,4 @@ def frames(text: str) -> list[tuple[int | None, str, dict[str, Any]]]:
 
 
 def env_key() -> str | None:
-    return os.environ.get("LYZR_API_KEY")
+    return os.environ.get("COMPUTER_AGENT_EGRESS_PROXY_SECRET")

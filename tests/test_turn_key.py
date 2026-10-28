@@ -21,7 +21,7 @@ URL = f"{BASE}/v1/agents/{AGENT_ID}"
 LLM_URL = "http://egress.internal/llm"
 MCP_URL = "http://egress.internal/mcp/v1"
 GUARDRAILS = "http://egress.internal/guardrails"
-KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LYZR_API_KEY")
+KEY_NAMES = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "COMPUTER_AGENT_EGRESS_PROXY_SECRET")
 
 
 class RecordingEngine:
@@ -69,12 +69,12 @@ def keys_of(ctx: EngineContext) -> set[str]:
 
 @respx.mock
 async def test_engine_env_follows_the_key(agent_doc, monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_1")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_1")
     engine = RecordingEngine()
 
     async with build(agent_doc, engine) as agent:
         await agent.chat("one")
-        monkeypatch.setenv("LYZR_API_KEY", "sbt_2")
+        monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_2")
         await agent.chat("two")
 
     first, second = engine.contexts
@@ -86,7 +86,7 @@ async def test_engine_env_follows_the_key(agent_doc, monkeypatch):
 
 @respx.mock
 async def test_mcp_headers_follow_the_key(agent_doc, monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_1")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_1")
     engine = RecordingEngine()
     mine = {"type": "http", "url": "http://elsewhere/mcp", "headers": {"x-api-key": "own"}}
 
@@ -96,7 +96,7 @@ async def test_mcp_headers_follow_the_key(agent_doc, monkeypatch):
             "mine": mine,
         }
         await agent.chat("one")
-        monkeypatch.setenv("LYZR_API_KEY", "sbt_2")
+        monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_2")
         await agent.chat("two")
 
     servers = engine.contexts[1].manifest.options["mcp_servers"]
@@ -110,12 +110,12 @@ async def test_mcp_headers_follow_the_key(agent_doc, monkeypatch):
 
 @respx.mock
 async def test_explicit_api_key_follows_its_reissue(agent_doc, monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_env")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_env")
     engine = RecordingEngine()
 
     async with build(agent_doc, engine, api_key="sbt_k") as agent:
         await agent.chat("one")
-        monkeypatch.setenv("LYZR_API_KEY", "sbt_env_2")
+        monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_env_2")
         await agent.chat("two")
         expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         assert CREDENTIAL.adopt("sbt_k", "sbt_k2", expiry)
@@ -126,13 +126,13 @@ async def test_explicit_api_key_follows_its_reissue(agent_doc, monkeypatch):
 
 @respx.mock
 async def test_missing_key_fails_the_turn(agent_doc, monkeypatch):
-    monkeypatch.setenv("LYZR_API_KEY", "sbt_1")
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET", "sbt_1")
     engine = RecordingEngine()
 
     async with build(agent_doc, engine) as agent:
         await agent.chat("one")
-        monkeypatch.delenv("LYZR_API_KEY")
-        with pytest.raises(SettingsError, match="LYZR_API_KEY") as exc:
+        monkeypatch.delenv("COMPUTER_AGENT_EGRESS_PROXY_SECRET")
+        with pytest.raises(SettingsError, match="COMPUTER_AGENT_EGRESS_PROXY_SECRET") as exc:
             await agent.chat("two")
 
     assert len(engine.contexts) == 1

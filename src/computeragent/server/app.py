@@ -17,12 +17,16 @@ status codes and error codes follow the reference harness,
     GET  /ping, POST /invocations                  AgentCore: the same routes in relay envelope v1 (relay.py)
 
 One ``ComputerAgent`` per session, built from the image's settings
-(``COMPUTERAGENT_*``) with no ``api_key=``: the session's
-``envs.LYZR_API_KEY`` seeds ``os.environ["LYZR_API_KEY"]`` (every other
-``envs`` key is ignored) and each message's ``credential`` replaces it before
-its turn. The key is process-wide, so turns run one at a time per process.
-``identity`` is not read (the agent is baked into the image); ``engine`` is
-checked against the registered engines and the image's own engine runs.
+(``COMPUTER_AGENT_*``) with no ``api_key=``. Old CAS passes settings in the
+session's ``envs``: ``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` (the sandbox token)
+seeds the process environment; ``COMPUTER_AGENT_ID`` is the session's agent
+(else the image's own); and each ``COMPUTER_AGENT_EGRESS_*_URL`` is used only
+when the image's environment does not set it (an agent factory's own arguments
+win over both). Every other ``envs`` key is ignored. Each message's
+``credential`` replaces the token before its turn. The token is process-wide,
+so turns run one at a time per process.
+``engine`` is checked against the registered engines and the image's own
+engine runs; ``identity`` is not read.
 ``messages`` are the session's first turns and ``streamingInput: false`` closes
 its input after them, as in the reference. Resume across sandboxes is the
 session store's (``sessionStore``, keyed by ``sessionId``).
@@ -71,6 +75,21 @@ KEEPALIVE_S = 20.0
 HOOK_PREFIX = "/aws/lambda-microvms/runtime/v1/"
 ERROR_SOURCE = "COMPUTERAGENT_SERVER"
 
+#: The ``envs`` keys old CAS passes at ``POST /v1/sessions``; the token is
+#: also the variable the SDK reads it from.
+TOKEN_ENV = "COMPUTER_AGENT_EGRESS_PROXY_SECRET"
+AGENT_ID_ENV = "COMPUTER_AGENT_ID"
+#: Egress routes CAS may pass in ``envs`` (``ComputerAgent`` argument names).
+#: The image's own variables and the agent factory's arguments win over them.
+SESSION_URL_SETTINGS = (
+    "base_url",
+    "llm_url",
+    "mcp_url",
+    "guardrails_url",
+    "telemetry_url",
+    "session_store_url",
+)
+
 #: Builds a session's agent: (session_id, options, session_store, on_tool_call) → ComputerAgent.
 AgentFactory = Callable[..., Any]
 
@@ -103,7 +122,7 @@ def default_agent_factory(**kwargs: Any) -> Any:
     on_tool_call = kwargs.pop("on_tool_call")
     # The Claude engine never asks for approvals (it runs under a
     # prompt-skipping permission mode); passing a callback only logs a warning.
-    if os.environ.get("COMPUTERAGENT_ENGINE") != "claude-agent-sdk":
+    if os.environ.get("COMPUTER_AGENT_ENGINE") != "claude-agent-sdk":
         kwargs["on_tool_call"] = on_tool_call
     return ComputerAgent(**kwargs)
 
@@ -220,7 +239,7 @@ class ServerSession:
             message, credential = item
             async with self.turn_lock:
                 if credential:
-                    os.environ["LYZR_API_KEY"] = credential
+                    os.environ[TOKEN_ENV] = credential
                 if not await self._turn(message):
                     return
         await self.end("complete")
@@ -419,8 +438,17 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
                 "SESSION_ID_INVALID",
                 "sessionId must match [A-Za-z0-9._-]{1,128} and cannot be '.' or '..'",
             )
-        if envs.get("LYZR_API_KEY"):
-            os.environ["LYZR_API_KEY"] = envs["LYZR_API_KEY"]
+        if envs.get(TOKEN_ENV):
+            os.environ[TOKEN_ENV] = envs[TOKEN_ENV]
+        agent_kwargs: dict[str, Any] = {}
+        if envs.get(AGENT_ID_ENV, "").strip():
+            agent_kwargs["agent_id"] = envs[AGENT_ID_ENV].strip()
+        from ..harness.settings import ENV_VARS
+
+        for name in SESSION_URL_SETTINGS:
+            value = envs.get(ENV_VARS[name], "").strip()
+            if value and not os.environ.get(ENV_VARS[name], "").strip():
+                agent_kwargs[name] = value
         old = sessions.pop(sid, None)
         if old is not None:
             await old.cancel()
@@ -438,6 +466,7 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
                 options=options,
                 session_store=body.get("sessionStore"),
                 on_tool_call=on_tool_call,
+                **agent_kwargs,
             )
         except Exception as exc:
             from ..harness import AgentResolveError
@@ -468,7 +497,7 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
             }
         )
         session.start()
-        initial_credential = envs.get("LYZR_API_KEY")
+        initial_credential = envs.get(TOKEN_ENV)
         for message in messages:
             await session.queue.put((message, initial_credential))
         if not body.get("streamingInput"):
@@ -535,16 +564,8 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
             since = -1
 
         async def stream() -> AsyncIterator[str]:
-            frames = s.log.iterate(since=since).__aiter__()
-            while True:
-                try:
-                    event_id, event = await asyncio.wait_for(frames.__anext__(), KEEPALIVE_S)
-                except asyncio.TimeoutError:
-                    yield ":keepalive\n\n"
-                    continue
-                except StopAsyncIteration:
-                    return
-                yield encode_sse(event_id, event)
+            async for item in s.log.iterate(since=since, keepalive=KEEPALIVE_S):
+                yield ":keepalive\n\n" if item is None else encode_sse(*item)
 
         return StreamingResponse(
             stream(), media_type="text/event-stream", headers={"cache-control": "no-cache"}

@@ -47,13 +47,13 @@ The `claude-agent-sdk` engine spawns a Claude Code CLI subprocess, which **ships
 In a sandbox every setting comes from the environment, so construction takes no arguments:
 
 ```bash
-export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
-export COMPUTERAGENT_ENGINE=claude-agent-sdk
-export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
-export COMPUTERAGENT_GUARDRAILS_URL=http://egress/guardrails
-export COMPUTERAGENT_LLM_URL=http://egress/llm
-export COMPUTERAGENT_MCP_URL=http://egress/mcp/v1
-export LYZR_API_KEY=...          # injected when the sandbox is created
+export COMPUTER_AGENT_ID=6aa93f1b3817a13d3103d2c1
+export COMPUTER_AGENT_ENGINE=claude-agent-sdk
+export COMPUTER_AGENT_EGRESS_API_URL=http://egress/agentos/api
+export COMPUTER_AGENT_EGRESS_GUARDRAILS_URL=http://egress/guardrails
+export COMPUTER_AGENT_EGRESS_LLM_URL=http://egress/llm
+export COMPUTER_AGENT_EGRESS_MCP_URL=http://egress/mcp/v1
+export COMPUTER_AGENT_EGRESS_PROXY_SECRET=...          # injected when the sandbox is created
 ```
 
 ```python
@@ -79,7 +79,7 @@ async with ComputerAgent(
     guardrails_url="http://egress/guardrails",
     llm_url="http://egress/llm",
     mcp_url="http://egress/mcp/v1",
-    api_key=os.environ["LYZR_API_KEY"],
+    api_key=os.environ["COMPUTER_AGENT_EGRESS_PROXY_SECRET"],
     options={"system_prompt": "You are terse.", "disallowed_tools": ["Write", "Edit"]},
     session_store="memory",
     budget_max_usd=0.50,
@@ -103,16 +103,16 @@ request is made. A URL setting must be an `http(s)` URL.
 
 | Argument | Environment variable | Required | What it is |
 |---|---|---|---|
-| `agent_id` | `COMPUTERAGENT_AGENT_ID` | **yes** | The agent's **24-hex Mongo `_id`** in AgentOS (the id in the agent's URL). Not the stable `agentId` field. |
-| `engine` | `COMPUTERAGENT_ENGINE` | **yes** | `"claude-agent-sdk"` or `"gitagent"`; an `EngineDriver` instance only as an argument. |
-| `api_key` | `LYZR_API_KEY` | **yes** | The key the SDK presents on every call as `x-api-key`. In a sandbox it is injected at creation and the egress proxy swaps it for the real one. Read **at every turn** (and at each other use): the engine's key variables and the bound MCP servers' `x-api-key` follow it, so the app server can set it from each message's `credential`. An explicit `api_key=` is kept and replaced only by its own reissued successors (§8a). |
-| `base_url` | `COMPUTERAGENT_BASE_URL` | **yes** | Route to the AgentOS agent config: the model and its MCP bindings. |
-| `guardrails_url` | `COMPUTERAGENT_GUARDRAILS_URL` | **yes** | Route to the guardrails check, for the user's message and every tool call. |
-| `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
-| `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{name}`; `{name}` is the binding's `tool_name` (AgentOS keeps it to 1–128 printable ASCII characters); the gateway takes the server id and the allowed tools from its registry. |
-| `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
-| `session_store_url` | `COMPUTERAGENT_SESSION_STORE_URL` | no | Base URL for the `http` session store (§7), e.g. `http://egress/computer-agent-api`; no query or fragment. |
-| `gap_dir` | `COMPUTERAGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
+| `agent_id` | `COMPUTER_AGENT_ID` | **yes** | The agent's **24-hex Mongo `_id`** in AgentOS (the id in the agent's URL). Not the stable `agentId` field. |
+| `engine` | `COMPUTER_AGENT_ENGINE` | **yes** | `"claude-agent-sdk"` or `"gitagent"`; an `EngineDriver` instance only as an argument. |
+| `api_key` | `COMPUTER_AGENT_EGRESS_PROXY_SECRET` | **yes** | The key the SDK presents on every call as `x-api-key`. In a sandbox it is injected at creation and the egress proxy swaps it for the real one. Read **at every turn** (and at each other use): the engine's key variables and the bound MCP servers' `x-api-key` follow it, so the app server can set it from each message's `credential`. An explicit `api_key=` is kept and replaced only by its own reissued successors (§8a). |
+| `base_url` | `COMPUTER_AGENT_EGRESS_API_URL` | **yes** | Route to the AgentOS agent config: the model and its MCP bindings. |
+| `guardrails_url` | `COMPUTER_AGENT_EGRESS_GUARDRAILS_URL` | **yes** | Route to the guardrails check, for the user's message and every tool call. |
+| `llm_url` | `COMPUTER_AGENT_EGRESS_LLM_URL` | **yes** | Route for every model call the engine makes. |
+| `mcp_url` | `COMPUTER_AGENT_EGRESS_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{name}`; `{name}` is the binding's `tool_name` (AgentOS keeps it to 1–128 printable ASCII characters); the gateway takes the server id and the allowed tools from its registry. |
+| `telemetry_url` | `COMPUTER_AGENT_EGRESS_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
+| `session_store_url` | `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` | no | Base URL for the `http` session store (§7), e.g. `http://egress/computer-agent-api`; no query or fragment. |
+| `gap_dir` | `COMPUTER_AGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
 
 The requests made from each route, all with `x-api-key: <api_key>`:
 
@@ -318,7 +318,7 @@ Every engine gets the same environment:
 ANTHROPIC_BASE_URL       = llm_url
 GITCLAW_MODEL_BASE_URL   = llm_url
 GITAGENT_MODEL_BASE_URL  = llm_url
-ANTHROPIC_API_KEY = OPENAI_API_KEY = LYZR_API_KEY = api_key   # read at every turn
+ANTHROPIC_API_KEY = OPENAI_API_KEY = COMPUTER_AGENT_EGRESS_PROXY_SECRET = api_key   # read at every turn
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = 1
 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1
 DISABLE_AUTOUPDATER = 1
@@ -385,7 +385,7 @@ Two more kinds ship with the SDK:
 | `mongo` | `url` **(required)**, `database`, `collection`, `owner_user`, `owner_group` | One document per transcript, uuid-deduped. Warns loudly when `database` is unset — the fallback is *not* the database AgentOS reads. Needs the `[mongo]` extra. |
 | `http` | `base_url` **(required unless `session_store_url` is set)**, `append_timeout`, `load_timeout` | Two verbs (`GET`/`POST {base_url}/session-store/entries`) against the session-store service, which does the write — for a harness that cannot hold a database credential. `load` never raises: a store outage costs a session its resume, not its life. |
 
-**The `http` kind behind the egress proxy.** Set `COMPUTERAGENT_SESSION_STORE_URL=http://egress/computer-agent-api`
+**The `http` kind behind the egress proxy.** Set `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL=http://egress/computer-agent-api`
 (or `session_store_url=`), so requests go to `http://egress/computer-agent-api/session-store/entries`:
 
 - with the setting, kind `http` (a string or a descriptor) takes its `base_url` from it, and any
@@ -393,9 +393,9 @@ Two more kinds ship with the SDK:
 - without it, the descriptor's `options.base_url` is required (`baseUrl` is not read);
 - a store instance or any other kind ignores the setting.
 
-The store sends only `x-api-key`: `LYZR_API_KEY` read at each request, as the newest sandbox token
+The store sends only `x-api-key`: `COMPUTER_AGENT_EGRESS_PROXY_SECRET` read at each request, as the newest sandbox token
 (§8a). There is no store token and no refresh; a `token` option is ignored. The proxy swaps the key
-for the Lyzr key and names the session the service scopes the entries to. Without `LYZR_API_KEY` no
+for the Lyzr key and names the session the service scopes the entries to. Without `COMPUTER_AGENT_EGRESS_PROXY_SECRET` no
 credential is sent (a local, unauthenticated store).
 
 An unknown kind raises `UnknownSessionStoreError` naming the registered set, and a known kind
@@ -407,10 +407,16 @@ would double the transcript.
 
 **Multi-turn works within one `ComputerAgent`.** Each turn after the first resumes the previous turn's
 engine session automatically, so the agent remembers earlier turns whether or not a store is configured.
-To resume a conversation in a *later process*, pass a durable store plus the engine session id from the
-earlier run — read it off any message (`result.messages[-1].session_id`) and pass it back as
-`options={"resume": "<that id>"}`. Use `resume`, not `session_id`: the CLI refuses an id that already
-exists.
+
+**With `session_id=`, the store is keyed by it.** Every `append` and `load` carries that id instead of
+the Claude CLI's per-process UUID (`project_key` and `subpath` are kept), and the CLI runs under a UUID
+derived from it. So a later process, or another sandbox, built with the same `session_id` and the same
+durable store resumes the conversation on its first turn: the SDK loads the store once to decide between
+starting it and resuming it.
+
+Without `session_id`, the store is keyed by the CLI's UUID. To resume in a later process, pass that id
+from the earlier run (`result.messages[-1].session_id`) back as `options={"resume": "<that id>"}`. Use
+`resume`, not `session_id` in `options`: the CLI refuses an id that already exists.
 
 ---
 
@@ -478,12 +484,12 @@ From then on **every later egress request from every SDK client** carries the ne
   clients (httpx hooks; an httpx client you inject gets them too);
 - the Claude CLI's model and MCP calls, which go through a loopback forwarder on `127.0.0.1` (below).
 
-`Settings.api_key()` returns the newest token, and `LYZR_API_KEY` is updated so processes spawned
+`Settings.api_key()` returns the newest token, and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` is updated so processes spawned
 later inherit it. A key passed as `api_key=` follows its own chain the same way. A late reissue of an
 older token never replaces a newer key. Tokens are never logged; one INFO line records each reissue
 with its expiry.
 
-Not covered: programs the agent's own tools start (e.g. a Bash `curl` with `$LYZR_API_KEY`) carry
+Not covered: programs the agent's own tools start (e.g. a Bash `curl` with `$COMPUTER_AGENT_EGRESS_PROXY_SECRET`) carry
 the environment they were spawned with, and the SDK never sees their traffic.
 
 **The Claude CLI's forwarder.** The CLI's env and MCP headers are fixed when it is spawned, so on
@@ -693,18 +699,28 @@ pip install 'computer-agent-py[server]'
 python -m computeragent.server        # 0.0.0.0:8080; PORT overrides the port
 ```
 
-The image bakes in the agent's settings (`COMPUTERAGENT_*`, §3). CAS creates one session per sandbox
+Building the image and registering it as a Lambda MicroVM image or an AgentCore runtime is covered
+step by step in [`DEPLOYING_ON_AGENTCORE_AND_MICROVM.md`](DEPLOYING_ON_AGENTCORE_AND_MICROVM.md).
+
+The image bakes in the agent's settings (`COMPUTER_AGENT_*`, §3). CAS creates one session per sandbox
 and the server builds one `ComputerAgent` for it, with no `api_key=`:
 
-- `envs.LYZR_API_KEY` in `POST /v1/sessions` (the sandbox token) seeds `LYZR_API_KEY`; every other
-  `envs` key is ignored.
+- `envs` in `POST /v1/sessions` carries the sandbox token as `COMPUTER_AGENT_EGRESS_PROXY_SECRET`,
+  which seeds that variable, and the session's agent as `COMPUTER_AGENT_ID` (else the image's own
+  `COMPUTER_AGENT_ID`).
+- `envs` may also carry the six egress routes, `COMPUTER_AGENT_EGRESS_{API,LLM,MCP,GUARDRAILS,
+  SESSION_STORE,TELEMETRY}_URL`. Each is used only when the image's own environment does not set
+  it, so an image can pin a route; an agent factory's arguments (`create_app(agent_factory=…)`) win
+  over both. Every other `envs` key is ignored.
 - Each `POST /v1/sessions/:id/messages` may carry the turn's `credential`; it replaces
-  `LYZR_API_KEY` before the turn. The key is process-wide, so turns run one at a time per process.
+  `COMPUTER_AGENT_EGRESS_PROXY_SECRET` before the turn. The key is process-wide, so turns run one
+  at a time per process.
 - `identity` is not read (the agent is baked into the image). `engine` must be a registered engine;
   the image's own engine runs.
 - `messages` are the session's first turns, and `streamingInput: false` closes its input after
-  them. Resume across sandboxes comes from the `http` session store (`sessionStore`, §7), keyed by
-  `sessionId`.
+  them. The session's agent is built with `session_id = sessionId`, so the `http` session store
+  (`sessionStore`, §7) is keyed by the CAS session: any sandbox serving that session resumes its
+  transcript.
 
 | Route | Answer |
 |---|---|
@@ -755,3 +771,13 @@ it `linux/arm64` for AgentCore):
   - any other answer is `{relay: 1, instance, status, headers, body | bodyBase64}`;
   - a malformed envelope is that JSON with `status: 400` and code `AGENTCORE_RELAY_REQUEST_INVALID`.
 - `instance` is minted on the first invocation, so CAS can tell when AgentCore replaced the microVM.
+  The relay logs it once at INFO as `relay.instance id=<id>`.
+- Streams can be closed: AgentCore never forwards a caller's disconnect, so CAS names each answer in
+  the envelope header `x-ca-relay-stream` (a UUID v4, any case; stripped before the routes see the
+  request). `DELETE /_relay/streams/<id>` is answered by the relay itself: it closes that open
+  answer as a dropped connection would (the relayed stream ends, `/events` detaches) → relayed
+  `204`; an unknown id or one that is not a UUID v4 → relayed `404`. The relay logs
+  `relay.stream.opened` / `relay.stream.closed` with the id only.
+- A JSON answer whose envelope exceeds AgentCore's 100 MiB payload cap (roughly 75 MiB of binary
+  body, after base64) is replaced by a relayed `502` with code `AGENTCORE_RESPONSE_TOO_LARGE`
+  (`meta.maxBytes`); event streams are not capped.

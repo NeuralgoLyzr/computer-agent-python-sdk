@@ -16,7 +16,7 @@ successors, newest last. A successor is adopted only when:
   no chain yet (which becomes the root of a new chain);
 * the expiry is later than the chain's newest.
 
-A chain whose newest expiry has passed is dropped. When ``LYZR_API_KEY``
+A chain whose newest expiry has passed is dropped. When ``COMPUTER_AGENT_EGRESS_PROXY_SECRET``
 holds a token of the chain it is set to the successor, so processes spawned
 later inherit it. Tokens and header values are never logged.
 
@@ -44,7 +44,7 @@ HEADER_EXPIRES_AT = "x-cas-token-expires-at"
 TOKEN_PREFIX = "sbt_"
 MAX_TOKEN_BYTES = 4096
 
-_ENV_KEY = "LYZR_API_KEY"
+_ENV_KEY = "COMPUTER_AGENT_EGRESS_PROXY_SECRET"
 _BEARER = "bearer "
 
 

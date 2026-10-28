@@ -124,61 +124,6 @@ def otel_url() -> str | None:
     return _resolve("otel", "AGENTOS_OTEL_URL")
 
 
-def policy_config_url(name: str) -> str | None:
-    """AgentOS ingest ``policy-config/{name}`` URL, derived from the ingest
-    endpoint (``…/ingest/events`` → ``…/ingest/policy-config/{name}``).
-
-    ``None`` when no ingest endpoint is configured."""
-    base = ingest_url()
-    if not base:
-        return None
-    from urllib.parse import quote
-
-    root = base[: -len("/events")] if base.endswith("/events") else base
-    return f"{root}/policy-config/{quote(name, safe='')}"
-
-
-def fetch_policy_binding(
-    name: str, *, token: str | None = None, timeout: float = 5.0
-) -> dict[str, str] | None:
-    """Fetch the SRS policy *binding* for an agent name from AgentOS.
-
-    Returns ``{"kind": "srs", "policyId": …, "principalId": …}`` when the agent
-    has a bound policy, else ``None``. Never returns the SRS endpoint/key — those
-    stay server-side; the CAS fills them from its own env. Best-effort: any
-    network/config error logs and returns ``None`` (no policy rather than a crash).
-    """
-    url = policy_config_url(name)
-    if not url:
-        return None
-    try:
-        import httpx
-    except ImportError:  # pragma: no cover - httpx ships with [remote]/[agentos]
-        logger.debug("httpx not installed; cannot fetch AgentOS policy-config")
-        return None
-
-    headers = {"accept": "application/json"}
-    key = token or cak()
-    if key:
-        headers["authorization"] = f"Bearer {key}"
-    try:
-        resp = httpx.get(url, headers=headers, timeout=timeout)
-        resp.raise_for_status()
-        doc = resp.json()
-    except Exception as exc:  # network / DNS / TLS / bad JSON — never fatal
-        logger.warning("AgentOS policy-config fetch from %s failed (%s)", url, exc)
-        return None
-
-    policy = doc.get("policy") if isinstance(doc, dict) else None
-    if not isinstance(policy, dict) or not policy.get("policyId"):
-        return None
-    return {
-        "kind": "srs",
-        "policyId": str(policy["policyId"]),
-        "principalId": str(policy.get("principalId") or name),
-    }
-
-
 def bind_policy(
     agent_id: str, policy_id: str | None, *, token: str | None = None, timeout: float = 10.0
 ) -> dict[str, str] | None:

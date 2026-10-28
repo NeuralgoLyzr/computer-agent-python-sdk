@@ -67,7 +67,7 @@ def key_envs(api_key: str) -> dict[str, str]:
     return {
         "ANTHROPIC_API_KEY": api_key,
         "OPENAI_API_KEY": api_key,
-        "LYZR_API_KEY": api_key,
+        "COMPUTER_AGENT_EGRESS_PROXY_SECRET": api_key,
     }
 
 

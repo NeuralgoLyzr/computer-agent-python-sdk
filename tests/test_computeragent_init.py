@@ -249,7 +249,7 @@ def test_gateway_envs_reach_the_coordinator(agent_doc):
     coordinator = agent._coordinator  # type: ignore[attr-defined]
     envs = coordinator._envs
 
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LYZR_API_KEY"):
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "COMPUTER_AGENT_EGRESS_PROXY_SECRET"):
         assert name not in envs  # added at every turn
     assert coordinator._api_key() == KEY
     assert envs["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
