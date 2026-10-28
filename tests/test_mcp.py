@@ -30,7 +30,7 @@ BASE = "http://localhost:8788/agentos/api"
 URL = f"{BASE}/v1/agents/{AGENT_ID}"
 KEY = "ags_testkey"
 LLM_URL = "http://egress.internal/llm"
-MCP_URL = "http://egress.internal/mcp"
+MCP_URL = "http://egress.internal/mcp/v1"
 GUARDRAILS = "http://egress.internal/guardrails"
 CHECK_URL = f"{GUARDRAILS}/v1/check"
 
@@ -105,7 +105,7 @@ def test_a_shared_binding_becomes_a_server_on_mcp_url():
     assert servers == {
         "jira": {
             "type": "http",
-            "url": f"{MCP_URL}/srv_1?tools=search%2Ccreate",
+            "url": f"{MCP_URL}/jira",
             "headers": {"x-api-key": KEY},
             "alwaysLoad": True,
         }
@@ -113,22 +113,42 @@ def test_a_shared_binding_becomes_a_server_on_mcp_url():
     assert allowed == ["mcp__jira"]
 
 
-def test_no_action_names_means_no_tools_query():
-    servers, _ = build_servers([McpBinding("srv_1", "jira")])
-    assert servers["jira"]["url"] == f"{MCP_URL}/srv_1"
+@pytest.mark.parametrize(
+    "binding",
+    [McpBinding("srv_1", "jira", ("search", "create")), McpBinding("a/b c&d", "jira")],
+)
+def test_the_url_has_no_query(binding):
+    servers, _ = build_servers([binding])
+
+    url = urlsplit(servers["jira"]["url"])
+    assert url.query == ""
+    assert url.path.endswith("/jira")
 
 
-def test_server_id_and_tools_are_url_encoded():
-    servers, _ = build_servers([McpBinding("a/b c", "x", ("t&1",))])
-    assert servers["x"]["url"] == f"{MCP_URL}/a%2Fb%20c?tools=t%261"
-
-
-def test_a_sign_in_binding_uses_the_callers_own_server():
+def test_a_sign_in_binding_is_addressed_by_name():
     servers, _ = build_servers(
         [McpBinding("srv_creator", "jira", persist_auth=False, your_server_id="srv_mine")]
     )
 
-    assert servers["jira"]["url"] == f"{MCP_URL}/srv_mine"
+    assert servers["jira"]["url"] == f"{MCP_URL}/jira"
+
+
+@pytest.mark.parametrize(
+    ("name", "segment"),
+    [
+        ("My Server", "My%20Server"),
+        ("jira-cloud", "jira-cloud"),
+        ("a/b", "a%2Fb"),
+        ("a.b~c", "a.b~c"),
+        ("9lives", "9lives"),
+        ("n" * 128, "n" * 128),
+    ],
+)
+def test_ascii_names_are_one_encoded_segment(name, segment):
+    servers, allowed = build_servers([McpBinding("srv_1", name)])
+
+    assert servers[name]["url"] == f"{MCP_URL}/{segment}"
+    assert allowed == [f"mcp__{name}"]
 
 
 def test_a_sign_in_binding_without_a_connection_is_withheld(caplog):
@@ -166,7 +186,7 @@ def test_a_trailing_slash_on_mcp_url_does_not_double_up():
         api_key=KEY,
         anthropic_shaped=True,
     )
-    assert servers["jira"]["url"] == f"{MCP_URL}/srv_1"
+    assert servers["jira"]["url"] == f"{MCP_URL}/jira"
 
 
 # ── through ComputerAgent ────────────────────────────────────────────────────
@@ -229,12 +249,12 @@ async def test_bound_servers_reach_the_engine(agent_doc):
         await agent.chat("hi")
         bound = agent._coordinator._mcp_servers  # type: ignore[attr-defined]
 
-    assert bound["jira"]["url"] == f"{MCP_URL}/srv_1"
+    assert bound["jira"]["url"] == f"{MCP_URL}/jira"
     options = engine.contexts[0].manifest.options
     # The Claude CLI reaches it through the loopback forwarder, path unchanged.
     sent = urlsplit(options["mcp_servers"]["jira"]["url"])
     assert sent.hostname == "127.0.0.1"
-    assert sent.path == urlsplit(f"{MCP_URL}/srv_1").path
+    assert sent.path == urlsplit(f"{MCP_URL}/jira").path
     assert "mcp__jira" in options["allowed_tools"]
 
 

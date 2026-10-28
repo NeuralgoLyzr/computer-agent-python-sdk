@@ -52,6 +52,11 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   engine's `PreToolUse` hook passes it, `PolicyToolAuthorizer` puts it in the
   policy input as `call_id`, and a call without one is denied.
 - A rewritten message carries the gateway's masked text (`[EMAIL]`).
+- **BREAKING: MCP servers are addressed by name.** Each bound server is
+  `{mcp_url}/{tool_name}` (one percent-encoded segment) with no query; the
+  server id path and the `?tools=` query are gone, since the gateway resolves
+  both from its registry. Behind the egress proxy `COMPUTERAGENT_MCP_URL` is
+  `http://egress/mcp/v1`.
 - **BREAKING: the `http` session store sends only `x-api-key`.** The store
   token (`x-ca-session-store-token`), its refresh against `/v1/auth/token`, the
   `token` / `auto_refresh` arguments, `TOKEN_HEADER` and `expiry_of` are gone;
