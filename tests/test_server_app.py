@@ -80,6 +80,36 @@ async def test_the_session_agent_comes_from_envs(agent_doc):
     assert env_key() == "sbt_1"
 
 
+@respx.mock
+async def test_session_egress_urls_yield_to_the_image(agent_doc, monkeypatch):
+    egress = "https://egress.uat.example"
+    session_urls = {
+        "COMPUTER_AGENT_EGRESS_API_URL": f"{egress}/computer-agent-api/agentos/api",
+        "COMPUTER_AGENT_EGRESS_LLM_URL": f"{egress}/llm",
+        "COMPUTER_AGENT_EGRESS_MCP_URL": f"{egress}/mcp/v1",
+        "COMPUTER_AGENT_EGRESS_GUARDRAILS_URL": f"{egress}/guardrails",
+        "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL": f"{egress}/computer-agent-api",
+        "COMPUTER_AGENT_EGRESS_TELEMETRY_URL": f"{egress}/otlp",
+    }
+    for var in session_urls:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("COMPUTER_AGENT_EGRESS_LLM_URL", "https://image.own/llm")  # the image's env
+    mock_backends(agent_doc)
+    calls: list = []
+    envs = {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_1", **session_urls}
+    async with client_for(make_app(FakeEngine(), calls)) as client:
+        r = await client.post("/v1/sessions", json=session_body(envs=envs))
+
+    assert r.status_code == 201
+    assert {k: v for k, v in calls[0].items() if k.endswith("_url")} == {
+        "base_url": f"{egress}/computer-agent-api/agentos/api",
+        "mcp_url": f"{egress}/mcp/v1",
+        "guardrails_url": f"{egress}/guardrails",
+        "session_store_url": f"{egress}/computer-agent-api",
+        "telemetry_url": f"{egress}/otlp",
+    }  # llm_url: the image's own variable wins
+
+
 def test_the_default_factory_passes_no_api_key(monkeypatch):
     seen = {}
 

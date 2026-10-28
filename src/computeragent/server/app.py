@@ -17,12 +17,14 @@ status codes and error codes follow the reference harness,
     GET  /ping, POST /invocations                  AgentCore: the same routes in relay envelope v1 (relay.py)
 
 One ``ComputerAgent`` per session, built from the image's settings
-(``COMPUTER_AGENT_*``) with no ``api_key=``. Old CAS passes two of them in the
+(``COMPUTER_AGENT_*``) with no ``api_key=``. Old CAS passes settings in the
 session's ``envs``: ``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` (the sandbox token)
-seeds the process environment, and ``COMPUTER_AGENT_ID`` is the session's
-agent (else the image's own ``COMPUTER_AGENT_ID``); every other ``envs`` key is
-ignored. Each message's ``credential`` replaces the token before its turn. The
-token is process-wide, so turns run one at a time per process.
+seeds the process environment; ``COMPUTER_AGENT_ID`` is the session's agent
+(else the image's own); and each ``COMPUTER_AGENT_EGRESS_*_URL`` is used only
+when the image's environment does not set it (an agent factory's own arguments
+win over both). Every other ``envs`` key is ignored. Each message's
+``credential`` replaces the token before its turn. The token is process-wide,
+so turns run one at a time per process.
 ``engine`` is checked against the registered engines and the image's own
 engine runs; ``identity`` is not read.
 ``messages`` are the session's first turns and ``streamingInput: false`` closes
@@ -77,6 +79,16 @@ ERROR_SOURCE = "COMPUTERAGENT_SERVER"
 #: also the variable the SDK reads it from.
 TOKEN_ENV = "COMPUTER_AGENT_EGRESS_PROXY_SECRET"
 AGENT_ID_ENV = "COMPUTER_AGENT_ID"
+#: Egress routes CAS may pass in ``envs`` (``ComputerAgent`` argument names).
+#: The image's own variables and the agent factory's arguments win over them.
+SESSION_URL_SETTINGS = (
+    "base_url",
+    "llm_url",
+    "mcp_url",
+    "guardrails_url",
+    "telemetry_url",
+    "session_store_url",
+)
 
 #: Builds a session's agent: (session_id, options, session_store, on_tool_call) → ComputerAgent.
 AgentFactory = Callable[..., Any]
@@ -431,6 +443,12 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
         agent_kwargs: dict[str, Any] = {}
         if envs.get(AGENT_ID_ENV, "").strip():
             agent_kwargs["agent_id"] = envs[AGENT_ID_ENV].strip()
+        from ..harness.settings import ENV_VARS
+
+        for name in SESSION_URL_SETTINGS:
+            value = envs.get(ENV_VARS[name], "").strip()
+            if value and not os.environ.get(ENV_VARS[name], "").strip():
+                agent_kwargs[name] = value
         old = sessions.pop(sid, None)
         if old is not None:
             await old.cancel()

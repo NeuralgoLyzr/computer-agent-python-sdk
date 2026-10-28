@@ -124,15 +124,15 @@ def make_app(engine: FakeEngine, calls: list[dict[str, Any]] | None = None) -> A
         if calls is not None:
             calls.append(dict(kwargs))
         kwargs.setdefault("agent_id", AGENT_ID)
-        return ComputerAgent(
-            base_url=BASE,
-            engine=engine,
-            llm_url="http://egress.internal/llm",
-            mcp_url="http://egress.internal/mcp/v1",
-            guardrails_url=GUARDRAILS,
-            policy_decider=no_opinion if engine.ask_permission else None,
-            **kwargs,
-        )
+        fixed = {  # the factory's own arguments win over the session's (as in an image's code)
+            "base_url": BASE,
+            "engine": engine,
+            "llm_url": "http://egress.internal/llm",
+            "mcp_url": "http://egress.internal/mcp/v1",
+            "guardrails_url": GUARDRAILS,
+            "policy_decider": no_opinion if engine.ask_permission else None,
+        }
+        return ComputerAgent(**{**kwargs, **fixed})
 
     return create_app(agent_factory=factory)
 
