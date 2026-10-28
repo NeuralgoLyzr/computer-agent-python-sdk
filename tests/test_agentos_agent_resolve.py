@@ -97,6 +97,25 @@ def test_trailing_slash_on_base_url_does_not_double_the_path(agent_doc):
     assert str(route.calls.last.request.url) == URL
 
 
+EGRESS_BASE = "http://egress/computer-agent-api/agentos/api"
+
+
+@pytest.mark.parametrize("base", [EGRESS_BASE, EGRESS_BASE + "/", EGRESS_BASE + "/v1"])
+@respx.mock
+def test_egress_base_builds_single_prefix(agent_doc, base):
+    """Behind the egress proxy the agent document is read from its
+    /computer-agent-api prefix, with exactly one /agentos/api."""
+    route = respx.get(f"{EGRESS_BASE}/v1/agents/{AGENT_ID}").mock(
+        return_value=httpx.Response(200, json=agent_doc)
+    )
+
+    _resolve(base_url=base)
+
+    request = route.calls.last.request
+    assert str(request.url) == f"{EGRESS_BASE}/v1/agents/{AGENT_ID}"
+    assert request.headers["x-api-key"] == KEY
+
+
 # ── model precedence ─────────────────────────────────────────────────────────
 
 
