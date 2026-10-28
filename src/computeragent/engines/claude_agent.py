@@ -151,8 +151,34 @@ def _build_options(ctx: EngineContext) -> Any:
             payload.get("permission_mode"),
         )
 
+    # Supervised orchestration: the harness gave this session a fan-out hook, so
+    # expose it to the orchestrator as an in-process `dispatch_many` MCP tool.
+    if getattr(ctx, "dispatch", None) is not None:
+        from ..orchestration.dispatch_tool import (
+            DISPATCH_SERVER_NAME,
+            ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME,
+            build_dispatch_server,
+        )
+
+        servers = dict(payload.get("mcp_servers") or {})
+        servers[DISPATCH_SERVER_NAME] = build_dispatch_server(ctx.dispatch)
+        payload["mcp_servers"] = servers
+        # If the agent has an explicit tool allowlist, add the dispatch tool to
+        # it — otherwise injecting the server would hand the orchestrator a tool
+        # its own allowlist then forbids, and the fan-out would be unreachable
+        # for a reason nothing reports.
+        allowed = payload.get("allowed_tools")
+        if isinstance(allowed, list) and (
+            ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME not in allowed
+        ):
+            payload["allowed_tools"] = [
+                *allowed,
+                ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME,
+            ]
+        logger.info("orchestration.dispatch_tool_enabled: session=%s", ctx.session_id)
+
     if ctx.policy_decider is not None:
-        bound = _bind_session_id(ctx.policy_decider, ctx.session_id)
+        bound = _bypass_control_plane_tools(_bind_session_id(ctx.policy_decider, ctx.session_id))
         payload["can_use_tool"] = bound
         # Policy enforcement that survives prompt-skipping permission modes.
         # ``can_use_tool`` only fires when the CLI's permission rules evaluate
@@ -181,6 +207,34 @@ def _build_options(ctx: EngineContext) -> Any:
         if ctx.manifest.name:
             options.agent_name = ctx.manifest.name  # type: ignore[attr-defined]
     return options
+
+
+def _bypass_control_plane_tools(decider: Any) -> Any:
+    """Allow the harness's own orchestration tools without consulting the decider.
+
+    ``mcp__orchestration__dispatch_many`` exists only because the harness put it
+    there, and calling it touches no file, host or network — everything the
+    workers it starts then DO arrives back at this same boundary, where the same
+    policy still applies in full. So the only thing a verdict on it can change
+    is whether orchestration works, and both verdicts are bad: a default-deny
+    policy written for the agent's real tools denies it by omission, and a
+    decider that cannot reach its service fails it closed and kills the
+    orchestrator's turn.
+
+    See :data:`computeragent.orchestration.ORCHESTRATION_INTERNAL_TOOLS` for the
+    full reasoning and the rule for adding another tool to the set.
+    """
+    from ..orchestration.contract import is_orchestration_internal_tool
+
+    async def _gate(tool_name: str, tool_input: dict[str, Any], context: Any) -> Any:
+        if is_orchestration_internal_tool(tool_name):
+            from claude_agent_sdk.types import PermissionResultAllow
+
+            logger.info("policy.control_plane_bypass: tool=%s", tool_name)
+            return PermissionResultAllow(updated_input=tool_input)
+        return await decider(tool_name, tool_input, context)
+
+    return _gate
 
 
 def _policy_pretooluse_matcher(decider: Any) -> Any:

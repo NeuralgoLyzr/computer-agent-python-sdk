@@ -61,6 +61,12 @@ class AgentManifest:
     # (e.g. GAP human-in-the-loop → permission mode) win over caller intent.
     # Excluded from equality — callables compare by identity only.
     harden: Callable[[dict[str, Any]], dict[str, Any]] | None = field(default=None, compare=False)
+    # How this agent fans out worker sessions, when it does. ``None`` for a
+    # plain single agent, which is every agent that declares no ``orchestration``
+    # block and no ``use:`` crew — so the single-agent path is untouched.
+    # Typed loosely to keep ``protocol_types`` free of an import from the
+    # orchestration package (which imports this module).
+    orchestration: Any = None
 
 
 @dataclass(frozen=True)
@@ -112,6 +118,13 @@ class EngineEvent:
         * ``session_ended`` — emitted by the harness coordinator. ``payload``
           carries ``is_error``, ``duration_ms``, ``num_turns``,
           ``total_cost_usd``.
+        * ``worker_wave_started`` / ``worker_started`` /
+          ``worker_completed`` / ``worker_wave_ended`` /
+          ``orchestration_scorecard`` — a sub-agent fan-out, surfaced on the
+          ORCHESTRATOR's stream so the 30–120s gap while its workers run is
+          explained rather than silent. ``payload`` is a plain dict carrying
+          ``session_id`` + ``wave_id`` and the per-kind fields; see
+          :mod:`computeragent.orchestration.wave_events`.
     """
 
     kind: Literal[
@@ -120,6 +133,11 @@ class EngineEvent:
         "usage_snapshot",
         "permission_request",
         "session_ended",
+        "worker_wave_started",
+        "worker_started",
+        "worker_completed",
+        "worker_wave_ended",
+        "orchestration_scorecard",
     ]
     payload: Any = None
     input_tokens: int | None = None
@@ -154,6 +172,15 @@ class EngineContext:
     #: turn otherwise starts a fresh engine session, and a multi-turn chat
     #: would have no memory of the turn before.
     resume_session_id: str | None = None
+    #: Supervised orchestration only. When set, the engine should expose an
+    #: in-session fan-out tool (``dispatch_many``) that calls this hook with the
+    #: workers the model asked for and returns their reports. Absent for every
+    #: ordinary session, so an engine that ignores it behaves exactly as before.
+    #: Signature: ``async (Sequence[DispatchRequestItem]) ->
+    #: Sequence[DispatchResultItem]``. Typed ``Any`` because naming those
+    #: types here would import the orchestration package, which imports this
+    #: module.
+    dispatch: Any = None
 
 
 @dataclass

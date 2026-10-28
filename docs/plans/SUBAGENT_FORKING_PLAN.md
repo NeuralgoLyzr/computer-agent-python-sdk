@@ -1,6 +1,26 @@
 # Sub-agent forking / orchestration — implementation plan (Python SDK)
 
-**Status:** plan only. No implementation code has been written; no source file has been changed.
+> **Status: IMPLEMENTED in 0.6.0.** This document is kept as the design record.
+> The shipped code follows it in substance and diverges in six places, each for a
+> reason recorded below and at the site that makes it. Read
+> [§16 of the guide](../USING_THE_SDK.md) for how to use what shipped; read this
+> for why it is shaped the way it is.
+>
+> | Planned here | Shipped | Why |
+> |---|---|---|
+> | `src/computeragent/harness/orchestration/` | `src/computeragent/orchestration/` | It is not part of the harness — the identity loader produces the spec and the harness only drives it. Nesting it under `harness/` would have made `identity/gap_subagents.py` import from `harness/`, which nothing else in `identity/` does. |
+> | `wcmatch.glob.globmatch` | a self-contained minimatch subset (`globmatch.py`) | A library with two runtime dependencies should not gain a third for one matcher. The subset is a direct translation of the features a scope glob uses, pinned against minimatch's own behaviour — including that `a/**` does not match `a`. |
+> | Withhold the primary `ResultMessage`; hold back the `None` sentinel; two watchdogs | The roster text streams; the closing turn's answer is what `ChatResult` and telemetry report | Withholding requires buffering a turn the caller is already consuming. The property that matters — *the run reports the answer, not the roster* — is preserved, and the divergence is stated in the guide and the changelog rather than hidden. |
+> | `OrchestrationLimits` (`max_depth`, `max_children`, `child_timeout_s`) | not shipped; `max_parallel` and the stage budget only | Deliberately deferred. The one they were guarding against — unbounded recursion — is closed outright instead: a worker coordinator is built with `drive_orchestration=False`, so a fan-out is single-level by construction, the same property TS gets from starting workers with `runSession` rather than `driveSession`. A worker-level timeout remains genuinely missing; see below. |
+> | 15 modules, one per TS file | 18 | `globmatch.py`, `composite_decider.py` and `path_jail.py` (the segment half only) are separate, because each is independently testable and two of them are the pieces most likely to be wrong. |
+> | `fork.py` mechanisms lifted | parent linkage and the deep MCP merge were already in `coordinator.py` and are used as-is; `WaveHandle.cancel()` was not needed | The wave is awaited inside the turn, so `dispose()` already tears it down with the turn. |
+>
+> **Still missing, and worth knowing:** there is no per-worker timeout. A worker
+> that wedges holds its slot in the pool indefinitely and the wave never ends.
+> The TS subsystem has the same hole. `asyncio.wait_for` around the caller's
+> `chat()` bounds the whole turn but cannot attribute the failure to a worker.
+
+**Original status when written:** plan only. No implementation code had been written.
 **Target repo:** `/Users/vraj-parikh/Documents/Lyzr/computer-agent-python-sdk`
 **Ported from:** `/Users/vraj-parikh/Documents/Lyzr/computeragent-enterprise` (`packages/harness-server`, `packages/protocol`, `packages/identity-gitagentprotocol`)
 **Baseline assumed:** the single-run-mode collapse — `ComputerAgent(base_url, agent_id, api_key)` resolves `GET {base}/v1/agents/{id}` and runs the agent locally through `HarnessCoordinator` + `ClaudeAgentEngine`. The resolved agent doc carries an `orchestration` field (`null` for a plain agent). `src/computeragent/harness/fork.py` is deleted as part of that collapse.

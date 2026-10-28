@@ -36,6 +36,18 @@ EventKind = Literal[
     # the time-to-first-token span attribute in OtelSink; the AgentOS HTTP sink
     # skips it (no audit value), so it never reaches Mongo ingest.
     "response_first_token",
+    # Sub-agent fan-out, mirrored from the orchestrator's engine stream. A
+    # worker's OWN events arrive separately, stamped with `parent_session_id`;
+    # these five describe the WAVE — what was planned, what each worker cost and
+    # wrote, what merged, what conflicted, and the gate verdict. The AgentOS
+    # HTTP sink skips them (the ingest projection has no writer for a wave, so
+    # forwarding would be noise); a caller's own sink, and the chat stream, see
+    # them.
+    "worker_wave_started",
+    "worker_started",
+    "worker_completed",
+    "worker_wave_ended",
+    "orchestration_scorecard",
 ]
 
 

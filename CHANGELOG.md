@@ -5,6 +5,102 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-09-17
+
+### Added
+
+- **Sub-agent fan-out.** An agent that declares `orchestration:` in its GAP repo can now split a
+  task across worker sub-agents that run concurrently, each as its own session with its own
+  workspace, telemetry and guardrail — not the Claude CLI's in-context `Task` tool. Ported from the
+  TypeScript harness-server's orchestration services. See §16 of `docs/USING_THE_SDK.md`.
+
+  Two surfaces. **`roster`**: the orchestrator's turn ends with a JSON block naming its workers; the
+  harness parses it, fans out, and feeds the reports back for one closing turn that writes the
+  answer. **`supervised`**: the orchestrator gets an in-session `mcp__orchestration__dispatch_many`
+  tool and asks for workers mid-turn.
+
+  Two isolation strategies. **`worktree`** (default): each worker edits the orchestrator's own repo
+  in its own `git worktree` off a shared baseline, so `git diff` is that worker's exact record and
+  the integration merge measures scope overlap for free — a conflict IS the finding. **`none`**:
+  each worker clones the repo its crew entry's `use:` names.
+
+  New `agents/<name>.yaml` key **`use:`**, which makes that file a referenced worker rather than an
+  embedded sub-agent, with `separate_session`, `scope`, `budget_usd`, `max_turns`, `model`, `tools`
+  and `mcp` alongside it. `load_gap_subagents` is unchanged for every repo that has none.
+
+- **Five new `EngineEvent` / telemetry kinds** — `worker_wave_started`, `worker_started`,
+  `worker_completed`, `worker_wave_ended`, `orchestration_scorecard` — on the orchestrator's own
+  chat stream, so the 30–120s gap while its workers run is explained rather than silent. They reach
+  a caller's own sinks; they are deliberately **not** forwarded to AgentOS ingest, whose projection
+  has no writer for a wave. Nothing is lost: each worker is its own session and its events arrive
+  stamped with `parent_session_id`.
+
+- **Per-worker scope guard.** `scope.write` denies `Write`/`Edit`/`MultiEdit`/`NotebookEdit` outside
+  the declared globs, enforced through the same `PreToolUse` path that makes `policy_decider` work
+  under `bypassPermissions`. Globs are minimatch-shaped (`*` stops at a separator, `**` crosses
+  them, `{a,b}` alternates), translated in-process — `fnmatch` would have made every scope wider
+  than it reads. A shell tool is blind, so `Bash` is allowed and measured afterwards against the
+  worktree diff.
+
+- **Fair-share wave budget.** `orchestration.budget_usd` is a stage budget; each worker's cap is the
+  smaller of its own and its fair share of what is left, because workers run concurrently. A wave
+  whose share falls below $0.05 per worker is refused before any spend.
+
+- **New public exports**: `OrchestrationSpec`, `WorkerCrewEntry`, `WorkerScope`, `RosterEntry`,
+  `WorkerResult`, `OrchestrationMode`, `OrchestrationIsolation`, `CollectMode`,
+  `ScopeGuardDecider`, `is_orchestration_internal_tool`,
+  `ORCHESTRATION_SUPERVISED_DISPATCH_MANY_TOOL_NAME`. `AgentManifest` gains `orchestration`;
+  `EngineContext` gains `dispatch`.
+
+- `examples/e2e/subagent_live_run.py` — nine staged checkpoints. `--scripted` needs no credentials
+  and asserts on a sentinel file per worker, so a model that paraphrases plausibly cannot pass it.
+
+### Changed
+
+- **An agent with `orchestration` set is no longer refused.** It used to be, because it would
+  otherwise have run as a plain single agent. The registry's block (`mode`, `maxParallel`,
+  `isolation`, `collect`, `budgetUsd`) now layers **over** what the GAP repo declares, field by
+  field — the repo is the only place that can name a crew, the registry is where an operator turns a
+  knob without a commit. A value the registry accepted but this run mode cannot honour is refused by
+  name rather than coerced.
+
+- **A bound guardrail is inherited by every worker.** Without it, the orchestrator's every tool call
+  was gated while its workers' `Bash`/`Write`/MCP calls ran through nothing. Where a worker has both
+  a scope and an inherited policy, the two compose deny-wins, cheapest first.
+
+- **`mcp__orchestration__dispatch_many` bypasses the policy decider.** It touches no file, host or
+  network, and everything the workers it starts then do arrives back at the same tool boundary where
+  the same policy applies in full — while a default-deny policy written for the agent's real tools
+  would deny every fan-out by omission. The bypass is logged.
+
+### Fixed
+
+- **`use: ssh://git@host/org/repo` resolved to `ssh://git`.** The TS original searches the whole
+  string for the `@ref` separator, so a scheme's own `//` supplies the preceding slash and the split
+  lands inside the URL — producing an address that cannot clone. This port searches only after the
+  scheme, which keeps every form TS gets right and stops mangling the one it does not.
+
+### Known divergences from the hosted harness
+
+- **The roster text still reaches your stream.** The hosted harness withholds it; this SDK streams
+  events live, so by the time the harness knows what the text was it has already been yielded. The
+  `ChatResult` and the `session_ended` telemetry still carry the closing answer. Suppress raw
+  assistant text from `worker_wave_started` onwards, or set `ORCHESTRATOR_SYNTHESIS=0` to skip the
+  closing turn.
+- **An inline worker's identity is never written into its worktree.** TS materialises a synthetic
+  two-line `agent.yaml` there and then restores it from the baseline, because otherwise every
+  worker's branch modifies that file and any wave of ≥2 workers conflicts on it. An identity loader
+  here is just an object that returns a manifest, so the worker gets its minimal identity without a
+  byte landing in the worktree. The restore is still performed, as a belt-and-braces measure.
+- **The gitclaw-shaped append target is `system_prompt`, not `system_prompt_suffix`.** This SDK's
+  `GitAgentEngine` reads only the former, so writing a suffix key would be silently dropped.
+
+### Known gap
+
+- **A worker has no timeout.** One that wedges holds its slot in the pool and the wave never ends;
+  the stage budget bounds spend, not time. The TypeScript subsystem has the same hole. Bound the
+  whole turn with `asyncio.wait_for` — it cannot attribute the failure to a worker, but it ends.
+
 ## [0.5.0] — 2026-09-16
 
 ### Added
