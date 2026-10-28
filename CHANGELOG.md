@@ -128,6 +128,11 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 
 ### Removed
 
+- **`computeragent.agentos.policy_config_url` and `fetch_policy_binding`.** Nothing
+  in the SDK called them since 0.4.0, and AgentOS has dropped the
+  `ingest/policy-config/{name}` route they read (the agent gateway applies org
+  and agent policies), so a direct caller got a 404 that looked like "no policy".
+
 - **BREAKING: the SDK's own policy resolution.** No org RAI policies are read
   (`/v3/org/rai-policy`), the agent document's `rai_policy_id` is ignored and
   `ResolvedAgent.rai_policy_id` is gone, and no SRS route
