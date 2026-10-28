@@ -19,8 +19,7 @@ export COMPUTERAGENT_SRS_URL=http://egress/srs              # guardrail checks
 export COMPUTERAGENT_LLM_URL=http://egress/llm              # every model call
 export COMPUTERAGENT_MCP_URL=http://egress/mcp              # MCP servers bound in AgentOS
 export LYZR_API_KEY=...                                     # sent as x-api-key; swapped by the proxy
-# optional: COMPUTERAGENT_TELEMETRY_URL (OTLP), COMPUTERAGENT_EVENTS_URL (dashboard events),
-#           COMPUTERAGENT_GAP_DIR (GAP mode)
+# optional: COMPUTERAGENT_TELEMETRY_URL (OTLP), COMPUTERAGENT_GAP_DIR (GAP mode)
 ```
 
 ```python

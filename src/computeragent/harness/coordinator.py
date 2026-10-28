@@ -382,7 +382,7 @@ class HarnessCoordinator:
         # treats N chats as one conversation. It carries identity + the first
         # prompt for the AgentOS server's first-turn seeding of
         # sessions[].entries (the server-side ingest projection owns that write;
-        # AgentOSHttpSink just forwards the event). Subsequent chats emit
+        # the sink just forwards the event). Subsequent chats emit
         # user_message events so each new prompt appends to entries without
         # re-seeding. The OtelSink captures per-turn content via turn_started
         # (emitted below), not via session_started.

@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 @pytest.fixture(autouse=True)
 def _reset_pipeline(monkeypatch):
     """Drop the cached telemetry pipeline before/after each test, and disable
-    env-driven auto-attachment of OtelSink / AgentOSHttpSink. Tests that
-    exercise those sinks attach them explicitly via ``configure(sinks=[...])``.
+    env-driven auto-attachment of OtelSink. Tests that
+    exercise that sink attach them explicitly via ``configure(sinks=[...])``.
     """
     monkeypatch.setenv("COMPUTERAGENT_OTEL", "disabled")
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)

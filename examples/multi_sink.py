@@ -1,14 +1,12 @@
-"""Both OTel and AgentOS sinks active, with PII redaction + guardrails in front.
+"""The OTel sink with PII redaction + guardrails in front.
 
 A plausible prod config: every run emits an OTel trace to New Relic
-(or ClickHouse, or wherever), and AgentOS shows the agent + logs in the
-frontend. PII is masked at the package boundary so neither sink ever sees
-plaintext emails / phone numbers / etc.
+(or ClickHouse, or wherever). PII is masked at the package boundary so the
+sink never sees plaintext emails / phone numbers / etc.
 
 Run:
     pip install 'computer-agent-py[all]'
     export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-    export AGENTOS_INGEST_URL=http://localhost:8788/agentos/api/ingest/events
     export ANTHROPIC_API_KEY=sk-ant-...
     python examples/multi_sink.py
 """
@@ -26,7 +24,7 @@ from computeragent import (
     configure,
     query,
 )
-from computeragent.telemetry.sinks import AgentOSHttpSink, OtelSink
+from computeragent.telemetry.sinks import OtelSink
 from computeragent.types import ResultMessage
 
 
@@ -42,7 +40,6 @@ async def main() -> None:
         ],
         sinks=[
             OtelSink(),  # picks up OTEL_EXPORTER_OTLP_ENDPOINT
-            AgentOSHttpSink(url=os.environ["AGENTOS_INGEST_URL"]),
         ],
         service_name="acme-assist-qa",
     )

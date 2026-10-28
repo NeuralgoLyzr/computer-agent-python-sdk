@@ -44,7 +44,6 @@ def resolve(env, **kw):
         agent_api_url=None,
         srs_url=None,
         telemetry_url=None,
-        events_url=None,
         gap_dir=None,
     )
     params.update(kw)
@@ -62,7 +61,6 @@ def test_every_setting_has_an_env_var():
         "agent_api_url": "COMPUTERAGENT_AGENT_API_URL",
         "srs_url": "COMPUTERAGENT_SRS_URL",
         "telemetry_url": "COMPUTERAGENT_TELEMETRY_URL",
-        "events_url": "COMPUTERAGENT_EVENTS_URL",
         "gap_dir": "COMPUTERAGENT_GAP_DIR",
     }
 
@@ -125,7 +123,7 @@ def test_every_missing_setting_is_reported_at_once():
 
     message = str(exc.value)
     for name, var in ENV_VARS.items():
-        if name in ("gap_dir", "telemetry_url", "events_url"):
+        if name in ("gap_dir", "telemetry_url"):
             assert name not in message
             continue
         assert f"{name} (or {var})" in message
@@ -209,26 +207,26 @@ def test_a_url_setting_must_be_http(bad):
         resolve({**FULL_ENV, "COMPUTERAGENT_LLM_URL": bad})
 
 
-def test_the_telemetry_urls_are_optional():
-    settings = resolve(FULL_ENV)
-
-    assert settings.telemetry_url is None
-    assert settings.events_url is None
+def test_the_telemetry_url_is_optional():
+    assert resolve(FULL_ENV).telemetry_url is None
 
 
-def test_the_telemetry_urls_come_from_their_env_vars():
-    settings = resolve(
-        {
-            **FULL_ENV,
-            "COMPUTERAGENT_TELEMETRY_URL": "http://egress/otlp/",
-            "COMPUTERAGENT_EVENTS_URL": "http://egress/ingest",
-        }
-    )
+def test_the_telemetry_url_comes_from_its_env_var():
+    settings = resolve({**FULL_ENV, "COMPUTERAGENT_TELEMETRY_URL": "http://egress/otlp/"})
 
     assert settings.telemetry_url == "http://egress/otlp"
-    assert settings.events_url == "http://egress/ingest"
 
 
 def test_an_optional_url_must_still_be_http_when_set():
-    with pytest.raises(SettingsError, match="events_url"):
-        resolve({**FULL_ENV, "COMPUTERAGENT_EVENTS_URL": "egress/ingest"})
+    with pytest.raises(SettingsError, match="telemetry_url"):
+        resolve({**FULL_ENV, "COMPUTERAGENT_TELEMETRY_URL": "egress/otlp"})
+
+
+def test_events_url_is_unknown():
+    """The dashboard events sink is gone: its variable is not read and the
+    resolver takes no events_url."""
+    settings = resolve({**FULL_ENV, "COMPUTERAGENT_EVENTS_URL": "http://egress/ingest"})
+
+    assert not hasattr(settings, "events_url")
+    with pytest.raises(TypeError, match="events_url"):
+        resolve(FULL_ENV, events_url="http://egress/ingest")

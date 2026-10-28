@@ -46,35 +46,13 @@ def test_otelsink_import_error_when_otel_missing(monkeypatch):
         _restore(removed)
 
 
-def test_agentos_http_sink_import_error_when_httpx_missing(monkeypatch):
-    removed = _strip_modules(["httpx", "computeragent.telemetry.sinks.agentos_http"])
-    try:
-
-        class _Blocker:
-            def find_spec(self, name, path=None, target=None):
-                if name == "httpx" or name.startswith("httpx."):
-                    raise ImportError(f"blocked {name} for test")
-                return
-
-        finder = _Blocker()
-        sys.meta_path.insert(0, finder)
-        try:
-            with pytest.raises(ImportError) as exc:
-                importlib.import_module("computeragent.telemetry.sinks.agentos_http")
-            assert "computer-agent-py[agentos]" in str(exc.value)
-        finally:
-            sys.meta_path.remove(finder)
-    finally:
-        _restore(removed)
-
-
 def test_lazy_attribute_access_on_sinks_package_works():
     """``from computeragent.telemetry.sinks import OtelSink`` works when the
     extra is installed (dev env has it). Verify the lazy ``__getattr__``."""
     from computeragent.telemetry import sinks
 
     assert sinks.OtelSink is not None
-    assert sinks.AgentOSHttpSink is not None
+    assert not hasattr(sinks, "AgentOSHttpSink")
     with pytest.raises(AttributeError):
         sinks.Nonexistent  # noqa: B018
 

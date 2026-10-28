@@ -5,6 +5,21 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — unreleased
+
+Every call the SDK makes now matches a route the CAS egress proxy serves (plan
+`.claude/plans/p1-sdk-egress-routes.md`).
+
+### Removed
+
+- **BREAKING: the AgentOS dashboard events sink.** `AgentOSHttpSink`
+  (`computeragent.telemetry.sinks.agentos_http`), the `events_url` setting and
+  `COMPUTERAGENT_EVENTS_URL` are gone, and the drop-in path no longer
+  auto-attaches the sink from `AGENTOS_INGEST_URL` / discovery. The egress
+  proxy serves no `/events` route. `examples/with_agentos.py` is deleted;
+  `examples/multi_sink.py` and `examples/e2e/run_live_demo.py` keep their
+  `OtelSink`.
+
 ## [0.6.0] — 2026-10-23
 
 Every call the SDK and its engine make now goes through an egress proxy, the agent is baked into
