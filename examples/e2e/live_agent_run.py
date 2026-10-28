@@ -4,28 +4,32 @@ Every stage prints PASS/FAIL as it happens, so a failure localises itself
 instead of arriving as "it didn't work". The stages are ordered by dependency:
 a later one cannot pass if an earlier one failed.
 
-    uv run python examples/e2e/live_agent_run.py \\
-        --base-url  http://localhost:8788/agentos/api \\
-        --agent-id  6aa93f1b3817a13d3103d2c1 \\
-        --api-key   "$LYZR_API_KEY" \\
-        --llm-proxy-url http://127.0.0.1:8786
+ComputerAgent reads every setting from its environment variable, so the run is
+configured the way a sandbox is:
 
-Every flag falls back to an environment variable, so nothing secret has to sit
-in shell history: ``AGENTOS_BASE_URL``, ``COMPUTERAGENT_AGENT_ID``,
-``LYZR_API_KEY``, ``LLM_PROXY_URL``, ``GIT_TOKEN``.
+    export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
+    export COMPUTERAGENT_ENGINE=claude-agent-sdk
+    export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
+    export COMPUTERAGENT_AGENT_API_URL=http://egress/agent-api
+    export COMPUTERAGENT_SRS_URL=http://egress/srs
+    export COMPUTERAGENT_LLM_URL=http://egress/llm
+    export COMPUTERAGENT_MCP_URL=http://egress/mcp
+    export LYZR_API_KEY=...
+    # optional: COMPUTERAGENT_TELEMETRY_URL, COMPUTERAGENT_EVENTS_URL, COMPUTERAGENT_GAP_DIR
 
-``--source`` runs the agent against a local directory instead of cloning its
-registered source — useful when the source is private and no token is to hand.
+    uv run python examples/e2e/live_agent_run.py
+
+``--gap-dir`` and ``--engine`` override their variables.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from computeragent import ComputerAgent
 
@@ -76,22 +80,19 @@ def reply_text(messages: tuple[Any, ...]) -> str:
     return ""
 
 
-async def main(args: argparse.Namespace) -> int:
-    source = args.source
+def origin(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc.rsplit('@', 1)[-1]}"
 
-    stage(1, "Resolve the agent from AgentOS")
+
+async def main(args: argparse.Namespace) -> int:
+    stage(1, "Resolve the agent from AgentOS (base_url)")
     try:
         agent = ComputerAgent(
-            base_url=args.base_url,
-            agent_id=args.agent_id,
-            api_key=args.api_key,
-            llm_proxy_url=args.llm_proxy_url,
-            git_token=args.git_token,
-            source=source,
             engine=args.engine,
+            gap_dir=args.gap_dir,
             # NOT `allowed_tools`: the dispatch permission mode is
             # `bypassPermissions`, where an allowlist restricts nothing.
-            # `disallowed_tools` is the lever that works.
             options={"system_prompt": "You are terse.", "disallowed_tools": ["Write", "Edit"]},
         )
     except Exception as exc:
@@ -99,66 +100,65 @@ async def main(args: argparse.Namespace) -> int:
         return 1
 
     resolved = agent.agent
-    ok(f"name={resolved.name!r} harness={resolved.harness}")
-    ok(f"model={resolved.model}  (this is what reaches the gateway)")
-    ok(f"gateway={resolved.gateway_type} {resolved.gateway_base_url}")
-    if resolved.credential_id:
-        info(f"credential_id={resolved.credential_id} — its source is private")
+    settings = agent._settings  # noqa: SLF001 — diagnostics, not API
+    ok(f"name={resolved.name!r} harness={resolved.harness} model={resolved.model}")
+    ok(f"local policy (rai_policy_id) = {resolved.rai_policy_id or 'none'}")
+    ok(f"MCP mode={resolved.mcp_mode} bindings={[b.tool_name for b in resolved.mcp_bindings]}")
 
-    coordinator = agent._coordinator  # noqa: SLF001 — diagnostics, not API
-    envs = coordinator._envs  # noqa: SLF001
-    base = envs.get("ANTHROPIC_BASE_URL", "(unset)")
-    ok(f"ANTHROPIC_BASE_URL={base}")
-    if resolved.has_native_gateway and "/up/" not in base:
-        bad("a native gateway must route through the proxy's /up/<b64> segment")
+    stage(2, "The egress routes")
+    routes = {
+        "base_url": settings.base_url,
+        "agent_api_url": settings.agent_api_url,
+        "srs_url": settings.srs_url,
+        "llm_url": settings.llm_url,
+        "mcp_url": settings.mcp_url,
+        "telemetry_url": settings.telemetry_url,
+        "events_url": settings.events_url,
+    }
+    for name, url in routes.items():
+        if url:
+            ok(f"{name:14} {url}")
+        else:
+            info(f"{name:14} unset (off)")
+    envs = agent._coordinator._envs  # noqa: SLF001
+    if envs.get("ANTHROPIC_BASE_URL") == settings.llm_url:
+        ok("model calls go to llm_url")
+    else:
+        bad(f"ANTHROPIC_BASE_URL is {envs.get('ANTHROPIC_BASE_URL')!r}, expected llm_url")
 
-    stage(2, "Preflight the model path")
-    # Stage 4 can only fail in ways that look identical from inside the SDK —
-    # a dead gateway, a stopped proxy and a bad key all surface as the CLI
-    # returning an error result. Two cheap probes here separate them, and this
-    # is not hypothetical: these gateways are often cloudflare tunnels whose
-    # hostnames go stale, leaving a perfectly correct SDK pointed at NXDOMAIN.
-    if resolved.has_native_gateway:
-        import httpx
+    import httpx
 
-        proxy_health = f"{args.llm_proxy_url.rstrip('/')}/health"
-        async with httpx.AsyncClient(timeout=15) as probe:
+    async with httpx.AsyncClient(timeout=10) as probe:
+        for name, url in routes.items():
+            if not url:
+                continue
             try:
-                r = await probe.get(proxy_health)
-                ok(f"proxy alive: {proxy_health} -> {r.status_code}")
+                r = await probe.get(origin(url))
+                ok(f"{name} reachable: {origin(url)} -> {r.status_code}")
             except Exception as exc:
-                bad(
-                    f"proxy unreachable at {proxy_health} ({type(exc).__name__}) — "
-                    "start it, or pass --llm-proxy-url"
-                )
-            try:
-                await probe.get(resolved.gateway_base_url)
-                ok(f"gateway reachable: {resolved.gateway_base_url}")
-            except Exception as exc:
-                bad(
-                    f"gateway unreachable: {resolved.gateway_base_url} ({type(exc).__name__}). "
-                    "The SDK is configured correctly but has nowhere to send model calls — the "
-                    "gateway's baseUrl in AgentOS is stale. Fix it there, not here."
-                )
+                bad(f"{name} unreachable at {origin(url)} ({type(exc).__name__})")
 
-    stage(3, "Materialise the workspace")
+    stage(3, "This turn's policies (org from agent_api_url + the agent's own)")
+    guard = agent._coordinator._turn_guard  # noqa: SLF001
+    turn = await guard.resolve_turn()
+    if turn.unresolved:
+        bad("the org RAI policies could not be read — every check this turn would block")
+    else:
+        ok(f"policies={list(turn.policy_ids) or 'none'} fail_open={turn.fail_open}")
+
+    stage(4, "Load the identity")
+    coordinator = agent._coordinator  # noqa: SLF001
     try:
         await coordinator._ensure_booted()  # noqa: SLF001
     except Exception as exc:
         bad(f"boot failed — {type(exc).__name__}: {exc}")
         await agent.dispose()
         return 1
-    workspace = coordinator._workspace_path  # noqa: SLF001
-    ok(f"workspace={workspace}")
-    if source is None:
-        ok("cloned the agent's registered source")
-
-    stage(4, "Load the identity")
     manifest = coordinator._manifest  # noqa: SLF001
-    ok(f"manifest name={manifest.name!r} version={manifest.version}")
+    ok(f"workspace={coordinator._workspace_path} manifest={manifest.name!r}")  # noqa: SLF001
     effective_model = (manifest.options or {}).get("model")
     if effective_model == resolved.model:
-        ok(f"model override survived the loader: {effective_model}")
+        ok(f"model survived the loader: {effective_model}")
     else:
         bad(f"model is {effective_model!r}, expected {resolved.model!r}")
 
@@ -184,16 +184,8 @@ async def main(args: argparse.Namespace) -> int:
     ok(f"session={result.session_id}")
     ok(f"tokens in={result.usage.input_tokens} out={result.usage.output_tokens}")
     ok(f"duration={result.duration_ms:.0f}ms")
-    if result.usage.output_tokens and not result.usage.input_tokens:
-        # Not an SDK fault and not worth chasing from this side: the gateway's
-        # STREAMING usage omits prompt tokens (the same call made
-        # non-streaming reports them), so the proxy has nothing to map onto
-        # `input_tokens`. It does mean per-turn cost is understated.
-        info(
-            "input tokens are 0 while output is not — the gateway omits prompt tokens when streaming"
-        )
 
-    stage(6, "Tool calls round-tripped")
+    stage(6, "Tool calls round-tripped (each one checked by SRS)")
     if tool_uses:
         ok(f"tools used: {', '.join(sorted(set(tool_uses)))}")
     else:
@@ -204,10 +196,7 @@ async def main(args: argparse.Namespace) -> int:
     if text.strip():
         ok(f"reply: {text.strip()[:300]}")
     else:
-        bad(
-            "empty completion. Usual causes: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS missing, or "
-            "the proxy ordering a text block ahead of a tool_result"
-        )
+        bad("empty completion")
 
     await agent.dispose()
 
@@ -225,28 +214,18 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--base-url", default=os.environ.get("AGENTOS_BASE_URL"))
-    p.add_argument("--agent-id", default=os.environ.get("COMPUTERAGENT_AGENT_ID"))
-    p.add_argument("--api-key", default=os.environ.get("LYZR_API_KEY"))
-    p.add_argument("--llm-proxy-url", default=os.environ.get("LLM_PROXY_URL"))
-    p.add_argument("--git-token", default=os.environ.get("GIT_TOKEN"))
-    p.add_argument(
-        "--source",
-        default=None,
-        type=lambda v: Path(v).resolve(),
-        help="run against this directory instead of cloning",
-    )
     p.add_argument(
         "--engine",
-        default="claude-agent-sdk",
-        help="engine to run the agent with (required by ComputerAgent; "
-        "'claude-agent-sdk' or 'gitagent')",
+        default=None,
+        help="'claude-agent-sdk' or 'gitagent' (else COMPUTERAGENT_ENGINE)",
     )
-    args = p.parse_args()
-    missing = [n for n in ("base_url", "agent_id", "api_key") if not getattr(args, n)]
-    if missing:
-        p.error("missing required: " + ", ".join(f"--{n.replace('_', '-')}" for n in missing))
-    return args
+    p.add_argument(
+        "--gap-dir",
+        default=None,
+        type=lambda v: Path(v).resolve(),
+        help="run in GAP mode from this directory (else COMPUTERAGENT_GAP_DIR)",
+    )
+    return p.parse_args()
 
 
 if __name__ == "__main__":

@@ -1,16 +1,16 @@
 # Using the SDK
 
-`computer-agent-py` runs an agent that is **registered in AgentOS** on **your machine, in your process**.
+`computer-agent-py` runs an agent that is **registered in AgentOS** inside **your own process** —
+typically a sandbox built from an image the agent is baked into.
 
 You name the agent by id. The SDK fetches its definition from AgentOS and reproduces what the AgentOS
-dispatch path would have sent to a ComputerAgent server — same source, same model, same engine
-environment, same permission mode — except the engine runs in this process instead of in a sandbox.
+dispatch path would have sent to a ComputerAgent server — same model, same engine environment, same
+permission mode — except the engine runs in this process.
 
-That is the only run mode. There is no remote harness, no sandbox client, and no way to construct an
-agent without AgentOS resolving it first.
-
-The four required arguments are `base_url`, `agent_id`, `api_key` and `engine`; everything else is an
-override for something the agent document already answers.
+**Every call the SDK and its engine make goes through an egress proxy.** Each downstream service is
+reached at a URL you configure — the agent config, the global RAI policies, SRS, the model, MCP and
+telemetry — and there is no direct path to any of them. The proxy routes each URL to its service and
+swaps the key the SDK presents for the real one.
 
 ---
 
@@ -24,43 +24,45 @@ pip install 'computer-agent-py[agentos]'
 uv sync --all-extras --dev
 ```
 
-`[agentos]` is not optional in practice: it pulls `httpx`, and resolving an agent is an HTTP call. Without it
-construction fails with *"resolving an agent requires httpx — install 'computer-agent-py[agentos]'"*.
+`[agentos]` is not optional in practice: it pulls `httpx`, and every call the SDK makes is HTTP.
 
 | Extra | Pulls | Needed for |
 |---|---|---|
 | *(base)* | `claude-agent-sdk`, `typing-extensions` | the `claude-agent-sdk` engine |
-| `agentos` | `httpx` | **resolving the agent** (required), the AgentOS telemetry sink, the git-credential route |
-| `otel` | `opentelemetry-*` | the OpenTelemetry telemetry sink |
+| `agentos` | `httpx` | **resolving the agent, the guardrails and the events sink** (required) |
+| `otel` | `opentelemetry-*` | OTLP telemetry to `telemetry_url` |
 | `gitagent` | `openai`, `anthropic`, `pyyaml` | the `gitagent` engine |
-| `gap` | `pyyaml` | reading a GAP repo's `agent.yaml` (most registered agents are GAP repos) |
-| `mongo` | `pymongo` | the `mongo` session store *(this area is in flight — see §7)* |
-| `sqlite` | `aiosqlite` | — |
+| `gap` | `pyyaml` | GAP mode (`gap_dir`) |
+| `mongo` | `pymongo` | the `mongo` session store |
 | `cedar` | `cedarpy` | `CedarPolicyEngine` |
 | `all` | all of the above | everything |
 
-The `claude-agent-sdk` engine spawns a Claude Code CLI subprocess, but that CLI **ships bundled inside
-`claude-agent-sdk`** — no `npm install` is needed, and a globally installed CLI is ignored. The one
-thing needed outside Python is **`git` on `PATH`**, and only if the agent's source is cloned.
+The `claude-agent-sdk` engine spawns a Claude Code CLI subprocess, which **ships bundled inside
+`claude-agent-sdk`** — no `npm install` is needed.
 
 ---
 
 ## 2. Quickstart
 
-The smallest thing that runs:
+In a sandbox every setting comes from the environment, so construction takes no arguments:
+
+```bash
+export COMPUTERAGENT_AGENT_ID=6aa93f1b3817a13d3103d2c1
+export COMPUTERAGENT_ENGINE=claude-agent-sdk
+export COMPUTERAGENT_BASE_URL=http://egress/agentos/api
+export COMPUTERAGENT_AGENT_API_URL=http://egress/agent-api
+export COMPUTERAGENT_SRS_URL=http://egress/srs
+export COMPUTERAGENT_LLM_URL=http://egress/llm
+export COMPUTERAGENT_MCP_URL=http://egress/mcp
+export LYZR_API_KEY=...          # injected when the sandbox is created
+```
 
 ```python
 import asyncio
 from computeragent import ComputerAgent
 
 async def main():
-    async with ComputerAgent(
-        base_url="http://localhost:8788/agentos/api",
-        agent_id="6aa93f1b3817a13d3103d2c1",
-        api_key="<lyzr workspace key>",
-        engine="claude-agent-sdk",
-        llm_proxy_url="http://127.0.0.1:8786",   # see §6 — needed for a gateway-bound agent
-    ) as agent:
+    async with ComputerAgent() as agent:
         result = await agent.chat("List the files in your working directory.")
         print(result.messages[-1])
         print(result.usage)
@@ -68,23 +70,19 @@ async def main():
 asyncio.run(main())
 ```
 
-The same with the options people actually reach for:
+Every setting can equally be passed as an argument, which wins over its variable:
 
 ```python
-from pathlib import Path
-
 async with ComputerAgent(
-    base_url="http://localhost:8788/agentos/api",
     agent_id="6aa93f1b3817a13d3103d2c1",
-    api_key=os.environ["LYZR_API_KEY"],
     engine="claude-agent-sdk",
-    llm_proxy_url="http://127.0.0.1:8786",
-    source=Path("/path/to/local/checkout"),      # skip the clone, run against this directory
-    options={
-        "system_prompt": "You are terse.",
-        "disallowed_tools": ["Write", "Edit"],   # the lever that actually blocks — see §5
-        "max_turns": 8,
-    },
+    base_url="http://egress/agentos/api",
+    agent_api_url="http://egress/agent-api",
+    srs_url="http://egress/srs",
+    llm_url="http://egress/llm",
+    mcp_url="http://egress/mcp",
+    api_key=os.environ["LYZR_API_KEY"],
+    options={"system_prompt": "You are terse.", "disallowed_tools": ["Write", "Edit"]},
     session_store="memory",
     budget_max_usd=0.50,
 ) as agent:
@@ -94,25 +92,46 @@ async with ComputerAgent(
     result = await handle
 ```
 
-`ComputerAgent(...)` does the AgentOS resolve **synchronously in the constructor**, so a bad id, a bad key or
-an unsupported agent shape raises before anything boots. The workspace is materialised lazily on the first
-`chat()`.
+`ComputerAgent(...)` resolves its settings and the agent **synchronously in the constructor**, so a
+missing setting, a bad id, a bad key or an unsupported agent shape raises before anything runs.
 
 ---
 
-## 3. Where each value comes from
+## 3. Settings
 
-| Value | Where you get it |
+Each setting comes from its argument or, when that is unset or blank, its environment variable. Every
+missing required setting is reported in **one** `SettingsError` naming both spellings, before any
+request is made. A URL setting must be an `http(s)` URL.
+
+| Argument | Environment variable | Required | What it is |
+|---|---|---|---|
+| `agent_id` | `COMPUTERAGENT_AGENT_ID` | **yes** | The agent's **24-hex Mongo `_id`** in AgentOS (the id in the agent's URL). Not the stable `agentId` field. |
+| `engine` | `COMPUTERAGENT_ENGINE` | **yes** | `"claude-agent-sdk"` or `"gitagent"`; an `EngineDriver` instance only as an argument. |
+| `api_key` | `LYZR_API_KEY` | **yes** | The key the SDK presents on every call as `x-api-key`. In a sandbox it is injected at creation and the egress proxy swaps it for the real one. Read from the environment **at each use**, so it can be replaced while the agent runs. |
+| `base_url` | `COMPUTERAGENT_BASE_URL` | **yes** | Route to the AgentOS agent config: the model, the agent's own RAI policy and its MCP bindings. |
+| `agent_api_url` | `COMPUTERAGENT_AGENT_API_URL` | **yes** | Route to the Lyzr agent API, for the org (global) RAI policies. |
+| `srs_url` | `COMPUTERAGENT_SRS_URL` | **yes** | Route to SRS, for every guardrail check. |
+| `llm_url` | `COMPUTERAGENT_LLM_URL` | **yes** | Route for every model call the engine makes. |
+| `mcp_url` | `COMPUTERAGENT_MCP_URL` | **yes** | Route for MCP: each server bound to the agent becomes `{mcp_url}/{server_id}`. |
+| `telemetry_url` | `COMPUTERAGENT_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
+| `events_url` | `COMPUTERAGENT_EVENTS_URL` | no | Route for the AgentOS dashboard events, posted to `{events_url}/events`. Unset: none sent. |
+| `gap_dir` | `COMPUTERAGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
+
+The requests made from each route, all with `x-api-key: <api_key>`:
+
+| Route | Requests |
 |---|---|
-| `agent_id` | The agent's **24-hex Mongo `_id`**. In the AgentOS SPA, open the agent — it is the id in the URL / the agent's detail header. Equivalently `GET {base}/v1/agents` and take `id`. **Not** the stable `agentId` field: the route rejects a non-ObjectId outright with a 404. |
-| `base_url` | The AgentOS deployment's API base, e.g. `http://localhost:8788/agentos/api` for the local docker stack, or your deployed AgentOS host. Three spellings accepted — see below. |
-| `api_key` | Your **Lyzr workspace key**, from the Lyzr Studio / AgentOS workspace settings ("API keys"). It travels as the `x-api-key` header. |
-| `llm_proxy_url` | The base URL of the Anthropic-to-OpenAI translating proxy you (or your platform team) run, e.g. `http://127.0.0.1:8786`. It has a `/health` endpoint you can curl. Required only in the case in §6. |
-| `git_token` | A git host PAT with read access to the agent's source repo (GitHub → Settings → Developer settings → tokens; `contents:read`). **Required** for a private source — there is no server-side fallback, see §12. Or sidestep it with `source=Path(...)`. |
+| `base_url` | `GET {base_url}/v1/agents/{agent_id}` once, at construction |
+| `agent_api_url` | `GET {agent_api_url}/v3/org/rai-policy` at the start of every turn |
+| `srs_url` | `POST /v1/rai/inference` (input check; tool-call content check), `POST /v1/guardrails/evaluate-tool-call` |
+| `llm_url` | the engine's own model calls (`/v1/messages`, `/chat/completions`) |
+| `mcp_url` | the engine's MCP calls |
+| `telemetry_url` | `POST /v1/traces`, `/v1/metrics`, `/v1/logs` |
+| `events_url` | `POST {events_url}/events` |
 
 ### `base_url` — three accepted spellings
 
-`api_base()` normalises whatever you pass to the `/v1` API root, so a trailing slash or an already-versioned
+`api_base()` normalises `base_url` to the `/v1` API root, so a trailing slash or an already-versioned
 base never doubles the path:
 
 | You pass | Resolves to |
@@ -121,67 +140,38 @@ base never doubles the path:
 | `http://host:8788/agentos/api` | `http://host:8788/agentos/api/v1` |
 | `http://host:8788/agentos/api/v1` | unchanged |
 
-Trailing slashes are stripped first, so `.../agentos/api/` behaves like `.../agentos/api`. An empty or
-`/`-only `base_url` raises `AgentResolveError("base_url is empty …")`.
-
-The resolve call the SDK then makes is:
-
-```
-GET {base_url normalised}/agents/{agent_id}      header: x-api-key: <lyzr key>
-```
-
 ---
 
 ## 4. Constructor reference
 
-All parameters are **keyword-only**.
+All parameters are **keyword-only**. The settings in §3 are not repeated here.
 
-| Parameter | Type | Required | Default | Notes |
-|---|---|---|---|---|
-| `agent_id` | `str` | **yes** | — | 24-hex Mongo `_id`. |
-| `base_url` | `str` | **yes** | — | AgentOS API base; three spellings (§3). |
-| `api_key` | `str` | **yes** | — | Lyzr workspace key, sent as `x-api-key`. |
-| `engine` | `str \| EngineDriver` | **yes** | — | `"claude-agent-sdk"` or `"gitagent"`, or your own `EngineDriver` instance. Also selects which gateway-env branch is built (§6) — which is why it is not inferred from the agent document. |
-| `llm_proxy_url` | `str \| None` | conditional | `None` | Required for an Anthropic-shaped engine against a native gateway (§6); unused otherwise. |
-| `git_token` | `str \| None` | conditional | `None` | Only for a **private** source. A PAT with read access to the repo. Without it the clone is unauthenticated and a private source fails. |
-| `source` | `Path \| str \| dict \| None` | no | agent document's `source` | Workspace override — see below. |
-| `options` | `Mapping[str, Any] \| None` | no | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
-| `envs` | `Mapping[str, str] \| None` | no | `None` | Extra environment for the engine subprocess. Gateway envs are layered **over** yours. |
-| `session_store` | `str \| SessionStore \| Mapping \| None` | no | `None` (no store) | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
-| `session_id` | `str \| None` | no | generated `ca_…` | Pins the **telemetry** lifecycle session id. Does not pin the CLI's own session id — for that set `options={"session_id": ...}`. |
-| `agent_name` | `str \| None` | no | agent document's `name` | Telemetry label only. |
-| `agent_description` | `str \| None` | no | `None` | Telemetry label only. |
-| `policy_decider` | `PolicyDecider \| None` | no | `None` | Async `(tool_name, tool_input, context) -> decision`. E.g. `computeragent.PolicyToolAuthorizer` (§9). |
-| `on_tool_call` | `Callable[[PermissionRequest], Awaitable[dict]] \| None` | no | `None` | Per-tool gate callback. Consulted **after** `policy_decider`; default when neither is set is allow. |
-| `budget_max_usd` | `float \| None` | no | `None` | Maps to the `max_budget_usd` option the Claude CLI enforces. An explicit `options={"max_budget_usd": ...}` wins. |
-| `telemetry_pipeline` | `Pipeline \| None` | no | the module-level pipeline | Override the telemetry pipeline for this agent (§9). |
+| Parameter | Type | Default | Notes |
+|---|---|---|---|
+| `options` | `Mapping[str, Any] \| None` | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
+| `envs` | `Mapping[str, str] \| None` | `None` | Extra environment for the engine subprocess. The model-route envs are layered **over** yours. |
+| `session_store` | `str \| SessionStore \| Mapping \| None` | `None` | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
+| `session_id` | `str \| None` | generated `ca_…` | Pins the **telemetry** lifecycle session id. |
+| `agent_name` | `str \| None` | agent document's `name` | Telemetry label only. |
+| `agent_description` | `str \| None` | `None` | Telemetry label only. |
+| `policy_decider` | `PolicyDecider \| None` | the SRS gate | Your own tool gate; **replaces** the SRS tool-call gate (§9). The input check still runs. |
+| `on_tool_call` | `Callable[[PermissionRequest], Awaitable[dict]] \| None` | `None` | Per-tool callback for engines that emit permission requests (`gitagent`). |
+| `budget_max_usd` | `float \| None` | `None` | Maps to the `max_budget_usd` option the Claude CLI enforces. |
+| `telemetry_pipeline` | `Pipeline \| None` | built from `telemetry_url` / `events_url` | Your own pipeline replaces the one built from the routes (§9). |
 
-### `source` — how a value is interpreted
-
-| You pass | What happens |
-|---|---|
-| `Path("/some/dir")` | Used in place as the workspace. Caller-owned: never copied, never deleted. |
-| `str` starting `git@`, `ssh://`, `git://` | `git clone`d into a temp dir, removed on dispose. |
-| `str` starting `https://`/`http://` **and** ending `.git`, **or** containing a known git host (`github.com`, `gitlab.com`, `bitbucket.org`, `git.sr.ht`, `codeberg.org`) | Cloned as above. |
-| any other `str` | Treated as a filesystem path and coerced to `Path`. A private-host git URL that matches neither rule lands here — append `.git` to force the clone branch. |
-| `dict` | Inline manifest (`name`, `version`, `options`, `sha`). The workspace is the **current process's cwd** — inline file materialisation is not implemented. |
-
-After construction, `agent.agent` is the `ResolvedAgent` — useful for asserting what you got:
+After construction, `agent.agent` is the `ResolvedAgent`:
 
 ```python
-agent.agent.name                  # str
-agent.agent.harness               # "claude-agent-sdk" | "gitagent"
-agent.agent.source                # str | dict | None
-agent.agent.model                 # what actually goes on the wire
-agent.agent.gateway_type          # "native" | None
-agent.agent.gateway_base_url      # str | None
-agent.agent.gateway_completions_url
-agent.agent.credential_id         # set ⇒ the source is private
-agent.agent.agent_type
-agent.agent.has_native_gateway    # bool
+agent.agent.name             # str
+agent.agent.harness          # "claude-agent-sdk" | "gitagent"
+agent.agent.model            # what goes on the wire
+agent.agent.rai_policy_id    # the agent's own SRS policy, or None
+agent.agent.mcp_mode         # "engine" | "studio"
+agent.agent.mcp_bindings     # tuple[McpBinding, ...]
 ```
 
-`ResolvedAgent` deliberately holds **no credential**, so printing it can never leak your key.
+`ResolvedAgent` holds **no credential**, so printing it can never leak your key; neither does the
+resolved settings object.
 
 ---
 
@@ -193,7 +183,7 @@ agent.agent.has_native_gateway    # bool
 1. build_options()        permission_mode="bypassPermissions", setting_sources=["project"],
                           model=<resolved from the agent document>
 2. your options=          merged over (1) — caller wins, including over model
-3. identity loader        the agent's own agent.yaml (GAP repo) resolves options...
+3. identity loader        in GAP mode, the agent.yaml in gap_dir resolves options...
 4. ...then (1)+(2) are overlaid on top of (3) — caller/gateway intent wins
 5. loader `harden()`      runs LAST, so compliance constraints declared by the repo
                           (e.g. GAP human-in-the-loop forcing permission_mode="default")
@@ -211,7 +201,7 @@ an unknown key is silently dropped rather than attached. Commonly used:
 | `permission_mode` | `str` | `"bypassPermissions"` (the default this SDK sets), `"default"`, `"acceptEdits"`, `"dontAsk"`, `"auto"`. |
 | `max_turns` | `int` | Cap agentic turns. |
 | `max_budget_usd` | `float` | Cost cap the CLI itself enforces. |
-| `model` | `str` | Override the resolved model. **Usually wrong to set** — see §6, the gateway wants a specific id. |
+| `model` | `str` | Override the resolved model. **Usually wrong to set** — see §6. |
 | `session_id` | `str` | Pin the CLI's session id, which is what makes resuming a *specific* past conversation work. |
 | `cwd`, `env`, `session_store`, `include_partial_messages` | — | Set by the harness; your value is only used if the harness has not already defaulted it. |
 
@@ -254,7 +244,9 @@ options={
 }
 ```
 
-**`policy_decider` is the real gate.** Under a prompt-skipping mode the engine routes it through a
+**`policy_decider` is the real gate.** By default it is the SDK's SRS gate (§9), which checks every
+tool call against the agent's RAI policies. Passing your own **replaces** that gate — the input check
+still runs. Under a prompt-skipping mode the engine routes it through a
 `PreToolUse` hook, which fires for *every* tool call regardless of permission mode — so keep the
 default `bypassPermissions` and decide in code:
 
@@ -295,61 +287,76 @@ which no tool-name list can.
 
 ---
 
-## 6. What the agent document supplies (and the three model-routing cases)
+## 6. What the agent document supplies
 
-You do **not** pass any of these — `GET /v1/agents/{id}` answers them:
+You do **not** pass any of these — `GET {base_url}/v1/agents/{id}` answers them:
 
 | From the document | Becomes |
 |---|---|
-| `harness` | the engine (`claude-agent-sdk` / `gitagent`) |
-| `source` / `sourceUrl` | the workspace to clone (unless you pass `source=`) |
 | `model_gateway.binding.externalModelId` → `.model` → top-level `model` | the model string put on the wire |
-| `model_gateway.type` / `.baseUrl` | which env branch is built, and where model calls go |
-| `credential_id` | a flag that the source is private (the SDK cannot redeem it — see §10) |
+| `rai_policy_id` | the agent's own (local) RAI policy, combined each turn with the org's (§9) |
+| `mcp_mode`, `mcp_servers` | the MCP servers attached to the engine (below) |
 
-For a **native** gateway the model that goes upstream is the binding's `externalModelId`, which is the backing
-Lyzr Studio agent id (a bare ObjectId), **not** the catalog name like `"Anthropic:anthropic/claude-sonnet-4-6"`.
-Sending the catalog name to the gateway is a 500. This is why overriding `options={"model": ...}` is usually
-a mistake.
+The document's `source` and gateway URL are **not** used: the agent is baked into the image, and
+every model call goes to `llm_url`.
 
-### The three routing cases
+### Where the agent comes from
 
-| Case | `ANTHROPIC_BASE_URL` becomes | `llm_proxy_url` |
-|---|---|---|
-| `claude-agent-sdk` (or any Anthropic-shaped engine) + **native** gateway | `{proxy}/up/{base64url(gateway_base_url)}` | **required** |
-| `gitagent` + **native** gateway | `{gateway_base_url}/v4` | not used |
-| any engine, **no** gateway | not set — direct Anthropic | not used |
+The agent is baked into the image; nothing is cloned or fetched.
 
-Anthropic-shaped engines are `claude-agent-sdk`, `claude-code`, `deepagents`.
+- **Default:** the engine runs in the process's working directory (`options={"cwd": ...}` overrides
+  it) and the agent is defined by your `options`.
+- **GAP mode** (`gap_dir`): the SDK loads the agent from that directory's `agent.yaml`, `SOUL.md`,
+  `RULES.md`, skills, hooks, sub-agents and script tools. The directory must exist and contain
+  `agent.yaml`, or construction fails. GAP mode is never inferred: an `agent.yaml` that happens to sit
+  in the working directory does nothing without `gap_dir`. `mcp_servers` declared in `agent.yaml` are
+  refused, because they name their own URLs and would bypass the egress proxy — bind MCP servers to
+  the agent in AgentOS instead.
 
-**Why.** `claude-agent-sdk` speaks the Anthropic Messages wire shape and has no OpenAI fallback; a Lyzr native
-gateway is an OpenAI `/v4/chat/completions` endpoint. Pointing the Claude CLI straight at it returns **405**.
-The proxy translates. `gitagent` needs none of this — it speaks OpenAI natively.
+### Model calls
 
-If you hit case 1 without `llm_proxy_url`, you get a `GatewayConfigError` at construction time, not a 405
-mid-run.
-
-In case 1 the full env set handed to the engine is:
+Every engine gets the same environment:
 
 ```
-ANTHROPIC_BASE_URL   = {proxy}/up/{b64url(gateway_base_url)}   # no "=" padding, URL alphabet
-GITAGENT_MODEL_BASE_URL = {gateway_base_url}
-GITCLAW_MODEL_BASE_URL  = {gateway_base_url}
-ANTHROPIC_API_KEY    = your api_key      # on a gateway run this holds a Lyzr key, not sk-ant-
-OPENAI_API_KEY       = your api_key
-LYZR_API_KEY         = your api_key
+ANTHROPIC_BASE_URL       = llm_url
+GITCLAW_MODEL_BASE_URL   = llm_url
+GITAGENT_MODEL_BASE_URL  = llm_url
+ANTHROPIC_API_KEY = OPENAI_API_KEY = LYZR_API_KEY = api_key
 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = 1
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1
+DISABLE_AUTOUPDATER = 1
 ```
 
-The last one matters: without it the Claude CLI injects Claude-Code-only experimental betas and a
-spec-compliant gateway rejects the call with `400 context_management: Extra inputs are not permitted`.
+`llm_url` is passed verbatim: whatever sits behind it is the egress proxy's choice. The last two
+variables stop the Claude CLI's own background traffic (telemetry, error reporting, update checks),
+which would otherwise go straight to Anthropic and Datadog. `CLAUDE_CODE_USE_BEDROCK` is removed from
+your `envs=`, because the CLI would route through Bedrock and ignore `ANTHROPIC_BASE_URL`.
 
-Your `envs=` are merged **under** these, so you cannot accidentally point a gateway-bound agent somewhere
-else. One key is additionally removed when a gateway resolved: `CLAUDE_CODE_USE_BEDROCK`, because the CLI
-honours it and ignores `ANTHROPIC_BASE_URL` entirely, which would send the gateway model id to Bedrock.
+For a native gateway the model is the binding's `externalModelId` (the backing Lyzr Studio agent id),
+not the catalog name — which is why overriding `options={"model": ...}` is usually a mistake.
 
-**Case 3 (no gateway):** the SDK sets nothing, so supply the credential yourself —
-`envs={"ANTHROPIC_API_KEY": "sk-ant-…"}`, or rely on an already-authenticated `claude` CLI.
+### MCP servers
+
+With `mcp_mode` `"engine"` (the default), each binding becomes an engine MCP server:
+
+```python
+mcp_servers[tool_name] = {
+    "type": "http",
+    "url": f"{mcp_url}/{server_id}?tools={action_names}",
+    "headers": {"x-api-key": api_key},
+}
+```
+
+- `tool_name` is the server name, so the model sees `mcp__<tool_name>__<tool>` whoever runs it.
+- A "require user sign-in" binding (`persist_auth: false`) uses the caller's own server, which AgentOS
+  returns as `your_server_id`. If the caller has not connected one, that tool is withheld and a
+  warning names it.
+- `allowed_tools` gets `mcp__<tool_name>` on Anthropic-shaped engines only; gitagent treats
+  `allowed_tools` as a strict allowlist.
+- With any other `mcp_mode`, Studio runs the tools and nothing is attached.
+
+They are added to the servers the identity loader resolved (a GAP agent's `gap_tools` server stays);
+an `mcp_servers` key in your own `options` still wins.
 
 ---
 
@@ -441,87 +448,102 @@ checkpoint. It is a request, not a kill.
 async with ComputerAgent(...) as agent:
     await agent.chat("first")
     await agent.chat("second")       # same session, appended as a turn
-# dispose(): emits session_ended with cumulative usage, removes any temp clone,
-#            flushes telemetry
+# dispose(): emits session_ended with cumulative usage, flushes telemetry and
+#            closes the pipeline the agent built
 ```
 
-Skipping `async with` (or an explicit `await agent.dispose()`) leaks the temp clone directory, drops the
-final `session_ended` event, and loses buffered telemetry.
+Skipping `async with` (or an explicit `await agent.dispose()`) drops the final `session_ended` event
+and loses buffered telemetry.
 
 ---
 
-## 9. Policy, permissions and telemetry
+## 9. Guardrails, permissions and telemetry
 
-**Tool gating**, in the order the harness consults it:
+### SRS guardrails
 
-1. `policy_decider` — an async `(tool_name, tool_input, context) -> PermissionResultAllow|Deny|dict`.
-   `computeragent.PolicyToolAuthorizer` (backed by `OpaPolicyEngine`, `CedarPolicyEngine` or
-   `SrsPolicyEngine` from `computeragent.policy`) already matches this signature.
-2. `on_tool_call` — your own async callback, given a `PermissionRequest` (`call_id`, `tool_name`, `input`,
-   `risk`), returning `{"behavior": "allow"|"deny", "message": ..., "updated_input": ...}`.
-3. Neither set → allow with the original input.
+At the start of **every turn** the SDK builds the turn's policy set:
 
-On the `claude-agent-sdk` engine a `policy_decider` is wired into `can_use_tool` **and**, when
-`permission_mode` is one of `bypassPermissions` / `dontAsk` / `auto` / `acceptEdits`, additionally into a
-`PreToolUse` hook — because `can_use_tool` is skipped entirely under those modes and the policy would go
-unenforced. The hook is merged with any hooks you or the repo supplied, never replacing them. A decider that
-raises fails **closed**.
+1. the org (global) RAI policies from `{agent_api_url}/v3/org/rai-policy`, read fresh every turn;
+2. the agent's own (local) policy, `rai_policy_id` from the agent document;
+3. combined org first, de-duplicated.
 
-Note that `on_tool_call` only fires for engines that emit `permission_request` events — today that is
-`gitagent`. On `claude-agent-sdk`, gating goes through `policy_decider`.
+Every check in the turn is made against that **one combined set**, in a single SRS call — never a
+call per policy. Policy ids never come from the environment.
 
-**Telemetry** is on by default via a module-level pipeline built from environment variables:
+| Check | When | SRS call | On a block |
+|---|---|---|---|
+| Input | before the turn, on each text block of the user's message | `/v1/rai/inference`, stage `llm_input` | the engine never starts; the turn ends with the reason as the reply |
+| Tool content | before every tool call, on its string arguments | `/v1/rai/inference`, stage `llm_output` | the tool is denied with SRS's reason |
+| Tool call | before every tool call, after the content check | `/v1/guardrails/evaluate-tool-call` (Cedar, then OPA) | the tool is denied with SRS's reason |
 
-| Env var | Effect |
-|---|---|
-| `COMPUTERAGENT_OTEL=disabled` | turn the OTel sink off (it is on whenever the `otel` extra is importable) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | standard OTLP config. **No endpoint → nothing is exported** (spans and metrics are still collected). Console output is opt-in: `configure(exporter="console")`. |
-| `AGENTOS_DISCOVERY_URL` / `AGENTOS_INGEST_URL` | attach the AgentOS HTTP sink (needs `httpx`) |
-| `COMPUTERAGENT_HARNESS_TOKEN` / `AGENTOS_INGEST_TOKEN` | bearer for that sink |
-| `COMPUTERAGENT_CAPTURE_CONTENT`, `COMPUTERAGENT_CAPTURE_CONTENT_MODE`, `COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH`, `COMPUTERAGENT_OTEL_TEMPORALITY` | content capture and attribute limits |
+- **Masking:** a masked input (`<EMAIL_ADDRESS_1>`) is what the engine receives; it is not restored.
+- **Tool names:** tool calls reach Cedar as `<engine>__<tool>` (`claude-agent-sdk__Bash`,
+  `gitagent__write`), and MCP tools as `mcp__<server>__<tool>` from either engine. The agent's name is
+  the Cedar principal.
+- **No verdict** (SRS unreachable, timed out or non-2xx): a tool is denied and an input is blocked,
+  unless the org policies say otherwise — a tool runs only if *every* org policy sets `fail_open`, and
+  an input passes unless *any* org policy is fail-closed. A 422 never fails open. The timeout is the
+  slowest org policy's, else 5 s.
+- **Org policies cannot be read:** every check in the turn blocks.
+- **No policies anywhere:** no SRS call is made.
+- A **streamed** (async-iterable) message is read entry by entry and every entry is checked before
+  the engine starts; one blocked entry blocks the turn.
 
-Or configure it in code and pass the result as `telemetry_pipeline=`:
+Every decision is emitted as a `policy_decision` telemetry event (input checks with
+`stage: "llm_input"`) carrying the outcome and the policy that acted — never the text.
 
-```python
-from computeragent import configure, PiiRedactor, GuardrailFilter
+Model calls *inside* a turn (the engine sending tool results back to the model) go to `llm_url` and
+are not checked by the SDK; guarding them is the job of whatever the egress proxy routes `llm_url` to.
 
-pipeline = configure(
-    middleware=[PiiRedactor(), GuardrailFilter()],
-    sinks=[],                      # [] disables all auto-attachment
-    capture_content=True,
-)
-```
+### Your own tool gate
+
+`policy_decider` replaces the SRS tool-call gate — the input check still runs. On the
+`claude-agent-sdk` engine a decider is wired into `can_use_tool` and, under the prompt-skipping
+permission modes this SDK uses, into a `PreToolUse` hook that fires for every tool call. A decider that
+raises fails **closed**. `on_tool_call` fires only on engines that emit permission requests
+(`gitagent`).
+
+### Telemetry
+
+A `ComputerAgent` builds its pipeline from the routes:
+
+| Route | Sink | Auth |
+|---|---|---|
+| `telemetry_url` | OTLP (`OtelSink`, needs the `otel` extra) | `x-api-key`, read when the agent is built |
+| `events_url` | AgentOS dashboard events (`AgentOSHttpSink`), `POST {events_url}/events` | `x-api-key`, read at every POST |
+
+An unset route turns that output off. `AGENTOS_DISCOVERY_URL`, `AGENTOS_INGEST_URL`, `AGENTOS_OTEL_URL`
+and `OTEL_EXPORTER_OTLP_ENDPOINT` are **not** consulted, so telemetry never goes around the egress
+proxy. Content capture and attribute limits still come from `COMPUTERAGENT_CAPTURE_CONTENT`,
+`COMPUTERAGENT_CAPTURE_CONTENT_MODE`, `COMPUTERAGENT_MAX_ATTRIBUTE_LENGTH` and
+`COMPUTERAGENT_OTEL_TEMPORALITY`. Pass `telemetry_pipeline=` to use your own pipeline instead; a
+pipeline the agent built is closed on dispose.
 
 ---
 
 ## 10. Errors
 
-All of these are raised **from the constructor**, before anything boots.
+All of these are raised **from the constructor**, before anything runs.
 
 | Exception | Base | When |
 |---|---|---|
-| `AgentResolveError` | `RuntimeError` | bad config, transport failure, or an HTTP error from AgentOS. Messages are safe to show a user — the key is never included. |
-| `UnsupportedAgentError` | `AgentResolveError` | the agent resolved but its shape is not implemented here. The message always names the offending field. |
-| `GatewayConfigError` | `RuntimeError` | the (engine, gateway, proxy) combination cannot produce a working run. |
-| `UnknownEngineError` | `HarnessError` | `engine="..."` matched nothing; the message lists the registered engines. |
-| `UnknownSessionStoreError` | `HarnessError` | `session_store="..."` matched nothing; the message lists the registered kinds. |
+| `SettingsError` | `AgentResolveError` | a required setting is missing, or a URL setting is not `http(s)`. Names the argument and the variable. |
+| `AgentResolveError` | `RuntimeError` | a bad `gap_dir`, a transport failure, or an HTTP error from AgentOS. Never includes the key. |
+| `UnsupportedAgentError` | `AgentResolveError` | the agent resolved but its shape is not implemented here; names the field. |
+| `GatewayConfigError` | `RuntimeError` | `llm_url` cannot be used as a model route. |
+| `UnknownEngineError` | `HarnessError` | `engine` matched nothing; lists the registered engines. |
+| `UnknownSessionStoreError` | `HarnessError` | `session_store` matched nothing; lists the registered kinds. |
 
 ### Agent shapes that are refused
 
 | Shape | Message names | What to do |
 |---|---|---|
-| `harness` not in `{claude-agent-sdk, gitagent}` (e.g. `deepagents`, a custom TS engine) | `harness` | Pass `engine=` with your own `EngineDriver` to run it anyway, or re-register the agent on a supported harness. |
-| `model_gateway.type != "native"` (a **generic** gateway) | `model_gateway.type` | Not implemented — its upstream contract differs. Bind the agent to a native gateway, or to none. |
-| `mcp_servers` non-empty | `mcp_servers` | MCP is not supported. The servers would be silently dropped, so the run is refused instead. Unbind them, or run this agent server-side. |
-| `orchestration` set | `orchestration` | Sub-agent fan-out is not supported. The agent would run as a plain single agent, which is not what it declares. |
-| `modelGatewayId` set but `model_gateway` absent in the response | `did not resolve` | The binding did not resolve **for this caller**. Check that the agent's `ownerGroup` matches a group with a configured gateway. |
-| gateway resolved but carries no `baseUrl` | `GatewayConfigError` | Fix the gateway's `baseUrl` in AgentOS. |
-
-A **null** gateway is *not* an error — that is a direct-Anthropic run.
-
-One more resolve-time failure: if the agent document has no `source` and you passed no `source=`, you get
-`AgentResolveError("agent … has no source and none was passed — give the run a workspace with
-source=Path('...') or register a source on the agent.")`.
+| `harness` not in `{claude-agent-sdk, gitagent}` | `harness` | Pass your own `EngineDriver` as `engine`. |
+| `model_gateway.type != "native"` | `model_gateway.type` | Bind the agent to a native gateway, or none. |
+| an `mcp_servers` binding with no `server_id` or `tool_name` | `mcp_servers[i]` | Fix the binding in AgentOS. |
+| `orchestration` set | `orchestration` | Sub-agent fan-out is not supported. |
+| `modelGatewayId` set but `model_gateway` absent | `did not resolve` | The binding did not resolve for this caller; check the agent's `ownerGroup`. |
+| GAP mode with `mcp_servers` in `agent.yaml` | the server names | Bind those servers to the agent in AgentOS. |
 
 ---
 
@@ -529,74 +551,33 @@ source=Path('...') or register a source on the agent.")`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `AgentResolveError: … rejected the credential (401 …)` | A bare Lyzr workspace key authenticates only where the **PAGOS bridge** is configured on the AgentOS deployment. Without it every workspace key 401s. | Have the deployment set `PAGOS_REDIS_URL` / `PAGOS_RESOLVE_URL`. Verify the key itself with a direct `curl -H "x-api-key: …" {base}/v1/agents`. |
-| `AgentResolveError: no agent … (404)` | The route wants the **24-hex Mongo `_id`**, not the stable `agentId`. A non-ObjectId is rejected outright. | Take the id from the agent's URL in the SPA, or `id` from the agents list response. |
-| `403 NOT_OWNER` | The agent exists but belongs to another group. | The key's groups must include the agent's `ownerGroup`. |
-| `403 INSUFFICIENT_PERMISSION` | Key lacks `agents:read`. | Grant it. |
-| `AgentResolveError: could not reach AgentOS at … (ConnectError)` | Wrong `base_url`, or the server is down. | Curl the URL from the same shell. Remember all three `base_url` spellings work, so the path is rarely the problem. |
-| `GatewayConfigError: … needs the Anthropic-to-OpenAI translating proxy` | Case 1 of §6 without `llm_proxy_url`. | Pass `llm_proxy_url=`; start the proxy if it isn't running. |
-| HTTP **405** from the model call | The Claude CLI is POSTing Anthropic Messages at an OpenAI endpoint — `ANTHROPIC_BASE_URL` is not going through the proxy's `/up/<b64>` segment. | Confirm `"/up/" in agent._coordinator._envs["ANTHROPIC_BASE_URL"]`. If not, you are not on the branch you think — check `agent.agent.gateway_type` and the `engine` you passed. |
-| **Gateway unreachable** — the turn fails and everything in the SDK looks correct | These gateways are often Cloudflare tunnels whose hostnames go stale, so `gateway_base_url` points at NXDOMAIN. | `curl` both the proxy's `/health` and `agent.agent.gateway_base_url`. If the gateway is dead, the `baseUrl` in AgentOS is stale — fix it there, not in your code. |
-| `400 context_management: Extra inputs are not permitted` | The CLI injected Claude-Code-only experimental betas. | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set automatically on the gateway branch — if you see this, check nothing in `envs=` is being lost, and that you are on the gateway branch at all. |
-| **Empty completion** — the turn succeeds but no text comes back | Usually the missing betas flag above, or the proxy ordering a text block ahead of a `tool_result`. | Check the flag first, then the proxy's block ordering. |
-| `input_tokens` is **0** while `output_tokens` is not | Real and observed, and **not an SDK bug**: the gateway omits prompt tokens when **streaming** (the same call made non-streaming reports them), so there is nothing to map onto `input_tokens`. | Nothing to fix client-side. It does mean per-turn cost is understated. |
-| No tool calls at all | A `disallowed_tools` list that blocks what the task needs, or a prompt the model can answer without the workspace. | Narrow `disallowed_tools`; check `permission_mode`. |
+| `SettingsError: missing required settings: …` | A route or the key is not set. | Set each named argument or environment variable. |
+| `AgentResolveError: … rejected the credential (401 …)` | The key did not authenticate at AgentOS. | Check the key the egress proxy swaps in, and that AgentOS has its PAGOS bridge configured. |
+| `AgentResolveError: no agent … (404)` | `agent_id` is not the 24-hex Mongo `_id`. | Take the id from the agent's URL in AgentOS. |
+| Every turn ends with `[Content blocked: RAI policy check failed: org RAI policy could not be loaded]` | `{agent_api_url}/v3/org/rai-policy` failed. | Check the `agent_api_url` route on the egress proxy. |
+| Every tool call is denied with `SRS 4xx` / `SRS unreachable` | The `srs_url` route, the key's RAI permission, or a policy id that no longer exists. | Check the route; a `404` names a policy that is gone. |
+| A tool you expected is missing | A sign-in MCP binding the caller has not connected (logged as withheld), or `mcp_mode` is not `"engine"`. | Connect the account in Studio, or check `agent.agent.mcp_mode`. |
+| `400 context_management: Extra inputs are not permitted` | The Claude CLI injected experimental betas. | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set automatically; check nothing in `envs=` is lost. |
 | `UnknownEngineError` / `UnknownSessionStoreError` | Typo, or a plugin you meant to register. | The message lists what *is* registered. |
-| Temp clone directories piling up | You skipped `async with` / `dispose()`. | Use `async with`. |
 
 ### A staged diagnostic
 
-`examples/e2e/live_agent_run.py` is a working, verified invocation whose stages are ordered by dependency, so
-a failure localises itself instead of arriving as "it didn't work":
-
-```bash
-uv run python examples/e2e/live_agent_run.py \
-    --base-url  http://localhost:8788/agentos/api \
-    --agent-id  6aa93f1b3817a13d3103d2c1 \
-    --api-key   "$LYZR_API_KEY" \
-    --llm-proxy-url http://127.0.0.1:8786
-```
-
-Every flag falls back to an env var: `AGENTOS_BASE_URL`, `COMPUTERAGENT_AGENT_ID`, `LYZR_API_KEY`,
-`LLM_PROXY_URL`, `GIT_TOKEN`. `--source <dir>` runs against a local directory instead of cloning — the
-quickest way to sidestep a private source while you debug the model path.
-
-The stages, each of which is a thing that can independently be wrong:
-
-1. resolve the agent from AgentOS → prints name, harness, model, gateway, `ANTHROPIC_BASE_URL`
-2. preflight the model path → `GET {proxy}/health` and `GET {gateway_base_url}`
-3. materialise the workspace (clone or local dir)
-4. load the identity → asserts the resolved model survived the loader merge
-5. run one turn against the live model
-6. tool calls round-tripped
-7. a non-empty reply came back
+`examples/e2e/live_agent_run.py` runs one turn with every setting taken from the environment, and
+prints a pass/fail line per stage — resolve, the routes, the turn's policies, the identity, a live
+turn, tool calls, the reply — so a failure localises itself.
 
 ---
 
 ## 12. Known limitations
 
-- **MCP is not supported.** An agent with non-empty `mcp_servers` is refused at resolve time rather than run
-  with the servers silently dropped.
-- **Sub-agent orchestration is not supported.** An agent with `orchestration` set is refused, because it
-  would otherwise run as a plain single agent — not what it declares.
+- **Sub-agent orchestration is not supported**; an agent with `orchestration` set is refused.
 - **Only `native` gateways (or none).** Generic gateways are refused.
-- **Only two harnesses run in-process:** `claude-agent-sdk` and `gitagent`. Anything else needs your own
-  `EngineDriver` passed as `engine=`.
-- **A private source needs `git_token`.** The agent document's `credential_id` is echoed back so you know auth
-  is needed, but the SDK **cannot resolve it client-side** — redeeming it requires an operator service token.
-  Without `git_token` the clone is unauthenticated and a private source fails. There is no
-  server-side fallback: the AgentOS route that mints clone tokens is GitHub-App-only, while these
-  deployments authenticate with PATs — held on the agent or in the Lyzr credential vault behind its
-  `credential_id` — neither of which that route can return. The failure surfaces as git's own "Authentication failed" stderr — it does not mention `credential_id`, so recognise it by the repo URL.
-- **An inline `dict` source carrying `files` is refused** — the files are not materialised and the
-  workspace would fall back to the process's cwd, running the agent against your current directory.
-- **Concurrent `chat()`s on one instance are refused.** One instance is one conversation with one
-  workspace and one engine session; run concurrent work as separate instances.
+- **Only two harnesses run in-process:** `claude-agent-sdk` and `gitagent`.
+- **Model calls inside a turn are not checked by the SDK**; see §9.
+- **Concurrent `chat()`s on one instance are refused.** Run concurrent work as separate instances.
 - **A turn has no timeout and nothing retries.** Impose your own with `asyncio.wait_for`.
-- **Unknown `options` keys are dropped**, though now with a warning naming them.
-- **`cancel()` is cooperative**, not a kill — the engine stops at its next checkpoint.
-- **`gitagent` tool execution is MCP-only**; the engine does not run filesystem tools itself.
-
+- **`cancel()` is cooperative**, not a kill.
+- **`gitagent` tool execution is MCP-only.**
 
 ---
 
@@ -611,7 +592,7 @@ import …`. You never need a private path.
 | `ChatHandle`, `ChatResult`, `UsageRollup` | Turn handle and results. |
 | `EngineEvent` | What the stream yields. |
 | `ResolvedAgent` | What `agent.agent` is. |
-| `AgentResolveError`, `UnsupportedAgentError`, `GatewayConfigError`, `UnknownEngineError`, `UnknownSessionStoreError`, `HarnessError` | Construction-time failures. `UnsupportedAgentError` subclasses `AgentResolveError`. |
+| `AgentResolveError`, `SettingsError`, `UnsupportedAgentError`, `GatewayConfigError`, `UnknownEngineError`, `UnknownSessionStoreError`, `HarnessError` | Construction-time failures. `SettingsError` and `UnsupportedAgentError` subclass `AgentResolveError`. |
 | `EngineDriver`, `SessionStore`, `PolicyDecider`, `PermissionRequest` | Extension-point protocols. |
 | `Pipeline`, `configure`, `PolicyToolAuthorizer` | Telemetry and policy. |
 
@@ -656,39 +637,6 @@ cooperative and cannot enforce a deadline on a wedged turn.
 
 ### Telemetry
 
-`capture_content` defaults to **False**. To silence telemetry entirely for one agent, pass
-`telemetry_pipeline=Pipeline(sinks=[])` — `COMPUTERAGENT_OTEL=disabled` only stops the OTel sink. With
-
-Nothing is written to your console unless you ask for it. With the `otel` extra installed and no
-OTLP endpoint the sink resolves to `exporter="none"`: the providers are built and every
-instrumentation path runs, but no exporter is attached and no metric reader is started. Pass
-`configure(exporter="console")` to print spans, metrics and log records as JSON on stderr — useful
-when you are debugging the instrumentation itself, and very loud otherwise.
-
-
----
-
-## 14. Cloning a private source
-
-The agent document's `credential_id` tells you a private source needs auth. **The SDK cannot redeem
-it** — resolving a vault credential requires an operator service token that no client should hold.
-
-So there is exactly one way, and no fallback:
-
-```python
-ComputerAgent(..., git_token="<PAT with read access>")
-```
-
-The token is handed to the substrate as a credential mapping and injected as an
-`http.<host>.extraHeader`, so it reaches neither `argv` nor the remote recorded in `.git/config`.
-
-Without it the clone is unauthenticated and a private source fails with git's own
-`Authentication failed` — which does **not** mention `credential_id`, so recognise it by the repo URL.
-
-If you would rather not hand-carry a PAT, pass `source=Path("/local/checkout")` and skip the clone
-entirely. That is the quickest way to work on a private agent while debugging.
-
-> Earlier versions tried AgentOS's `/git-credentials/resolve` as a middle step. That route is
-> GitHub-App-only, while these deployments authenticate with PATs — held on the agent or in the Lyzr
-> credential vault — so it could never return a usable token. It was removed in 0.4.3 rather than left
-> to turn a missing token into a slower, less legible failure.
+`capture_content` defaults to **False**. With neither `telemetry_url` nor `events_url` set, an agent
+sends no telemetry at all. Nothing is written to your console unless you build your own pipeline with
+`configure(exporter="console")` and pass it as `telemetry_pipeline=`.

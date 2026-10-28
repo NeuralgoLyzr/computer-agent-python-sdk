@@ -1,4 +1,4 @@
-"""Coverage for ``LocalSubstrate`` — pass-through, git clone, cleanup."""
+"""Coverage for ``LocalSubstrate`` — pass-through only; nothing is ever cloned."""
 
 from __future__ import annotations
 
@@ -45,53 +45,18 @@ async def test_unsupported_source_raises():
 
 
 @pytest.mark.asyncio
-async def test_git_clone_creates_temp_dir_and_close_removes_it():
-    """Mock subprocess so the test runs offline."""
+async def test_a_url_string_is_never_cloned():
+    """The agent is baked into the image: a URL-looking string is a path, and
+    no subprocess (git or otherwise) is ever started."""
     sub = LocalSubstrate()
 
-    async def _fake_communicate(self):  # noqa: ARG001 - signature compat
-        return (b"", b"")
+    async def _no_exec(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("LocalSubstrate must not start a subprocess")
 
-    class _FakeProc:
-        returncode = 0
-
-        async def communicate(self):
-            return (b"", b"")
-
-    async def _fake_exec(*args, **kwargs):  # noqa: ARG001
-        return _FakeProc()
-
-    with patch("asyncio.create_subprocess_exec", _fake_exec):
-        handle = await sub.boot(
-            source="https://github.com/example/demo.git",
-            envs={},
-        )
-    assert handle.workspace_path.exists()
-    assert "computeragent-substrate-" in handle.workspace_path.name
-    cloned = handle.workspace_path
+    with patch("asyncio.create_subprocess_exec", _no_exec):
+        handle = await sub.boot(source="https://github.com/example/demo.git", envs={})
+    assert handle.workspace_path == Path("https://github.com/example/demo.git")
     await handle.close()
-    assert not cloned.exists()
-
-
-@pytest.mark.asyncio
-async def test_git_clone_failure_cleans_up_temp_dir():
-    sub = LocalSubstrate()
-
-    class _FailingProc:
-        returncode = 128
-
-        async def communicate(self):
-            return (b"", b"fatal: repository not found")
-
-    async def _fake_exec(*args, **kwargs):  # noqa: ARG001
-        return _FailingProc()
-
-    with patch("asyncio.create_subprocess_exec", _fake_exec):  # noqa: SIM117
-        with pytest.raises(RuntimeError, match="git clone failed"):
-            await sub.boot(
-                source="https://github.com/example/missing.git",
-                envs={},
-            )
 
 
 def test_registry_resolves_local():

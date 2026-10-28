@@ -69,13 +69,11 @@ def test_resolves_every_field(agent_doc):
     assert agent.agent_id == AGENT_ID
     assert agent.name == "private git test with client"
     assert agent.harness == "claude-agent-sdk"
-    assert agent.source == "https://github.com/vrajp-lyzr/general-agent-private"
     assert agent.model == "6aa93f1a75ce74c4e6772b20"
     assert agent.gateway_type == "native"
     assert agent.has_native_gateway is True
     assert agent.gateway_base_url == "https://excellent-flavor-glance-myspace.trycloudflare.com"
     assert agent.gateway_completions_url.endswith("/v4/chat/completions")
-    assert agent.credential_id == "fe5e3df8-bbf5-4aba-ada7-e312a1da44a7"
     assert agent.agent_type == "client"
 
 
@@ -164,11 +162,26 @@ def test_refuses_generic_gateway(agent_doc):
 
 
 @respx.mock
-def test_refuses_bound_mcp_servers(agent_doc):
+def test_bound_mcp_servers_are_resolved(agent_doc):
+    agent_doc["mcp_servers"] = [
+        {"server_id": "srv_1", "tool_name": "jira", "action_names": ["search"]}
+    ]
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    agent = _resolve()
+
+    assert agent.mcp_mode == "engine"
+    assert [(b.server_id, b.tool_name, b.action_names) for b in agent.mcp_bindings] == [
+        ("srv_1", "jira", ("search",))
+    ]
+
+
+@respx.mock
+def test_a_binding_without_a_tool_name_is_refused_by_index(agent_doc):
     agent_doc["mcp_servers"] = [{"server_id": "srv_1", "action_names": ["x"]}]
     respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
 
-    with pytest.raises(UnsupportedAgentError, match="mcp_servers"):
+    with pytest.raises(UnsupportedAgentError, match=r"mcp_servers\[0\].*tool_name"):
         _resolve()
 
 
@@ -198,12 +211,10 @@ def test_unknown_harness_is_refused_when_no_engine_is_given(agent_doc):
         agent_id="a",
         name="a",
         harness="deepagents",
-        source="x",
         model=None,
         gateway_type=None,
         gateway_base_url=None,
         gateway_completions_url=None,
-        credential_id=None,
         agent_type=None,
     )
 
@@ -219,12 +230,10 @@ def test_bringing_your_own_engine_rescues_an_unknown_harness(agent_doc):
         agent_id="a",
         name="a",
         harness="deepagents",
-        source="x",
         model=None,
         gateway_type=None,
         gateway_base_url=None,
         gateway_completions_url=None,
-        credential_id=None,
         agent_type=None,
     )
 

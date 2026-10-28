@@ -62,6 +62,31 @@ class _SessionState:
         self.started_at = time.monotonic()
 
 
+class _RefusalEngine:
+    """Stands in for the engine on a turn whose message was blocked: the turn
+    ends with the reply as its result, and the real engine never starts."""
+
+    def __init__(self, reply: str) -> None:
+        self._reply = reply
+
+    async def start_session(self, ctx: EngineContext) -> AsyncIterator[EngineEvent]:  # noqa: ARG002
+        from claude_agent_sdk.types import ResultMessage
+
+        yield EngineEvent(
+            kind="sdk_message",
+            payload=ResultMessage(
+                subtype="success",
+                duration_ms=0,
+                duration_api_ms=0,
+                is_error=False,
+                num_turns=0,
+                session_id="",
+                stop_reason="end_turn",
+                result=self._reply,
+            ),
+        )
+
+
 class HarnessCoordinator:
     """Single-session coordinator.
 
@@ -92,9 +117,15 @@ class HarnessCoordinator:
         telemetry_pipeline: Pipeline | None = None,
         project_key: str = "default",
         options_overlay: dict[str, Any] | None = None,
-        # ── cloning a private source ────────────────────────────────────────
-        # The PAT used to clone a private source, when there is one.
-        git_token: str | None = None,
+        # MCP servers bound to the agent, and the `allowed_tools` grants for
+        # them. Merged INTO what the loader resolved (a GAP agent's in-process
+        # `gap_tools` server stays), before the caller overlay.
+        mcp_servers: dict[str, Any] | None = None,
+        mcp_allowed_tools: list[str] | None = None,
+        # Runs at the start of every turn: resolves the turn's policies and
+        # checks the user's message (see `guardrails.SrsTurnGuard`). A blocked
+        # message ends the turn with its reply and the engine never runs.
+        turn_guard: Any | None = None,
         # Linkage for a child session spawned by a parent agent. Stamped onto
         # every emitted event so a console can nest the child under its parent.
         parent_session_id: str | None = None,
@@ -123,7 +154,9 @@ class HarnessCoordinator:
         # / ``model=...``. Layered on top of whatever the identity loader
         # resolves so caller intent always wins.
         self._options_overlay: dict[str, Any] = dict(options_overlay or {})
-        self._git_token = git_token
+        self._mcp_servers: dict[str, Any] = dict(mcp_servers or {})
+        self._mcp_allowed_tools: list[str] = list(mcp_allowed_tools or [])
+        self._turn_guard = turn_guard
 
         # Substrate state — booted lazily on first chat.
         self._substrate_handle: Any = None
@@ -158,31 +191,6 @@ class HarnessCoordinator:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
-    def _git_credential(self) -> dict[str, str] | None:
-        """Auth for cloning the source, or ``None`` for an anonymous clone.
-
-        Just the explicit token now. There used to be a middle step that asked
-        AgentOS to mint a GitHub-App installation token, but that route is
-        App-only and these deployments authenticate with PATs — held either
-        directly on the agent or in the Lyzr credential vault behind its
-        `credential_id`, neither of which the App route can return. So the
-        fallback could not succeed, and all it did was turn a missing token
-        into a slower failure.
-
-        The token is handed to the substrate as a credential mapping, not
-        spliced into the clone URL, so it reaches neither argv nor the remote
-        recorded in ``.git/config``.
-        """
-        if not (isinstance(self._source, str) and self._git_token):
-            return None
-        from ..substrates.local import _host_of
-
-        return {
-            "host": _host_of(self._source),
-            "username": "x-access-token",
-            "token": self._git_token,
-        }
-
     async def _ensure_booted(self) -> None:
         if self._disposed:
             # `dispose()` closes the substrate handle but leaves it set, so
@@ -197,23 +205,24 @@ class HarnessCoordinator:
             )
         if self._substrate_handle is not None:
             return
-        git_credential = self._git_credential()
-        self._substrate_handle = await self._substrate.boot(
-            source=self._source, envs=self._envs, git_credential=git_credential
-        )
+        self._substrate_handle = await self._substrate.boot(source=self._source, envs=self._envs)
         self._workspace_path = self._substrate_handle.workspace_path
         loaded = await self._identity_loader.load(
             source=self._source,
             target_engine=self._engine.name,
             workspace_path=self._workspace_path,
         )
-        # Stamp the cloned commit SHA onto the manifest (if the loader didn't
-        # already provide one) so it rides session_started → server SHA sync.
-        revision = getattr(self._substrate_handle, "revision", None)
-        if revision and not getattr(loaded, "sha", None):
+        # Add the bound MCP servers to the loader's own, keeping both.
+        if self._mcp_servers:
             from dataclasses import replace
 
-            loaded = replace(loaded, sha=revision)
+            opts = dict(loaded.options or {})
+            opts["mcp_servers"] = {**dict(opts.get("mcp_servers") or {}), **self._mcp_servers}
+            if self._mcp_allowed_tools:
+                allowed = list(opts.get("allowed_tools") or [])
+                allowed.extend(t for t in self._mcp_allowed_tools if t not in allowed)
+                opts["allowed_tools"] = allowed
+            loaded = replace(loaded, options=opts)
         # Overlay caller-supplied options (from ComputerAgent kwargs) on
         # top of whatever the loader resolved. Caller intent wins.
         if self._options_overlay:
@@ -347,7 +356,13 @@ class HarnessCoordinator:
         # materialises prior entries itself before spawning the subprocess.
         # Replaying it from this side as well would duplicate the transcript.
 
-        await _enqueue_user_message(state.user_queue, message)
+        start = None
+        if self._turn_guard is not None:
+            start = await self._turn_guard.start_turn(message, session_id=session_id)
+            message = start.message
+        blocked_reply = start.blocked_reply if start is not None else None
+        if blocked_reply is None:
+            await _enqueue_user_message(state.user_queue, message)
 
         ctx = EngineContext(
             session_id=session_id,
@@ -408,13 +423,23 @@ class HarnessCoordinator:
                 model=turn_model,
             )
         )
+        if start is not None and start.telemetry is not None:
+            await self._emit(
+                TelemetryEvent(
+                    kind="policy_decision",
+                    session_id=session_id,
+                    agent_name=state.agent_name,
+                    payload=dict(start.telemetry),
+                )
+            )
 
-        return state, self._stream_engine_events(state, ctx)
+        engine = _RefusalEngine(blocked_reply) if blocked_reply is not None else None
+        return state, self._stream_engine_events(state, ctx, engine=engine)
 
     # ── event translation ──────────────────────────────────────────────────
 
     async def _stream_engine_events(
-        self, state: _SessionState, ctx: EngineContext
+        self, state: _SessionState, ctx: EngineContext, *, engine: Any | None = None
     ) -> AsyncIterator[EngineEvent]:
         """Iterate the engine, translate each event, push telemetry."""
         last_assistant_text = ""
@@ -423,7 +448,7 @@ class HarnessCoordinator:
         # time-to-first-token. Only the OtelSink consumes it.
         first_token_emitted = False
         try:
-            async for ev in self._engine.start_session(ctx):
+            async for ev in (engine or self._engine).start_session(ctx):
                 if ev.kind == "sdk_message":
                     # Remember the engine's own session id so the next turn can
                     # resume this conversation. It appears on every message the
@@ -588,8 +613,8 @@ class HarnessCoordinator:
         # Signal harness-mode to the AgentOS server's ingest projection, which
         # then writes ``source.type = "library"`` (no server-runnable source →
         # the UI hides live chat). We set it for sources the AgentOS harness
-        # can't reconstruct on its own (a git URL or a local path that only
-        # exists on this machine). We deliberately do NOT set it for an INLINE
+        # can't reconstruct on its own (a local path that only exists on this
+        # machine). We deliberately do NOT set it for an INLINE
         # source: the server's ``inlineSourceFor`` rebuilds a runnable
         # ``agent.yaml`` + ``CLAUDE.md`` from this event's payload
         # (system_prompt / allowed_tools / max_turns / permission_mode / model),

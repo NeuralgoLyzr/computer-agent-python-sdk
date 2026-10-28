@@ -40,6 +40,8 @@ except ImportError as _exc:  # pragma: no cover - guarded by lazy export
     ) from _exc
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ..event import TelemetryEvent
 
 logger = logging.getLogger("computeragent.telemetry")
@@ -71,6 +73,7 @@ class AgentOSHttpSink:
         max_buffer_bytes: int = DEFAULT_MAX_BUFFER_BYTES,
         client: Any | None = None,
         timeout: float = 30.0,
+        api_key: Callable[[], str] | None = None,
     ) -> None:
         from ... import agentos as _agentos
 
@@ -82,7 +85,10 @@ class AgentOSHttpSink:
             )
         # The one cak_ key the SDK presents everywhere is the ingest bearer; a
         # legacy AGENTOS_INGEST_TOKEN string is still honoured via agentos.cak().
-        self._token = token or _agentos.cak()
+        # `api_key`, when given, is read at every POST and sent as x-api-key
+        # (the egress proxy swaps it); no bearer token is sent then.
+        self._api_key = api_key
+        self._token = token or (None if api_key is not None else _agentos.cak())
         self._source = source
         self._host = host or socket.gethostname()
         self._flush_threshold = max(1, flush_threshold)
@@ -163,7 +169,8 @@ class AgentOSHttpSink:
                 # default=str coerces datetimes / non-JSON values the same way
                 # the Mongo sink relied on bson to handle them.
                 body = json.dumps({"events": batch}, default=str)
-                resp = await self._client.post(self._url, content=body)
+                headers = {"x-api-key": self._api_key()} if self._api_key is not None else None
+                resp = await self._client.post(self._url, content=body, headers=headers)
                 resp.raise_for_status()
             except Exception:  # noqa: BLE001 - sinks must never break the agent
                 # Drop the batch (don't requeue — a poisoned batch would wedge

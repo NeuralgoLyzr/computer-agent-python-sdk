@@ -36,9 +36,10 @@ IdentitySource = Path | str | dict[str, Any]
 """Where the agent definition comes from.
 
 * ``Path`` — local directory, used as workspace ``cwd``.
-* ``str`` — git URL (``https://``, ``git@``) cloned into a temp dir, OR a
-  filesystem path string normalised to ``Path``.
+* ``str`` — filesystem path string normalised to ``Path``.
 * ``dict`` — inline manifest, see :class:`AgentManifest` for the shape.
+
+Nothing is cloned or fetched: the agent is baked into the image.
 """
 
 
@@ -162,14 +163,10 @@ class SubstrateHandle:
 
     ``workspace_path`` is where the engine should rest the agent's cwd.
     ``close`` is awaited when the harness disposes the substrate; idempotent.
-    ``revision`` is the resolved commit SHA when the source was a git repo
-    (else ``None``) — the coordinator stamps it onto the manifest so it rides
-    ``session_started`` telemetry for the server's SHA sync.
     """
 
     workspace_path: Path
     close: Callable[[], Awaitable[None]]
-    revision: str | None = None
 
 
 # ── Protocols ──────────────────────────────────────────────────────────────
@@ -196,8 +193,7 @@ class Substrate(Protocol):
     """Provides the workspace (cwd) the agent runs against.
 
     ``boot`` resolves the ``source`` into a concrete filesystem location.
-    Local: pass-through (``Path``) or git clone. Remote substrates (e2b /
-    vzvm / bwrap, deferred to 0.3.0) would spin up a sandbox here.
+    Local: pass-through of a directory that already exists.
     """
 
     name: str
@@ -207,7 +203,6 @@ class Substrate(Protocol):
         *,
         source: IdentitySource,
         envs: Mapping[str, str],
-        git_credential: Mapping[str, str] | None = None,
     ) -> SubstrateHandle: ...
 
 

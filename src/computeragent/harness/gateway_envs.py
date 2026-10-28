@@ -1,60 +1,31 @@
-"""Build the engine environment for a gateway-bound agent.
+"""Build the engine environment that sends every model call to ``llm_url``.
 
-A faithful port of ``modelGatewayEnvsFor`` (agentos-server ``agent-defs.ts:718``)
-— the function that decides how a locally-run engine reaches its model. Getting
-a byte wrong here costs a live debugging session, so the shapes below are
-copied deliberately rather than derived.
+``llm_url`` is the egress route for model traffic. It is handed to the engine
+verbatim: ``ANTHROPIC_BASE_URL`` for an Anthropic-shaped engine, and
+``GITCLAW_MODEL_BASE_URL`` / ``GITAGENT_MODEL_BASE_URL`` for gitagent. The
+agent document's own gateway URL is not used, and there is no direct path to a
+model provider: what sits behind ``llm_url`` is the egress proxy's choice.
 
-There are three branches, and the LLM proxy appears in exactly one:
-
-===========================  ======================================  ===========
-case                         base URL                                proxy
-===========================  ======================================  ===========
-claude-agent-sdk + native    ``{proxy}/up/{b64url(gateway_base)}``    required
-gitagent + native            ``{gateway_base}/v4``                    not used
-any engine, no gateway       none — direct Anthropic                  not used
-===========================  ======================================  ===========
-
-Why the proxy exists at all: ``claude-agent-sdk`` speaks the Anthropic Messages
-wire shape and has no OpenAI-shaped fallback, while a Lyzr native gateway is an
-OpenAI ``/v4/chat/completions`` endpoint. Pointing the Claude CLI at the gateway
-directly 405s. The proxy translates. ``gitagent`` needs none of this: gitclaw
-speaks OpenAI natively and redirects via its own ``GITCLAW_MODEL_BASE_URL``.
+The model string still follows the TS dispatch (``modelForDispatch``): a Lyzr
+Studio agent id for a native gateway, ``openai:``-prefixed for gitagent.
 """
 
 from __future__ import annotations
 
-import base64
 import re
 from collections.abc import Mapping
 from typing import Any
 
 from .agentos_agent import ResolvedAgent
 
-#: Engines that speak the Anthropic Messages shape and therefore need the
-#: translating proxy in front of an OpenAI-shaped gateway.
+#: Engines that speak the Anthropic Messages shape.
 ANTHROPIC_SHAPED = frozenset({"claude-agent-sdk", "claude-code", "deepagents"})
-
-#: Path the proxy appends to the decoded ``/up/`` base. Only documented here —
-#: the SDK never builds it, the proxy owns it. Present so the doc-comment above
-#: is checkable against ``LYZR_UPSTREAM_PATH``.
-UPSTREAM_PATH = "/v4/chat/completions"
 
 _PROVIDER_PREFIX = re.compile(r"^[a-z][a-z0-9_-]*:", re.IGNORECASE)
 
 
 class GatewayConfigError(RuntimeError):
-    """The (engine, gateway, proxy) combination cannot produce a working run."""
-
-
-def b64url(value: str) -> str:
-    """Node's ``Buffer.toString("base64url")`` — URL alphabet, **no padding**.
-
-    The proxy decodes this segment with the same alphabet and rejects anything
-    that does not parse as an http(s) URL, so the padding difference is not
-    cosmetic.
-    """
-    return base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(b"=").decode("ascii")
+    """The model route cannot produce a working run."""
 
 
 def strip_provider_prefix(model: str) -> str:
@@ -87,65 +58,20 @@ def dispatch_model(agent: ResolvedAgent, *, engine_name: str) -> str | None:
     return strip_provider_prefix(model)
 
 
-def build_gateway_envs(
-    agent: ResolvedAgent,
-    *,
-    engine_name: str,
-    api_key: str,
-    llm_proxy_url: str | None = None,
-) -> dict[str, str]:
-    """Environment variables the engine subprocess needs to reach the model.
-
-    Returns ``{}`` for an agent with no effective gateway — a direct-Anthropic
-    run, where the caller supplies ``ANTHROPIC_API_KEY`` through ``envs=``.
-    """
-    if not agent.has_native_gateway:
-        return {}
-
-    base = (agent.gateway_base_url or "").rstrip("/")
-    if not base:
+def build_gateway_envs(*, api_key: str, llm_url: str) -> dict[str, str]:
+    """Environment variables that send the engine's model calls to ``llm_url``."""
+    if not isinstance(llm_url, str) or not llm_url.startswith(("http://", "https://")):
         raise GatewayConfigError(
-            f"agent {agent.agent_id}: the model gateway resolved but carries no baseUrl — "
-            "there is nothing to route model calls at."
+            f"llm_url must be an http(s) URL, got {llm_url!r}. Every model call is sent to it, "
+            "so a malformed value would not fail until the engine tried to reach it mid-run."
         )
-
-    anthropic_shaped = engine_name in ANTHROPIC_SHAPED
-
-    # gitclaw appends only "/chat/completions" itself, so its base must already
-    # carry the "/v4". The proxy, by contrast, is handed the BARE host and adds
-    # its own LYZR_UPSTREAM_PATH — encoding "{base}/v4" there yields "/v4/v4".
-    gitclaw_base = f"{base}/v4"
-
-    if anthropic_shaped:
-        if not llm_proxy_url:
-            raise GatewayConfigError(
-                f"agent {agent.agent_id} is bound to a native model gateway and engine "
-                f"{engine_name!r} speaks the Anthropic Messages shape, so it needs the "
-                "Anthropic-to-OpenAI translating proxy: pass llm_proxy_url= (e.g. "
-                "http://127.0.0.1:8786). Without it the engine would POST Anthropic Messages "
-                f"at {base}, which is an OpenAI endpoint, and get a 405."
-            )
-        proxy = llm_proxy_url.rstrip("/")
-        if not proxy.startswith(("http://", "https://")):
-            raise GatewayConfigError(
-                f"llm_proxy_url must be an http(s) URL, got {llm_proxy_url!r}. It is concatenated "
-                "into ANTHROPIC_BASE_URL, so a malformed value would not fail until the engine "
-                "tried to reach it mid-run."
-            )
-        anthropic_base = f"{proxy}/up/{b64url(base)}"
-    else:
-        anthropic_base = gitclaw_base
-
+    base = llm_url.rstrip("/")
     return {
-        "ANTHROPIC_BASE_URL": anthropic_base,
-        # Set for every branch, exactly as the TS does. Inert for an
-        # Anthropic-shaped engine, which reads only ANTHROPIC_BASE_URL.
-        "GITAGENT_MODEL_BASE_URL": gitclaw_base if not anthropic_shaped else base,
-        "GITCLAW_MODEL_BASE_URL": gitclaw_base if not anthropic_shaped else base,
-        # One credential under three names. ANTHROPIC_API_KEY is overloaded — on
-        # a gateway run it holds a Lyzr key, on a direct run a real sk-ant- one —
-        # so LYZR_API_KEY carries the same value under a name that means what it
-        # is, for anything that needs "the caller's Lyzr credential" specifically.
+        "ANTHROPIC_BASE_URL": base,
+        "GITAGENT_MODEL_BASE_URL": base,
+        "GITCLAW_MODEL_BASE_URL": base,
+        # One credential under three names: the engine presents it on every
+        # model call and the egress proxy swaps it for the real key.
         "ANTHROPIC_API_KEY": api_key,
         "OPENAI_API_KEY": api_key,
         "LYZR_API_KEY": api_key,
@@ -154,6 +80,11 @@ def build_gateway_envs(
         # spec-compliant gateway rejects outright with
         # `400 context_management: Extra inputs are not permitted`.
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+        # The Claude CLI's own background traffic (telemetry, error reporting,
+        # update checks) goes straight to Anthropic and Datadog, around
+        # llm_url. Every call must go through the egress proxy.
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "DISABLE_AUTOUPDATER": "1",
     }
 
 
@@ -163,12 +94,10 @@ def merge_envs(
 ) -> dict[str, str]:
     """Layer gateway envs over the caller's, matching the TS merge order.
 
-    A resolved gateway takes full ownership of LLM routing, so
+    ``llm_url`` takes full ownership of LLM routing, so
     ``CLAUDE_CODE_USE_BEDROCK`` is dropped: the Claude CLI routes through
     Bedrock whenever that flag is set and ignores ``ANTHROPIC_BASE_URL``
-    entirely, which would send a gateway agent's model id to Bedrock and have it
-    rejected as an invalid Bedrock model — with nothing in the config looking
-    wrong.
+    entirely, which would send model calls around the egress proxy.
     """
     merged: dict[str, str] = dict(caller_envs or {})
     merged.update(gateway_envs)
@@ -202,9 +131,7 @@ def build_options(
 
 __all__ = [
     "ANTHROPIC_SHAPED",
-    "UPSTREAM_PATH",
     "GatewayConfigError",
-    "b64url",
     "build_gateway_envs",
     "build_options",
     "dispatch_model",

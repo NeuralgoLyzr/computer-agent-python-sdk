@@ -5,6 +5,89 @@ All notable changes to `computer-agent-py` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-10-23
+
+Every call the SDK and its engine make now goes through an egress proxy, the agent is baked into
+the image, and the SRS guardrails CAS's harness applies run in the SDK.
+
+### Added
+
+- **Every setting from its argument or its environment variable.** `agent_id`, `engine`,
+  `base_url`, `api_key` and the routes below each fall back to a variable (`COMPUTERAGENT_*`,
+  `LYZR_API_KEY` for the key); the argument wins and a blank value counts as unset. With the
+  variables set, `ComputerAgent()` needs no arguments. Every missing required setting is reported in
+  one `SettingsError` (exported from `computeragent`) naming both spellings, before any request.
+  `api_key` from the environment is read at each use, so it can be replaced while an agent runs.
+- **Egress routes**, each reached only at its configured URL with the key on `x-api-key`:
+  `llm_url` (model calls), `mcp_url` (MCP), `agent_api_url` (org RAI policies), `srs_url`
+  (guardrails), and optionally `telemetry_url` (OTLP) and `events_url` (AgentOS dashboard events,
+  `POST {events_url}/events`).
+- **MCP servers bound in AgentOS** now run, through `mcp_url`, instead of being refused. Bindings come
+  from the agent document (`mcp_servers`, `mcp_mode`); each becomes `{mcp_url}/{server_id}?tools=…`
+  named by its `tool_name`. A "require user sign-in" binding uses the caller's own server
+  (`your_server_id`), and is withheld with a warning when the caller has none. `mcp_mode` other than
+  `"engine"` attaches nothing. A port of CAS `mcpDescriptorsFor` / `applyMcpServers`.
+- **SRS guardrails, ported from CAS's harness.** At the start of every turn the org (global) RAI
+  policies are read from `{agent_api_url}/v3/org/rai-policy` and combined with the agent's own
+  (local) `rai_policy_id`, org first, de-duplicated. Against that one set:
+  - the user's message is checked with SRS `llm_input` before the turn — a block ends the turn with
+    the reason as its reply and the engine never starts; a mask is what the engine receives;
+  - every tool call is checked with SRS's content check and then Cedar/OPA (`evaluate-tool-call`),
+    on both engines, with tool names presented as `<engine>__<tool>` / `mcp__<server>__<tool>`.
+
+  No verdict denies, unless the org policies' `fail_open` allows it (a 422 never fails open); org
+  policies that cannot be read block the turn. Decisions are emitted as `policy_decision` events,
+  never with content. A caller's own `policy_decider` replaces the tool gate; the input check always
+  runs. A streamed (async-iterable) message is checked entry by entry before the engine starts.
+- **GAP mode** through `gap_dir` (`COMPUTERAGENT_GAP_DIR`): the agent is loaded from that directory's
+  `agent.yaml`. The directory must exist and hold an `agent.yaml`.
+- `ResolvedAgent.rai_policy_id`, `.mcp_mode` and `.mcp_bindings`.
+
+### Changed
+
+- **BREAKING: `llm_url`, `mcp_url`, `agent_api_url` and `srs_url` are required.** Model calls go to
+  `llm_url` verbatim, for every engine and agent; the agent document's gateway URL is not used and
+  there is no direct-to-Anthropic branch. The engine env also sets
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and `DISABLE_AUTOUPDATER=1`, so the Claude CLI's own
+  background traffic does not go around the proxy.
+- **BREAKING: the agent is baked into the image.** The engine runs in the working directory
+  (`options={"cwd": ...}` still wins) with the agent defined by your `options`, or in GAP mode from
+  `gap_dir`. An `agent.yaml` in the working directory no longer switches the loader on its own.
+- **BREAKING: a `ComputerAgent` builds its telemetry pipeline from `telemetry_url` and
+  `events_url`.** `AGENTOS_DISCOVERY_URL`, `AGENTOS_INGEST_URL`, `AGENTOS_OTEL_URL` and
+  `OTEL_EXPORTER_OTLP_ENDPOINT` are no longer consulted by `ComputerAgent`; with neither route set
+  it sends no telemetry. A caller's own `telemetry_pipeline` still wins. The drop-in `query()` path
+  and `configure()` are unchanged.
+- **BREAKING: GAP `agent.yaml` `mcp_servers` are refused**, because they connect to their own URLs.
+  Bind those servers to the agent in AgentOS.
+- `AgentOSHttpSink` takes an optional `api_key` callable, read at every POST and sent as
+  `x-api-key`.
+
+### Removed
+
+- **BREAKING: git cloning**, `ComputerAgent(source=, git_token=, llm_proxy_url=)`, the
+  `/up/<b64url>` and `/v4` URL building (`b64url`, `UPSTREAM_PATH`), the substrate's
+  `git_credential` parameter, `SubstrateHandle.revision`, and `ResolvedAgent.source` /
+  `.credential_id`.
+
+### Migration
+
+Set the routes your egress proxy exposes and drop the removed arguments:
+
+```python
+ComputerAgent(
+    agent_id=..., engine="claude-agent-sdk", api_key=...,
+    base_url="http://egress/agentos/api",
+    agent_api_url="http://egress/agent-api",
+    srs_url="http://egress/srs",
+    llm_url="http://egress/llm",
+    mcp_url="http://egress/mcp",
+)
+```
+
+or set `COMPUTERAGENT_*` / `LYZR_API_KEY` and call `ComputerAgent()`. A GAP agent passes
+`gap_dir=` instead of `source=`.
+
 ## [0.5.0] — 2026-09-24
 
 ### Changed

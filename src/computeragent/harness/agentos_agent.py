@@ -2,8 +2,9 @@
 
 The single entry point for the SDK's one run mode: give it an AgentOS API base,
 an agent id, and a Lyzr workspace key, and it returns everything needed to run
-that agent locally — source, harness, the effective model, and the model
-gateway it is bound to.
+that agent locally — harness, the effective model, and the model gateway it is
+bound to. The agent itself is baked into the image, so the document's source is
+not read.
 
     GET {base_url}/v1/agents/{agent_id}      header: x-api-key: <lyzr key>
 
@@ -30,6 +31,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
+
+from .mcp import DEFAULT_MCP_MODE, McpBinding, McpBindingError, parse_bindings
 
 logger = logging.getLogger("computeragent.agentos_agent")
 
@@ -61,9 +64,6 @@ class ResolvedAgent:
     agent_id: str
     name: str
     harness: str
-    #: String URL / path, or an inline identity source. ``None`` when the agent
-    #: has no resolvable source (the caller must then pass ``source=``).
-    source: Any | None
     #: The model string to put on the wire. For a native gateway this is the
     #: backing Lyzr Studio agent id, NOT the catalog name — see `model_of`.
     model: str | None
@@ -73,12 +73,15 @@ class ResolvedAgent:
     #: The server's own ``{baseUrl}{LYZR_UPSTREAM_PATH}``. Preferred over
     #: reconstructing the path client-side.
     gateway_completions_url: str | None
-    #: Lyzr provider-credential id bound for cloning a private source. Echoed so
-    #: a client knows auth is needed; the SDK cannot resolve it to a token
-    #: (that needs an operator service token), so it only ever appears in the
-    #: error message when a private clone fails.
-    credential_id: str | None
     agent_type: str | None
+    #: Who runs the MCP tool loop: ``"engine"`` attaches the bound servers to
+    #: the engine, anything else leaves the tools to Studio.
+    mcp_mode: str = DEFAULT_MCP_MODE
+    #: MCP servers bound to the agent, as AgentOS resolved them for the caller.
+    mcp_bindings: tuple[McpBinding, ...] = ()
+    #: The agent's own (local) SRS RAI policy, combined each turn with the
+    #: org's (global) ones.
+    rai_policy_id: str | None = None
 
     @property
     def has_native_gateway(self) -> bool:
@@ -180,14 +183,6 @@ def _require_supported(doc: dict[str, Any], agent_id: str) -> None:
                 "run mode implements native gateways (and no gateway at all), not generic ones."
             )
 
-    mcp_servers = doc.get("mcp_servers")
-    if isinstance(mcp_servers, list) and mcp_servers:
-        raise UnsupportedAgentError(
-            f"agent {agent_id}: mcp_servers is non-empty ({len(mcp_servers)} bound) and MCP is not "
-            "supported in this run mode. The servers would be silently dropped, so the run is "
-            "refused instead."
-        )
-
     if doc.get("orchestration") is not None:
         raise UnsupportedAgentError(
             f"agent {agent_id}: orchestration is set and sub-agent fan-out is not supported in this "
@@ -269,18 +264,28 @@ def resolve_agent(
     _require_supported(doc, agent_id)
     _require_consistent_gateway(doc, agent_id)
 
+    try:
+        mcp_bindings = parse_bindings(doc.get("mcp_servers"))
+    except McpBindingError as exc:
+        raise UnsupportedAgentError(f"agent {agent_id}: {exc}") from None
+    mcp_mode = doc.get("mcp_mode")
+    rai_policy_id = doc.get("rai_policy_id")
+
     gateway = doc.get("model_gateway") if isinstance(doc.get("model_gateway"), dict) else None
     resolved = ResolvedAgent(
         agent_id=str(doc.get("id") or agent_id),
         name=str(doc.get("name") or agent_id),
         harness=str(doc.get("harness") or "claude-agent-sdk"),
-        source=doc.get("source") or doc.get("sourceUrl"),
         model=model_of(doc),
         gateway_type=(gateway or {}).get("type"),
         gateway_base_url=(gateway or {}).get("baseUrl"),
         gateway_completions_url=(gateway or {}).get("completionsUrl"),
-        credential_id=doc.get("credential_id"),
         agent_type=doc.get("type"),
+        mcp_mode=mcp_mode if isinstance(mcp_mode, str) and mcp_mode else DEFAULT_MCP_MODE,
+        mcp_bindings=mcp_bindings,
+        rai_policy_id=rai_policy_id.strip()
+        if isinstance(rai_policy_id, str) and rai_policy_id.strip()
+        else None,
     )
     logger.debug(
         "resolved agent %s name=%r harness=%s gateway=%s model=%s",

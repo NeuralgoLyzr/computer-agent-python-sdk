@@ -7,19 +7,24 @@ One run mode: name an agent registered in AgentOS, and run it **locally**::
         base_url="http://localhost:8788/agentos/api",
         agent_id="6aa93f1b3817a13d3103d2c1",
         api_key="<lyzr workspace key>",
-        llm_proxy_url="http://127.0.0.1:8786",
+        engine="claude-agent-sdk",
+        llm_url="http://egress/llm",
     ) as agent:
         result = await agent.chat("List the files in your working directory.")
 
 The SDK fetches the agent's definition from AgentOS and reproduces what the
 server's own dispatch path would have sent to a ComputerAgent server — same
-source, same model, same engine environment, same permission mode — except the
-engine runs in this process instead of in a sandbox.
+model, same engine environment, same permission mode — except the engine runs in
+this process instead of in a sandbox.
 
-Everything beyond the three required arguments is an override for something the
-agent document already answers. Two are needed only in specific cases:
-``llm_proxy_url`` for an Anthropic-shaped engine against a native (OpenAI-shaped)
-gateway, and ``git_token`` for a private source.
+The agent itself is baked into the image: nothing is cloned. The engine runs in
+the process's working directory (``options={"cwd": ...}`` overrides it), and the
+agent is defined by the caller's ``options``. With ``gap_dir`` set, the SDK runs
+in GAP mode instead and loads the agent from that directory's ``agent.yaml``.
+
+Every model call goes to ``llm_url``, the egress route for model traffic.
+Everything beyond the required arguments is an override for something the agent
+document already answers.
 """
 
 from __future__ import annotations
@@ -34,10 +39,11 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from ..engines import resolve_engine
+from ..policy.authorizer import PolicyToolAuthorizer
+from ..policy.srs_gate import SrsToolGate
+from ..policy.types import PolicyPrincipal, PolicyResource
 from ..protocol_types import (
-    AgentManifest,
     EngineDriver,
-    IdentitySource,
     PermissionRequest,
     PolicyDecider,
     SessionStore,
@@ -60,7 +66,17 @@ from .errors import (
     UnknownSessionStoreError,
     UnknownSubstrateError,
 )
-from .gateway_envs import GatewayConfigError, build_gateway_envs, build_options, merge_envs
+from .gateway_envs import (
+    ANTHROPIC_SHAPED,
+    GatewayConfigError,
+    build_gateway_envs,
+    build_options,
+    merge_envs,
+)
+from .guardrails import SrsTurnGuard
+from .mcp import build_mcp_servers
+from .settings import SettingsError, resolve_settings
+from .telemetry import build_pipeline
 from .usage import UsageRollup
 
 logger = logging.getLogger("computeragent.harness")
@@ -166,71 +182,48 @@ class ChatHandle:
         )
 
 
-def _validate_source(source: IdentitySource) -> None:
-    """Reject a source that cannot possibly work, while we can still say why.
+def _validate_gap_dir(gap_dir: str | Path) -> Path:
+    """Resolve ``gap_dir`` to the GAP directory, or refuse it naming why.
 
-    Only three argument shapes fail at construction otherwise; a bad `source`
-    used to sail through and surface much later from inside the engine, or —
-    worse — not at all. An empty string is the dangerous one: `Path("")` is
-    `Path(".")`, so a config value that read as blank quietly pointed a
-    bypassPermissions agent at whatever directory the process happened to be in.
+    GAP mode is chosen explicitly, so a directory that is missing, is a file,
+    or has no ``agent.yaml`` fails here rather than quietly running the agent
+    as something other than the GAP agent the caller asked for.
     """
-    if isinstance(source, dict):
-        if source.get("files"):
-            raise AgentResolveError(
-                "an inline source with `files` is not supported: the files are not materialised "
-                "and the workspace falls back to the current working directory, so the agent "
-                "would run against your cwd rather than the files you listed. Write them to a "
-                "directory and pass source=Path(...)."
-            )
-        return
-    if isinstance(source, str):
-        if not source.strip():
-            raise AgentResolveError(
-                "source is an empty string, which would resolve to the current working directory "
-                "and run the agent against it. Pass a real path, a git URL, or omit it to use the "
-                "agent's own source."
-            )
-        return
-    if isinstance(source, Path):
-        if not source.exists():
-            raise AgentResolveError(
-                f"source path does not exist: {source}. The workspace is materialised on the first "
-                "chat, so this would otherwise surface from inside the engine."
-            )
-        if not source.is_dir():
-            raise AgentResolveError(f"source path is not a directory: {source}")
-        return
-    raise AgentResolveError(
-        f"source must be a Path, a git URL/path string, or an inline dict — got "
-        f"{type(source).__name__}."
-    )
-
-
-class _AutoIdentityLoader:
-    """GAP when the workspace is a GAP repo, passthrough when it isn't.
-
-    The choice can only be made after the source has been materialised, since it
-    turns on whether ``agent.yaml`` is at the workspace root — and
-    :class:`~computeragent.identity.gap.GapIdentityLoader` raises rather than
-    degrading when it isn't. Deciding here keeps a plain (non-GAP) repo runnable
-    instead of making the loader a thing callers must get right by hand.
-    """
-
-    name = "auto"
-
-    async def load(
-        self, *, source: IdentitySource, target_engine: str, workspace_path: Path
-    ) -> AgentManifest:
-        from ..identity import resolve_identity_loader
-
-        is_gap = (workspace_path / "agent.yaml").is_file()
-        loader = resolve_identity_loader("gap" if is_gap else "passthrough")
-        logger.debug(
-            "identity loader: %s (agent.yaml %s)", loader.name, "found" if is_gap else "absent"
+    if isinstance(gap_dir, str):
+        if not gap_dir.strip():
+            raise AgentResolveError("gap_dir is an empty string — pass the GAP directory's path.")
+        gap_dir = Path(gap_dir)
+    if not isinstance(gap_dir, Path):
+        raise AgentResolveError(
+            f"gap_dir must be a path (str or Path), got {type(gap_dir).__name__}."
         )
-        return await loader.load(
-            source=source, target_engine=target_engine, workspace_path=workspace_path
+    if not gap_dir.exists():
+        raise AgentResolveError(f"gap_dir does not exist: {gap_dir}")
+    if not gap_dir.is_dir():
+        raise AgentResolveError(f"gap_dir is not a directory: {gap_dir}")
+    if not (gap_dir / "agent.yaml").is_file():
+        raise AgentResolveError(
+            f"gap_dir has no agent.yaml: {gap_dir}. GAP mode loads the agent from that file."
+        )
+    return gap_dir
+
+
+def _refuse_direct_mcp_servers(gap_dir: Path) -> None:
+    """Refuse agent.yaml MCP servers that name their own URL.
+
+    Every MCP call goes through ``mcp_url``. A server in ``agent.yaml`` is
+    reached at whatever URL it names, around the egress proxy, so it is
+    refused at construction rather than connected at the first turn.
+    """
+    from ..identity.gap import _load_yaml
+
+    manifest = _load_yaml(gap_dir / "agent.yaml")
+    servers = manifest.get("mcp_servers") if isinstance(manifest, dict) else None
+    if isinstance(servers, dict) and servers:
+        raise UnsupportedAgentError(
+            f"{gap_dir / 'agent.yaml'}: mcp_servers ({', '.join(map(str, servers))}) connect to "
+            "their own URLs, around the egress proxy. Bind them to the agent in AgentOS so they "
+            "are served through mcp_url."
         )
 
 
@@ -239,35 +232,43 @@ class ComputerAgent:
 
     One instance is one logical session: ``session_started`` fires on the first
     chat and ``session_ended`` on dispose, so N chats collapse into one
-    conversation. Use ``async with`` so the workspace (and any temp clone)
-    closes deterministically.
+    conversation. Use ``async with`` so the session closes deterministically.
     """
 
     def __init__(
         self,
         *,
         # ── required: which agent, where, as whom, and run by what ───────
-        agent_id: str,
-        base_url: str,
-        api_key: str,
+        # Each comes from its argument or, when that is unset, its environment
+        # variable (see `settings.ENV_VARS`); missing ones fail together.
+        agent_id: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
         # Engine name ("claude-agent-sdk" / "gitagent") or an EngineDriver
         # instance. Required: it selects the driver AND which gateway-env
         # branch is built, so inferring it from the agent document meant a
         # document change could silently re-shape ANTHROPIC_BASE_URL and the
         # model string under a caller who never asked for either.
-        engine: str | EngineDriver,
+        engine: str | EngineDriver | None = None,
+        # The egress route every model call is sent to.
+        llm_url: str | None = None,
+        # The egress route for MCP: each server bound to the agent in AgentOS
+        # becomes `{mcp_url}/{server_id}`.
+        mcp_url: str | None = None,
+        # The egress routes for guardrails: the org (global) RAI policies are
+        # read from `{agent_api_url}/v3/org/rai-policy` every turn, and every
+        # check is made against SRS at `srs_url`.
+        agent_api_url: str | None = None,
+        srs_url: str | None = None,
+        # Optional egress routes for telemetry: OTLP to `telemetry_url`, the
+        # AgentOS dashboard events to `{events_url}/events`. Unset is off.
+        telemetry_url: str | None = None,
+        events_url: str | None = None,
         # ── needed only in specific cases ────────────────────────────────
-        # The Anthropic-to-OpenAI translating proxy. Required when an
-        # Anthropic-shaped engine runs against a native (OpenAI-shaped)
-        # gateway, and unused otherwise — see `gateway_envs`.
-        llm_proxy_url: str | None = None,
-        # Only a PRIVATE source needs one. Without it the clone is
-        # unauthenticated, which fails for a private repo.
-        git_token: str | None = None,
+        # GAP mode: load the agent from this directory's agent.yaml (baked
+        # into the image). Unset, the agent is the caller's `options`.
+        gap_dir: str | Path | None = None,
         # ── overrides for what the agent document already answers ────────
-        # Use this workspace instead of cloning the agent's own source. A local
-        # Path, a git URL, or an inline manifest dict.
-        source: IdentitySource | None = None,
         # Merged over whatever the identity loader resolves — caller wins.
         options: Mapping[str, Any] | None = None,
         envs: Mapping[str, str] | None = None,
@@ -282,13 +283,31 @@ class ComputerAgent:
         # Injection point for tests — an httpx-like client for the resolve call.
         _resolve_client: Any | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._api_base = api_base(base_url)
+        # 0. Every setting from its argument or its environment variable.
+        self._settings = resolve_settings(
+            agent_id=agent_id,
+            engine=engine,
+            base_url=base_url,
+            api_key=api_key,
+            llm_url=llm_url,
+            mcp_url=mcp_url,
+            agent_api_url=agent_api_url,
+            srs_url=srs_url,
+            telemetry_url=telemetry_url,
+            events_url=events_url,
+            gap_dir=gap_dir,
+        )
+        engine = self._settings.engine
+        gap_dir = self._settings.gap_dir
+        self._api_base = api_base(self._settings.base_url)
 
         # 1. Ask AgentOS what this agent is. Fails fast and by field name, so a
         #    shape this run mode can't honour never reaches a boot.
         self.agent: ResolvedAgent = resolve_agent(
-            agent_id, base_url=base_url, api_key=api_key, client=_resolve_client
+            self._settings.agent_id,
+            base_url=self._settings.base_url,
+            api_key=self._settings.api_key(),
+            client=_resolve_client,
         )
 
         # 2. Engine: always the caller's, never inferred. `resolve_engine` is
@@ -302,19 +321,15 @@ class ComputerAgent:
         # changes which gateway-env branch is built.
         if engine_name != self.agent.harness:
             logger.warning(
-                "engine=%r overrides agent %s harness=%r; gateway envs follow the ENGINE",
+                "engine=%r overrides agent %s harness=%r; the model string follows the ENGINE",
                 engine_name,
                 self.agent.agent_id,
                 self.agent.harness,
             )
 
-        # 3. Where the model calls go. Raises here, naming the missing
-        #    parameter, rather than surfacing as a 405 mid-run.
+        # 3. Where the model calls go: always llm_url.
         gateway_envs = build_gateway_envs(
-            self.agent,
-            engine_name=engine_name,
-            api_key=api_key,
-            llm_proxy_url=llm_proxy_url,
+            api_key=self._settings.api_key(), llm_url=self._settings.llm_url
         )
         merged_envs = merge_envs(envs, gateway_envs)
         merged_options = build_options(self.agent, engine_name=engine_name, caller_options=options)
@@ -325,16 +340,18 @@ class ComputerAgent:
         if budget_max_usd is not None:
             merged_options.setdefault("max_budget_usd", budget_max_usd)
 
-        # 4. What the agent runs against: the caller's workspace if they gave
-        #    one, else the source the agent document names.
-        effective_source = source if source is not None else self.agent.source
-        if effective_source is None:
-            raise AgentResolveError(
-                f"agent {self.agent.agent_id} has no source and none was passed — give the run a "
-                "workspace with source=Path('...') or register a source on the agent."
-            )
+        # 4. What the agent runs against. The agent is baked into the image:
+        #    GAP mode reads it from `gap_dir`, otherwise the engine runs in the
+        #    process's working directory with the caller's options.
+        from ..identity import resolve_identity_loader
 
-        _validate_source(effective_source)
+        if gap_dir is not None:
+            workspace = _validate_gap_dir(gap_dir)
+            _refuse_direct_mcp_servers(workspace)
+            identity_loader = resolve_identity_loader("gap")
+        else:
+            workspace = Path.cwd()
+            identity_loader = resolve_identity_loader("passthrough")
 
         resolved_store: SessionStore | None = None
         if session_store is not None:
@@ -356,11 +373,66 @@ class ComputerAgent:
                 engine_name,
             )
 
+        # 5. MCP servers bound to the agent, all through mcp_url.
+        mcp_servers, mcp_allowed_tools = build_mcp_servers(
+            self.agent.mcp_bindings,
+            mcp_mode=self.agent.mcp_mode,
+            mcp_url=self._settings.mcp_url,
+            api_key=self._settings.api_key(),
+            anthropic_shaped=engine_name in ANTHROPIC_SHAPED,
+        )
+
+        # 6. SRS guardrails. Each turn combines the org (global) policies with
+        #    the agent's own (local) one; the user's message and every tool
+        #    call are checked against that set. A caller's own policy_decider
+        #    replaces the tool-call gate; the input check always runs.
+        policy_agent_name = self.agent.name
+        self._srs_gate = SrsToolGate(
+            srs_url=self._settings.srs_url,
+            api_key=self._settings.api_key,
+            agent_name=policy_agent_name,
+            engine_name=engine_name,
+            mcp_server_names=list(mcp_servers),
+        )
+        if policy_decider is None:
+            policy_decider = PolicyToolAuthorizer(
+                engine=self._srs_gate,
+                principal_resolver=lambda _ctx: PolicyPrincipal(id=policy_agent_name),
+                resource_resolver=lambda ctx: PolicyResource(
+                    type="agent",
+                    agent_name=policy_agent_name,
+                    session_id=str(
+                        getattr(ctx, "session_id", None)
+                        or (ctx.get("session_id") if isinstance(ctx, dict) else "")
+                        or ""
+                    ),
+                ),
+            )
+        turn_guard = SrsTurnGuard(
+            agent_api_url=self._settings.agent_api_url,
+            srs_url=self._settings.srs_url,
+            api_key=self._settings.api_key,
+            agent_name=policy_agent_name,
+            local_policy_ids=[self.agent.rai_policy_id] if self.agent.rai_policy_id else [],
+            gate=self._srs_gate,
+        )
+
+        # 7. Telemetry through its egress routes, unless the caller brought a
+        #    pipeline of their own. One this agent builds, it also closes.
+        self._owned_pipeline: Pipeline | None = None
+        if telemetry_pipeline is None:
+            self._owned_pipeline = build_pipeline(
+                telemetry_url=self._settings.telemetry_url,
+                events_url=self._settings.events_url,
+                api_key=self._settings.api_key,
+            )
+            telemetry_pipeline = self._owned_pipeline
+
         self._coordinator: _CoordinatorLike = HarnessCoordinator(
             engine=resolved_engine,
             substrate=LocalSubstrate(),
-            identity_loader=_AutoIdentityLoader(),
-            source=effective_source,
+            identity_loader=identity_loader,
+            source=workspace,
             envs=merged_envs,
             session_store=resolved_store,
             session_id=session_id,
@@ -372,7 +444,9 @@ class ComputerAgent:
             budget_max_usd=budget_max_usd,
             telemetry_pipeline=telemetry_pipeline,
             options_overlay=merged_options,
-            git_token=git_token,
+            mcp_servers=mcp_servers,
+            mcp_allowed_tools=mcp_allowed_tools,
+            turn_guard=turn_guard,
         )
 
     async def __aenter__(self) -> ComputerAgent:
@@ -383,7 +457,13 @@ class ComputerAgent:
 
     async def dispose(self) -> None:
         """Tear down the workspace and flush telemetry."""
-        await self._coordinator.dispose()
+        try:
+            await self._coordinator.dispose()
+        finally:
+            if self._owned_pipeline is not None:
+                with suppress(Exception):
+                    await self._owned_pipeline.aclose()
+                self._owned_pipeline = None
 
     def chat(self, message: ChatInput) -> ChatHandle:
         """Start one chat turn. Returns immediately; iterate or await the
@@ -400,6 +480,7 @@ __all__ = [
     "GatewayConfigError",
     "HarnessError",
     "ResolvedAgent",
+    "SettingsError",
     "UnknownEngineError",
     "UnknownIdentityLoaderError",
     "UnknownSessionStoreError",
