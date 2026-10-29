@@ -1,4 +1,4 @@
-# UAT default AgentCore sandbox image: the CAS SDK's app server (app.py),
+# Default AgentCore sandbox image: the CAS SDK's app server (app.py),
 # installed from this checkout. Old CAS drives it through /invocations (relay
 # envelope v1).
 #

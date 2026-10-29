@@ -82,7 +82,7 @@ async def test_the_session_agent_comes_from_envs(agent_doc):
 
 @respx.mock
 async def test_session_egress_urls_yield_to_the_image(agent_doc, monkeypatch):
-    egress = "https://egress.uat.example"
+    egress = "https://egress.example"
     session_urls = {
         "COMPUTER_AGENT_EGRESS_API_URL": f"{egress}/computer-agent-api/agentos/api",
         "COMPUTER_AGENT_EGRESS_LLM_URL": f"{egress}/llm",

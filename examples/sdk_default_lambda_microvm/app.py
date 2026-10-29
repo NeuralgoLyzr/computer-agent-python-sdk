@@ -1,4 +1,4 @@
-"""The UAT default Lambda MicroVM sandbox: the CAS SDK's app server, which old CAS
+"""The default Lambda MicroVM sandbox: the CAS SDK's app server, which old CAS
 drives when an agent names no MicroVM image of its own.
 
 On ``0.0.0.0:8080`` it serves
