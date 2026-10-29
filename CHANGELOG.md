@@ -88,7 +88,7 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
   Old CAS passes the same names in `POST /v1/sessions` `envs`: the app server
   seeds `COMPUTER_AGENT_EGRESS_PROXY_SECRET` from it (the `LYZR_API_KEY` field
   is no longer read), builds the session's agent from `COMPUTER_AGENT_ID`
-  (falling back to the image's own), and takes each
+  (falling back to the image's own), and takes `COMPUTER_AGENT_ENGINE` and each
   `COMPUTER_AGENT_EGRESS_*_URL` route the image's own environment or the agent
   factory does not set. The engine's per-turn environment carries the token as
   `COMPUTER_AGENT_EGRESS_PROXY_SECRET`.

@@ -66,7 +66,7 @@ variable. Every missing required setting is reported in one `SettingsError`.
 |---|---|---|---|
 | `COMPUTER_AGENT_ID` | `agent_id` | yes | CAS, per session (`POST /v1/sessions` `envs`) |
 | `COMPUTER_AGENT_EGRESS_PROXY_SECRET` | `api_key` | yes | CAS, per session and per message. **Never bake it into an image.** |
-| `COMPUTER_AGENT_ENGINE` | `engine` | yes | the image (`claude-agent-sdk` or `gitagent`) |
+| `COMPUTER_AGENT_ENGINE` | `engine` | yes | the image (`claude-agent-sdk` or `gitagent`), or CAS per session when the image leaves it unset |
 | `COMPUTER_AGENT_EGRESS_API_URL` | `base_url` | yes | CAS per session, or the image: `<proxy>/computer-agent-api/agentos/api` |
 | `COMPUTER_AGENT_EGRESS_LLM_URL` | `llm_url` | yes | CAS per session, or the image: `<proxy>/llm` |
 | `COMPUTER_AGENT_EGRESS_MCP_URL` | `mcp_url` | yes | CAS per session, or the image: `<proxy>/mcp/v1` |
@@ -542,7 +542,7 @@ With neither an agent image nor a server default, CAS answers `422 MICROVM_IMAGE
 | When | Request | What the app server does |
 |---|---|---|
 | Boot (MicroVM) | lifecycle hooks | answers `200` |
-| Session start | `POST /v1/sessions` with `envs.COMPUTER_AGENT_ID`, `envs.COMPUTER_AGENT_EGRESS_PROXY_SECRET` and the six `envs.COMPUTER_AGENT_EGRESS_*_URL` | builds the session's `ComputerAgent` for that agent, with that token, on those routes (an egress route the image sets itself wins); every other `envs` key is ignored |
+| Session start | `POST /v1/sessions` with `envs.COMPUTER_AGENT_ID`, `envs.COMPUTER_AGENT_EGRESS_PROXY_SECRET`, the six `envs.COMPUTER_AGENT_EGRESS_*_URL` and optionally `envs.COMPUTER_AGENT_ENGINE` | builds the session's `ComputerAgent` for that agent, with that token, engine and routes (an engine or route the image sets itself wins); every other `envs` key is ignored |
 | Each turn | `POST /v1/sessions/{id}/messages` with `credential` | uses the fresh token for the turn |
 | Streaming | `GET /v1/sessions/{id}/events` | the turn's events; one `ca_session_ended` when the session ends |
 | AgentCore | the same requests inside `POST /invocations` (relay envelope v1) | answers HTTP 200 always; the real status is in the envelope |

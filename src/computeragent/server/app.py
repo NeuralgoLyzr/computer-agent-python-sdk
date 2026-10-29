@@ -20,13 +20,14 @@ One ``ComputerAgent`` per session, built from the image's settings
 (``COMPUTER_AGENT_*``) with no ``api_key=``. Old CAS passes settings in the
 session's ``envs``: ``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` (the sandbox token)
 seeds the process environment; ``COMPUTER_AGENT_ID`` is the session's agent
-(else the image's own); and each ``COMPUTER_AGENT_EGRESS_*_URL`` is used only
-when the image's environment does not set it (an agent factory's own arguments
-win over both). Every other ``envs`` key is ignored. Each message's
+(else the image's own); and ``COMPUTER_AGENT_ENGINE`` and each
+``COMPUTER_AGENT_EGRESS_*_URL`` are used only when the image's environment does
+not set them (an agent factory's own arguments win over both). Every other
+``envs`` key is ignored. Each message's
 ``credential`` replaces the token before its turn. The token is process-wide,
 so turns run one at a time per process.
-``engine`` is checked against the registered engines and the image's own
-engine runs; ``identity`` is not read.
+``engine`` is checked against the registered engines; the engine that runs is
+the agent's (``COMPUTER_AGENT_ENGINE`` as above); ``identity`` is not read.
 ``messages`` are the session's first turns and ``streamingInput: false`` closes
 its input after them, as in the reference. Resume across sandboxes is the
 session store's (``sessionStore``, keyed by ``sessionId``).
@@ -79,9 +80,11 @@ ERROR_SOURCE = "COMPUTERAGENT_SERVER"
 #: also the variable the SDK reads it from.
 TOKEN_ENV = "COMPUTER_AGENT_EGRESS_PROXY_SECRET"
 AGENT_ID_ENV = "COMPUTER_AGENT_ID"
-#: Egress routes CAS may pass in ``envs`` (``ComputerAgent`` argument names).
-#: The image's own variables and the agent factory's arguments win over them.
-SESSION_URL_SETTINGS = (
+#: Settings CAS may pass in ``envs`` (``ComputerAgent`` argument names): the
+#: engine and the egress routes. The image's own variables and the agent
+#: factory's arguments win over them.
+SESSION_ENV_SETTINGS = (
+    "engine",
     "base_url",
     "llm_url",
     "mcp_url",
@@ -122,7 +125,8 @@ def default_agent_factory(**kwargs: Any) -> Any:
     on_tool_call = kwargs.pop("on_tool_call")
     # The Claude engine never asks for approvals (it runs under a
     # prompt-skipping permission mode); passing a callback only logs a warning.
-    if os.environ.get("COMPUTER_AGENT_ENGINE") != "claude-agent-sdk":
+    engine = kwargs.get("engine") or os.environ.get("COMPUTER_AGENT_ENGINE")
+    if engine != "claude-agent-sdk":
         kwargs["on_tool_call"] = on_tool_call
     return ComputerAgent(**kwargs)
 
@@ -445,7 +449,7 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
             agent_kwargs["agent_id"] = envs[AGENT_ID_ENV].strip()
         from ..harness.settings import ENV_VARS
 
-        for name in SESSION_URL_SETTINGS:
+        for name in SESSION_ENV_SETTINGS:
             value = envs.get(ENV_VARS[name], "").strip()
             if value and not os.environ.get(ENV_VARS[name], "").strip():
                 agent_kwargs[name] = value

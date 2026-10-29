@@ -110,6 +110,26 @@ async def test_session_egress_urls_yield_to_the_image(agent_doc, monkeypatch):
     }  # llm_url: the image's own variable wins
 
 
+@respx.mock
+@pytest.mark.parametrize(
+    ("image_engine", "expected"),
+    [(None, "gitagent"), ("claude-agent-sdk", None)],  # None: the image's own engine runs
+)
+async def test_session_engine_yields_to_the_image(agent_doc, monkeypatch, image_engine, expected):
+    if image_engine is None:
+        monkeypatch.delenv("COMPUTER_AGENT_ENGINE", raising=False)
+    else:
+        monkeypatch.setenv("COMPUTER_AGENT_ENGINE", image_engine)
+    mock_backends(agent_doc)
+    calls: list = []
+    envs = {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_1", "COMPUTER_AGENT_ENGINE": " gitagent "}
+    async with client_for(make_app(FakeEngine(), calls)) as client:
+        r = await client.post("/v1/sessions", json=session_body(envs=envs))
+
+    assert r.status_code == 201
+    assert calls[0].get("engine") == expected
+
+
 def test_the_default_factory_passes_no_api_key(monkeypatch):
     seen = {}
 
@@ -124,6 +144,27 @@ def test_the_default_factory_passes_no_api_key(monkeypatch):
 
     assert "api_key" not in seen
     assert seen["on_tool_call"] is print
+
+
+def test_the_default_factory_follows_the_session_engine(monkeypatch):
+    seen = {}
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr("computeragent.harness.ComputerAgent", Recorder)
+    monkeypatch.delenv("COMPUTER_AGENT_ENGINE", raising=False)
+
+    default_agent_factory(engine="gitagent", session_id="s", options=None, on_tool_call=print)
+
+    assert seen["on_tool_call"] is print  # gitagent asks for approvals through it
+    seen.clear()
+    default_agent_factory(
+        engine="claude-agent-sdk", session_id="s", options=None, on_tool_call=print
+    )
+
+    assert "on_tool_call" not in seen
 
 
 @pytest.mark.parametrize(
