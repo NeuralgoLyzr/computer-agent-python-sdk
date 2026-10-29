@@ -1,4 +1,4 @@
-"""The UAT default AgentCore sandbox: the CAS SDK's app server, which old CAS
+"""The default AgentCore sandbox: the CAS SDK's app server, which old CAS
 drives when an agent names no AgentCore runtime of its own.
 
 On ``0.0.0.0:8080`` it serves AgentCore's contract

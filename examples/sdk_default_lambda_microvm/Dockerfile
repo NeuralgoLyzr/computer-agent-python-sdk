@@ -1,4 +1,4 @@
-# UAT default Lambda MicroVM sandbox image: the CAS SDK's app server (app.py),
+# Default Lambda MicroVM sandbox image: the CAS SDK's app server (app.py),
 # installed from this checkout. Old CAS drives it through the harness API.
 #
 # Build from the repository root (MicroVMs are arm64), after creating the

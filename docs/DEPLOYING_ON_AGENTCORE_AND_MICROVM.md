@@ -18,7 +18,7 @@ already run. It covers:
 10. [Troubleshooting](#10-troubleshooting).
 
 Working examples of everything below are in `examples/sdk_default_lambda_microvm/` and
-`examples/sdk_default_agentcore/`, the sources of the UAT default sandbox images (appendix). The
+`examples/sdk_default_agentcore/`: default sandbox images that run any agent CAS hands them. The
 settings reference is [`USING_THE_SDK.md`](USING_THE_SDK.md) §3.
 
 ## How the pieces fit
@@ -261,32 +261,18 @@ aws ecr set-repository-policy --repository-name <team>/<agent>-sandbox --policy-
 AgentCore needs only `ecr:BatchGetImage` and `ecr:GetDownloadUrlForLayer`. Lambda MicroVM's build
 role also needs `ecr:BatchCheckLayerAvailability`.
 
-**In Lyzr UAT** (account `425642439121`, `us-east-1`): repositories are named `computer-agent/<name>`
-and are created by Terraform (`lyzr-studio-infra-aws`, `infrastructure/ecr`, `module.ecr`: tag
-mutability `MUTABLE`, enhanced scanning), not by hand. Add the name there and the repository policy
-next to the runtime that pulls it, as `infrastructure/serverless/lambda-microvm/sdk-default.tf`
-does for the SDK default images:
-
-| Repository | Policy statement | Principal | Actions |
-|---|---|---|---|
-| `computer-agent/sdk-default-lambda-microvm` | `PullForMicrovmBuild` | `lyzr-studio-uat-computeragent-lambda-microvm-build` | `BatchGetImage`, `GetDownloadUrlForLayer`, `BatchCheckLayerAvailability` |
-| `computer-agent/sdk-default-agentcore` | `PullForAgentcoreRuntime` | `lyzr-studio-uat-computeragent-agentcore-exec` | `BatchGetImage`, `GetDownloadUrlForLayer` |
-
-Push with the SSO profile `lyzr-studio-uat` (role `LyzrDeveloper`).
-
 ## 6. Register a Lambda MicroVM image
 
 ### 6.1 Prerequisites
 
-| What | Requirement | In Lyzr UAT |
-|---|---|---|
-| Build role | trusted by `lambda.amazonaws.com`. It can read your code artifact (`s3:GetObject`) and pull your image (§5). | `arn:aws:iam::425642439121:role/lyzr-studio-uat-computeragent-lambda-microvm-build`. Its inline policy `ecr-read` allows `ecr:GetAuthorizationToken` on `*`, the three pull actions on `computer-agent/lambda-microvm`, and `s3:GetObject` on the build bucket. Any other repository grants it pull through a repository policy (§5). |
-| Execution role | the role the running MicroVM assumes. CAS passes it on every `RunMicrovm`; it is not part of the image. | `lyzr-studio-uat-computeragent-lambda-microvm-exec`, inline policy `bedrock-invoke`. CAS reads it from `LAMBDA_MICROVM_EXECUTION_ROLE_ARN` (§8.5). |
-| Your principal | `lambda:CreateMicrovmImage` / `lambda:UpdateMicrovmImage`, and `iam:PassRole` on the build role. Without `iam:PassRole` the call fails with `AccessDeniedException … iam:PassRole`. | `LyzrDeveloper` (profile `lyzr-studio-uat`) can push to ECR and upload the artifact, but has no `iam:PassRole` on the build role. Run `create-microvm-image` / `update-microvm-image` with `AdministratorAccess` (profile `lyzr-studio-uat-admin`), or through Terraform. |
-| S3 bucket | one the build role can read, for the code artifact | `lyzr-studio-uat-computeragent-microvm-build-425642439121`, one prefix per image (`computeragent-sdk-default/artifact.zip`) |
-| Base image | the AWS image the build runs on | `arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1` |
-| Egress | the MicroVM must reach the egress proxy. `INTERNET_EGRESS` for a public proxy; a VPC egress connector for a private one. | `INTERNET_EGRESS` (AWS-managed connector) to `https://computer-agent-egress.uat.studio.lyzr.ai` |
-| Terraform | the roles, the bucket and the images are managed resources | `lyzr-studio-infra-aws`, `infrastructure/serverless/lambda-microvm` (`aws_lambdamicrovms_image`); an image created by hand is adopted with an `import` block |
+| What | Requirement |
+|---|---|
+| Build role | trusted by `lambda.amazonaws.com`. It can read your code artifact (`s3:GetObject`) and pull your image (§5): `ecr:GetAuthorizationToken` on `*`, plus the three pull actions on your repository, in the role's policy or a repository policy. |
+| Execution role | the role the running MicroVM assumes, e.g. for `bedrock:InvokeModel`. CAS passes it on every `RunMicrovm` (`LAMBDA_MICROVM_EXECUTION_ROLE_ARN`, §8.5); it is not part of the image. |
+| Your principal | `lambda:CreateMicrovmImage` / `lambda:UpdateMicrovmImage`, and `iam:PassRole` on the build role. Without `iam:PassRole` the call fails with `AccessDeniedException … iam:PassRole`. Pushing to ECR and uploading the artifact need no `iam:PassRole`, so a narrower role can do those. |
+| S3 bucket | one the build role can read, for the code artifact; one prefix per image (`<agent>-sandbox/artifact.zip`) |
+| Base image | the AWS image the build runs on: `arn:aws:lambda:<region>:aws:microvm-image:al2023-1` |
+| Egress | the MicroVM must reach the egress proxy. `INTERNET_EGRESS` (the AWS-managed connector) for a public proxy; a VPC egress connector for a private one. |
 
 ### 6.2 The code artifact
 
@@ -366,14 +352,13 @@ aws s3 rm s3://<bucket>/<agent>-sandbox/artifact.zip
 
 ### 7.1 Prerequisites
 
-| What | Requirement | In Lyzr UAT |
-|---|---|---|
-| Execution role | trusted by `bedrock-agentcore.amazonaws.com`. It can pull your image (§5) and write logs to `/aws/bedrock-agentcore/runtimes/*`. | `arn:aws:iam::425642439121:role/lyzr-studio-uat-computeragent-agentcore-exec`. Its trust is limited to `aws:SourceAccount` `425642439121` and `aws:SourceArn` `runtime/*`. Inline policy `agentcore-exec` (`agentcore-exec.tf`): `ecr:GetAuthorizationToken`; pull (`BatchGetImage`, `GetDownloadUrlForLayer`) on `computer-agent/sdk-default-agentcore`; logs under `/aws/bedrock-agentcore/runtimes/lyzr_studio_uat_computeragent*`. Until lyzr-studio-infra-aws#115 is applied, the deployed copy pulls `computer-agent/agentcore` and logs `runtimes/*`. Any other repository grants it pull through a repository policy (§5). |
-| Your principal | `bedrock-agentcore:CreateAgentRuntime` / `UpdateAgentRuntime`, and `iam:PassRole` on the execution role | `LyzrDeveloper` (profile `lyzr-studio-uat`) can create and update runtimes. |
-| Repository policy first | `create-agent-runtime` checks the pull with the execution role | Without it: `ValidationException … Access denied while validating ECR URI` |
-| Network | `PUBLIC` reaches a public egress proxy. For a private proxy use `VPC` with your subnets and security groups. | `PUBLIC`, to `https://computer-agent-egress.uat.studio.lyzr.ai` |
-| Name | letters, digits and `_`; the ARN gets a 10-character suffix | `lyzr_studio_uat_computeragent_<name>`. The Terraform log policy covers that prefix. |
-| Terraform | the runtime is a managed resource | `infrastructure/serverless/lambda-microvm/sdk-default.tf` (`aws_bedrockagentcore_agent_runtime`, `ignore_changes = [agent_runtime_artifact]` so image updates go through the CLI) |
+| What | Requirement |
+|---|---|
+| Execution role | trusted by `bedrock-agentcore.amazonaws.com`, best limited with `aws:SourceAccount` = your account and `aws:SourceArn` = `arn:aws:bedrock-agentcore:<region>:<account>:runtime/*`. It needs `ecr:GetAuthorizationToken`, pull (`BatchGetImage`, `GetDownloadUrlForLayer`) on your repository (§5), and logs under `/aws/bedrock-agentcore/runtimes/<runtime name>*`. |
+| Your principal | `bedrock-agentcore:CreateAgentRuntime` / `UpdateAgentRuntime`, and `iam:PassRole` on the execution role |
+| Repository policy first | `create-agent-runtime` checks the pull with the execution role; without it the call fails with `ValidationException … Access denied while validating ECR URI` |
+| Network | `PUBLIC` reaches a public egress proxy. For a private proxy use `VPC` with your subnets and security groups. |
+| Name | letters, digits and `_`, starting with a letter; the ARN adds a 10-character suffix. A shared prefix lets one log policy cover all your runtimes. |
 
 ### 7.2 Create the runtime
 
@@ -420,13 +405,13 @@ on every call through the egress proxy. You create and change both through Agent
 
 ### 8.1 Before you start
 
-| What | Requirement | In Lyzr UAT |
-|---|---|---|
-| AgentOS API | `<agentos>/agentos/api/v1` | `https://agentos-api.uat.studio.lyzr.ai/agentos/api/v1` |
-| Credential | your own **Lyzr workspace key** as `x-api-key`. AgentOS writes the gateway agent with it, so a session cookie alone is refused with `401 AUTH_LYZR_KEY_REQUIRED` as soon as `llm`, `guardrails` or `mcp` is sent. | a UAT workspace key |
-| Permissions | `agents:write` to register or patch; `mcp:bind` as well to set or clear `mcp` | granted by your AgentOS role |
-| Agent gateway | configured on AgentOS (`AGENT_GATEWAY_URL`), else `503 AGENT_GATEWAY_NOT_CONFIGURED` | configured |
-| Your ids | an SRS RAI policy id for `guardrails`, MCP server ids and their action names for `mcp`, a credential id for a private source | from your workspace |
+| What | Requirement |
+|---|---|
+| AgentOS API | `https://<agentos host>/agentos/api/v1` |
+| Credential | your own **Lyzr workspace key** as `x-api-key`. AgentOS writes the gateway agent with it, so a session cookie alone is refused with `401 AUTH_LYZR_KEY_REQUIRED` as soon as `llm`, `guardrails` or `mcp` is sent. |
+| Permissions | `agents:write` to register or patch; `mcp:bind` as well to set or clear `mcp` |
+| Agent gateway | configured on AgentOS (`AGENT_GATEWAY_URL`), else `503 AGENT_GATEWAY_NOT_CONFIGURED` |
+| Your ids | an SRS RAI policy id for `guardrails`, MCP server ids and their action names for `mcp`, a credential id for a private source |
 
 ### 8.2 Register a new agent
 
@@ -434,7 +419,7 @@ on every call through the egress proxy. You create and change both through Agent
 go to the gateway agent, everything else to the registry. A full example, with the image of §6:
 
 ```bash
-AGENTOS=https://agentos-api.uat.studio.lyzr.ai/agentos/api/v1
+AGENTOS=https://<agentos host>/agentos/api/v1
 curl -s -X POST "$AGENTOS/agents/register" \
   -H "x-api-key: $LYZR_KEY" -H 'content-type: application/json' -d '{
   "name": "support-agent",
@@ -447,7 +432,7 @@ curl -s -X POST "$AGENTOS/agents/register" \
     {"server_id": "<MCP server id>", "action_names": ["search", "get_issue"], "tool_name": "Jira Cloud"}
   ]},
   "runtime": "lambda-microvm",
-  "image": {"runtime": "lambda-microvm", "ref": "arn:aws:lambda:us-east-1:425642439121:microvm-image:<name>", "version": "1.0"},
+  "image": {"runtime": "lambda-microvm", "ref": "arn:aws:lambda:<region>:<account>:microvm-image:<agent>-sandbox", "version": "1.0"},
   "credentials": {"id": "<credential id>", "provider_id": "github_app"},
   "type": "managed"
 }'
@@ -459,11 +444,11 @@ curl -s -X POST "$AGENTOS/agents/register" \
 
 - `id` is the registry id, used in every `/agents/{id}` path and passed to the sandbox as
   `COMPUTER_AGENT_ID`. `gatewayAgentId` names the gateway agent AgentOS created.
-- **Leave out `image` (and `runtime`)** to run on the server defaults: in UAT the SDK default
-  sandboxes (appendix). With `runtime` unset, `image.runtime` picks the runtime.
-- **In UAT, set `llm.provider` to `anthropic`.** AgentOS defaults it to `kong`, which the UAT
-  gateway does not enable, so the gateway refuses the agent (§9.2). With no `llm` at all the gateway
-  agent gets AgentOS's default model (`AGENTOS_DEFAULT_MODEL`, `claude-haiku-4-5`) on that provider.
+- **Leave out `image` (and `runtime`)** to run on the server defaults (`LAMBDA_MICROVM_IMAGE_ARN`,
+  `AGENTCORE_RUNTIME_ARN`, §8.5). With `runtime` unset, `image.runtime` picks the runtime.
+- **Set `llm.provider` to one the gateway's catalog enables** (§9.2). AgentOS defaults it to
+  `kong`; a gateway without `kong` refuses the agent. With no `llm` at all the gateway agent gets
+  AgentOS's default model (`AGENTOS_DEFAULT_MODEL`, `claude-haiku-4-5`) on that provider.
 - `name` is unique within the owning group: a second register with the same name is
   `409 AGENT_NAME_TAKEN` (with the existing id) unless the body has `"update": true`, which edits
   it in place. `PATCH` (§8.3) is the usual way to edit.
@@ -498,8 +483,8 @@ patch '{"guardrails": {"config": {"id": "<SRS RAI policy id>"}}}'               
 patch '{"guardrails": null}'                                                          # remove it
 patch '{"mcp": {"servers": [{"server_id": "<id>", "action_names": ["search"], "tool_name": "Jira Cloud"}]}}'  # replace the MCP servers
 patch '{"mcp": null}'                                                                 # remove every MCP server
-patch '{"image": {"runtime": "agentcore", "ref": "arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/<name>-<10 chars>"}}'  # move to AgentCore
-patch '{"image": {"runtime": "lambda-microvm", "ref": "arn:aws:lambda:us-east-1:425642439121:microvm-image:<name>", "version": "2.0"}}'  # pin a MicroVM version
+patch '{"image": {"runtime": "agentcore", "ref": "arn:aws:bedrock-agentcore:<region>:<account>:runtime/<agent>_sandbox-<10 chars>"}}'  # move to AgentCore
+patch '{"image": {"runtime": "lambda-microvm", "ref": "arn:aws:lambda:<region>:<account>:microvm-image:<agent>-sandbox", "version": "2.0"}}'  # pin a MicroVM version
 patch '{"image": null, "runtime": ""}'                                                # back to the server defaults
 patch '{"name": "support-agent-v2"}'                                                  # rename (cascades; see below)
 ```
@@ -532,24 +517,22 @@ CAS must be allowed to use the image: `lambda:RunMicrovm` on the MicroVM image, 
 `bedrock-agentcore:InvokeAgentRuntime` on the runtime. A refusal at boot surfaces as
 `MICROVM_AGENT_IMAGE_*` or `AGENTCORE_AGENT_RUNTIME_ACCESS_DENIED`.
 
-In Lyzr UAT, CAS (`computeragent-server`) runs as the Pod Identity role
-`lyzr-studio-uat-computeragent-app` (Terraform `infrastructure/iam/pod-identity`), which already
-covers any image or runtime in the account:
+CAS's own role needs, for any image or runtime it should boot:
 
-| Policy | Allows |
+| Runtime | Permissions |
 |---|---|
-| `lyzr-studio-uat-computeragent-lambda-microvm` | `lambda:RunMicrovm`, `CreateMicrovmAuthToken`, `TerminateMicrovm`, `GetMicrovmImage`, `GetMicrovmImageVersion` on `*`; `iam:PassRole` on `lyzr-studio-uat-computeragent-lambda-microvm-exec`; `lambda:PassNetworkConnector` on the AWS-managed connectors |
-| `lyzr-studio-uat-computeragent-agentcore` | `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on `runtime/*` |
+| Lambda MicroVM | `lambda:RunMicrovm`, `CreateMicrovmAuthToken`, `TerminateMicrovm`, `GetMicrovmImage`, `GetMicrovmImageVersion`; `iam:PassRole` on the MicroVM execution role; `lambda:PassNetworkConnector` on `arn:aws:lambda:<region>:aws:network-connector:aws-network-connector:*` |
+| AgentCore | `bedrock-agentcore:InvokeAgentRuntime`, `StopRuntimeSession` on `runtime/*` |
 
-Its settings (`environments/uat/computer-agent-values.yaml` in `lyzr-studio-k8-manifests-aws`):
+Its settings:
 
-| Setting | UAT value | Meaning |
-|---|---|---|
-| `LAMBDA_MICROVM_IMAGE_ARN` (`lambdaMicrovm.imageArn`) | the SDK default MicroVM image | the image for an agent with none |
-| `LAMBDA_MICROVM_EXECUTION_ROLE_ARN` (`lambdaMicrovm.executionRoleArn`) | `lyzr-studio-uat-computeragent-lambda-microvm-exec` | the role every MicroVM runs as |
-| `AGENTCORE_RUNTIME_ARN` | the SDK default AgentCore runtime | the runtime for an agent with none |
-| `AGENTCORE_QUALIFIER` | unset (`DEFAULT`) | the endpoint invoked when the agent's `image.version` is empty |
-| `CAS_EGRESS_PROXY_PUBLIC_URL` | `https://computer-agent-egress.uat.studio.lyzr.ai` | the proxy CAS derives the six `COMPUTER_AGENT_EGRESS_*_URL` from |
+| Setting | Meaning |
+|---|---|
+| `LAMBDA_MICROVM_IMAGE_ARN` | the image for an agent with none |
+| `LAMBDA_MICROVM_EXECUTION_ROLE_ARN` | the role every MicroVM runs as |
+| `AGENTCORE_RUNTIME_ARN` | the runtime for an agent with none |
+| `AGENTCORE_QUALIFIER` | the endpoint invoked when the agent's `image.version` is empty; default `DEFAULT` |
+| `CAS_EGRESS_PROXY_PUBLIC_URL` | the egress proxy CAS derives the six `COMPUTER_AGENT_EGRESS_*_URL` from |
 
 With neither an agent image nor a server default, CAS answers `422 MICROVM_IMAGE_REQUIRED` or
 `AGENTCORE_RUNTIME_REQUIRED` before any AWS call.
@@ -590,18 +573,19 @@ providers it implements) and the deployment's catalog (the ones this gateway has
 URLs and keys). A provider missing from the catalog is refused when AgentOS saves the agent:
 `422 AGENT_GATEWAY_CONFIG_REJECTED` with `meta.gatewayCode: provider_unknown`.
 
-| Section | AgentOS accepts | Gateway implements | UAT catalog enables | Usable from AgentOS in UAT |
-|---|---|---|---|---|
-| `llm` | `kong` (default), `anthropic` | `kong`, `litellm`, `anthropic`, `openai` | `anthropic`, `openai` | **`anthropic`** |
-| `guardrails` | `lyzr-srs` | `lyzr-srs` | `lyzr-srs` (SRS API `v1`) | `lyzr-srs` |
-| `mcp` | `lyzr-mcp` | `lyzr-mcp` | `lyzr-mcp` | `lyzr-mcp` |
-| `git` | not settable: AgentOS writes `github-app` for a GitHub `source` | `github-app` | `github-app` on `main`; none on the `feat/uat-lyzr-computer-agent-service` branch | `github-app` once enabled |
-| `telemetry` | not settable: AgentOS always writes the `signoz` sink | `signoz`, `new-relic` | `signoz`, `new-relic` | `signoz` |
+| Section | AgentOS accepts | Gateway implements |
+|---|---|---|
+| `llm` | `kong` (default), `anthropic` | `kong`, `litellm`, `anthropic`, `openai` |
+| `guardrails` | `lyzr-srs` | `lyzr-srs` |
+| `mcp` | `lyzr-mcp` | `lyzr-mcp` |
+| `git` | not settable: AgentOS writes `github-app` for a GitHub `source` | `github-app` |
+| `telemetry` | not settable: AgentOS always writes the `signoz` sink | `signoz`, `new-relic` |
 
-The UAT catalog is the agent gateway's `providers` block in `environments/uat/values.yaml` of
-`lyzr-studio-k8-manifests-aws`; the gateway reads it from `AGENT_GATEWAY_CATALOG_PATH`. Its
-provider URLs and keys are deployment settings (`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`,
-`LYZR_SRS_BASE_URL`, `LYZR_MCP_BASE_URL`, …), never part of an agent.
+Which of these a deployment enables is its catalog, the gateway's `providers` config read from
+`AGENT_GATEWAY_CATALOG_PATH`; ask the gateway's operator. Provider URLs and keys are deployment
+settings (`ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`, `LYZR_SRS_BASE_URL`, `LYZR_MCP_BASE_URL`, …),
+never part of an agent. A catalog without a `git` provider refuses every agent with a GitHub
+`source`, since AgentOS always writes that section.
 
 ### 9.3 Gateway sections: settings
 
@@ -646,7 +630,7 @@ failover, more than one guardrail policy, `failOpen: true`, `readOnlyTools`, and
 | `ValidationException: Invalid ARN format` on `get-microvm-image-version` | The image name was passed | Pass the image ARN |
 | MicroVM build hangs at `ready`, or the container exits at start | The app requires a per-session value at boot | Read `COMPUTER_AGENT_ID` and the token per session; the app server does |
 | Agent registration: `IMAGE_REF_INVALID` / `AGENTCORE_RUNTIME_ARN_INVALID` | `ref` is an ECR URI or a malformed ARN | Register the MicroVM image ARN or the AgentCore runtime ARN (§8) |
-| Register/PATCH: `422 AGENT_GATEWAY_CONFIG_REJECTED`, `meta.gatewayCode: provider_unknown` | A provider the deployment's gateway catalog does not enable, such as AgentOS's default `kong` in UAT, or `github-app` for a GitHub source where the catalog has no `git` provider | Use an enabled provider (§9.2): `"llm": {"provider": "anthropic", …}` in UAT |
+| Register/PATCH: `422 AGENT_GATEWAY_CONFIG_REJECTED`, `meta.gatewayCode: provider_unknown` | A provider the deployment's gateway catalog does not enable: AgentOS's default `kong` where the catalog lacks it, or `github-app` for a GitHub source where the catalog has no `git` provider | Name an enabled provider (§9.2), e.g. `"llm": {"provider": "anthropic", …}` |
 | Register/PATCH: `401 AUTH_LYZR_KEY_REQUIRED` | `llm`, `guardrails` or `mcp` sent without your Lyzr key | Call with `x-api-key: <your Lyzr key>` (§8.1) |
 | Register/PATCH: `403 AUTH_PERMISSION_MISSING` on `mcp` | You lack `mcp:bind` | Ask for the permission, or leave `mcp` out |
 | Sandbox LLM call: `403 model_not_allowed` | The engine asked for a model other than the agent's `llm.config.model`, e.g. a GAP sub-agent that declares its own `model` | PATCH the agent's model, or remove the sub-agent's `model` |
@@ -654,17 +638,3 @@ failover, more than one guardrail policy, `failOpen: true`, `readOnlyTools`, and
 | Session start: `502 AGENT_BUILD_FAILED … 401 TOKEN_INVALID` | The token is not a valid sandbox token for this proxy, or it expired | CAS mints it; for a manual test, mint one at the proxy |
 | Session start: `502 AGENT_BUILD_FAILED … SettingsError: missing required settings: …` | The image lacks an egress route or the engine | Set them in the image's `.env` (§2) |
 | A pushed fix does not show up on MicroVM | MicroVM images are snapshots | `update-microvm-image` (§6.4) and move the agent's `version` pin |
-
-## Appendix: the UAT default sandboxes
-
-UAT CAS boots these when an agent names no image of its own (`LAMBDA_MICROVM_IMAGE_ARN` and
-`AGENTCORE_RUNTIME_ARN` on `computeragent-server`). They are built from
-`examples/sdk_default_lambda_microvm/` and `examples/sdk_default_agentcore/`, bake no egress route
-(CAS passes them per session), and are managed by Terraform in `lyzr-studio-infra`
-(`infrastructure/serverless/lambda-microvm/sdk-default.tf`, `infrastructure/ecr`). Account
-`425642439121`, `us-east-1`.
-
-| Runtime | Resource | Image |
-|---|---|---|
-| Lambda MicroVM | `arn:aws:lambda:us-east-1:425642439121:microvm-image:lyzr-studio-uat-computeragent-sdk-default`, version `2.0` | `computer-agent/sdk-default-lambda-microvm@sha256:1984285ebff6ea2c7cf816c5ebe39ded7f829963b121c4774dd2899d9868128c` |
-| AgentCore | `arn:aws:bedrock-agentcore:us-east-1:425642439121:runtime/lyzr_studio_uat_computeragent_sdk_default-wzY4Av5AO0`, version `2` (endpoint `DEFAULT`) | `computer-agent/sdk-default-agentcore@sha256:e24c8cdd7dd4277642a9c1b82e2622d6e5fb05f3c060cfa504f3afb14d655838` |
