@@ -547,6 +547,42 @@ With neither an agent image nor a server default, CAS answers `422 MICROVM_IMAGE
 | Streaming | `GET /v1/sessions/{id}/events` | the turn's events; one `ca_session_ended` when the session ends |
 | AgentCore | the same requests inside `POST /invocations` (relay envelope v1) | answers HTTP 200 always; the real status is in the envelope |
 
+### 8.7 Call it
+
+`POST /agentos/api/v1/agents/{id}/chat`, with the registry id from §8.2, runs one turn and streams
+the reply. It needs `agents:run`, read access to the agent (a share is enough) and your Lyzr
+workspace key as `x-api-key`.
+
+```bash
+# First turn: no sessionId starts a new session; -D - prints the headers
+curl -sS -N -D - --max-time 300 -X POST "$AGENTOS/agents/$AGENT_ID/chat" \
+  -H "x-api-key: $LYZR_KEY" -H 'content-type: application/json' \
+  -d '{"message": "hi"}'
+
+# Next turns: send the x-cas-session-id header of the first answer as sessionId
+SESSION_ID=agentos-6a99eca0b53aa307f117c79b-3f9a1c7e0b42
+curl -sS -N --max-time 300 -X POST "$AGENTOS/agents/$AGENT_ID/chat" \
+  -H "x-api-key: $LYZR_KEY" -H 'content-type: application/json' \
+  -d "{\"message\": \"Write a Python script that lists the files in the current directory, run it, and give me the output.\", \"sessionId\": \"$SESSION_ID\"}"
+```
+
+| Field | Meaning |
+|---|---|
+| `message` | required; a string, or a harness user message `{role, content}` |
+| `sessionId` | the session to continue; leave it out to start a new one |
+
+- The answer is `text/event-stream`: `event: <kind>` plus one `data:` line per frame, and
+  `:keepalive` comments while the agent is quiet. It ends with exactly one `ca_done` or `ca_error`.
+- The `X-CAS-Session-Id` response header names the session the turn ran on. Send it back as
+  `sessionId` to keep the conversation (and the sandbox's files) going.
+- `-N` prints frames as they arrive. A turn has no timeout of its own, so cap it on your side
+  (`--max-time`); closing the connection ends the turn.
+- Once the stream opens the status is `200`; a later failure is a `ca_error` frame (for example
+  `STREAM_UPSTREAM_LOST`). Before that, errors are JSON with a status.
+- One turn at a time per session: a second request while a turn runs is `409 SANDBOX_BUSY`.
+  `410 SANDBOX_GONE` or `404 SESSION_NOT_FOUND` means start a new session (leave out `sessionId`).
+- A sandbox lives at most 4 hours; after that the same `sessionId` gets a fresh sandbox.
+
 ## 9. Agent configuration reference
 
 ### 9.1 Registry fields (AgentOS)
