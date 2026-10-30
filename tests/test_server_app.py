@@ -112,22 +112,31 @@ async def test_session_egress_urls_yield_to_the_image(agent_doc, monkeypatch):
 
 @respx.mock
 @pytest.mark.parametrize(
-    ("image_engine", "expected"),
-    [(None, "gitagent"), ("claude-agent-sdk", None)],  # None: the image's own engine runs
+    ("session_engine", "image_engine", "expected"),
+    [
+        (" gitagent ", None, "gitagent"),
+        ("gitagent", "claude-agent-sdk", "gitagent"),  # CAS's engine wins over the image's
+        (None, "gitagent", "gitagent"),  # the image's is the fallback
+        (None, None, "claude-agent-sdk"),  # then the default
+    ],
 )
-async def test_session_engine_yields_to_the_image(agent_doc, monkeypatch, image_engine, expected):
+async def test_the_session_engine_comes_first(
+    agent_doc, monkeypatch, session_engine, image_engine, expected
+):
     if image_engine is None:
         monkeypatch.delenv("COMPUTER_AGENT_ENGINE", raising=False)
     else:
         monkeypatch.setenv("COMPUTER_AGENT_ENGINE", image_engine)
     mock_backends(agent_doc)
     calls: list = []
-    envs = {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_1", "COMPUTER_AGENT_ENGINE": " gitagent "}
+    envs = {"COMPUTER_AGENT_EGRESS_PROXY_SECRET": "sbt_1"}
+    if session_engine is not None:
+        envs["COMPUTER_AGENT_ENGINE"] = session_engine
     async with client_for(make_app(FakeEngine(), calls)) as client:
         r = await client.post("/v1/sessions", json=session_body(envs=envs))
 
     assert r.status_code == 201
-    assert calls[0].get("engine") == expected
+    assert calls[0]["engine"] == expected
 
 
 def test_the_default_factory_passes_no_api_key(monkeypatch):

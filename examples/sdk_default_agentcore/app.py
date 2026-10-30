@@ -6,9 +6,10 @@ On ``0.0.0.0:8080`` it serves AgentCore's contract
     GET  /ping         {"status": "Healthy" | "HealthyBusy", "time_of_last_update": <unix s>}
     POST /invocations  relay envelope v1, dispatched to the CAS harness API
 
-(``docs/USING_THE_SDK.md`` §14). Only the engine is baked into ``.env``. Old
-CAS passes the rest per session in the ``POST /v1/sessions`` ``envs`` it relays:
-``COMPUTER_AGENT_ID``, ``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` and the six
+(``docs/USING_THE_SDK.md`` §14). Nothing is baked into ``.env``. Old CAS passes
+the settings per session in the ``POST /v1/sessions`` ``envs`` it relays:
+``COMPUTER_AGENT_ID``, ``COMPUTER_AGENT_EGRESS_PROXY_SECRET``,
+``COMPUTER_AGENT_ENGINE`` (default ``claude-agent-sdk``) and the six
 ``COMPUTER_AGENT_EGRESS_*_URL`` routes.
 
 Run locally:

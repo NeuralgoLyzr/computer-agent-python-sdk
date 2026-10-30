@@ -2,13 +2,13 @@
 # installed from this checkout. Old CAS drives it through the harness API.
 #
 # Build from the repository root (MicroVMs are arm64), after creating the
-# app's settings file (the engine):
+# app's settings file (it may stay all comments):
 #   cp examples/sdk_default_lambda_microvm/.env.example examples/sdk_default_lambda_microvm/.env
 #   docker buildx build --platform linux/arm64 \
 #     -f examples/sdk_default_lambda_microvm/Dockerfile -t sdk-default-lambda-microvm .
 #
 # Nothing per session is baked in: old CAS passes the agent id, the sandbox
-# token and the egress routes in POST /v1/sessions envs.
+# token, the engine and the egress routes in POST /v1/sessions envs.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
