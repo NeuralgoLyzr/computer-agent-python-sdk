@@ -113,6 +113,7 @@ request is made. A URL setting must be an `http(s)` URL.
 | `telemetry_url` | `COMPUTER_AGENT_EGRESS_TELEMETRY_URL` | no | Route for OTLP traces, metrics and logs. Unset: no OTLP export. |
 | `session_store_url` | `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` | no | Base URL for the `http` session store (§7), e.g. `http://egress/computer-agent-api`; no query or fragment. |
 | `gap_dir` | `COMPUTER_AGENT_GAP_DIR` | no | Turns on GAP mode (§6). |
+| `guardrails_timeout_s` | `COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S` | no | Seconds each guardrails check may take, default `60`. Past it the check has no verdict: the tool is denied, the message blocked (§9). Must be a positive number. |
 
 The requests made from each route, all with `x-api-key: <api_key>`:
 
@@ -519,7 +520,7 @@ policy ids, so a policy change applies from the next check.
   gate without one is denied (`tool call has no id`).
 - **Tool names:** tool calls are presented as `<engine>__<tool>` (`claude-agent-sdk__Bash`,
   `gitagent__write`), and MCP tools as `mcp__<server>__<tool>` from either engine.
-- **No verdict** (unreachable, timed out after 5 s, non-2xx or a malformed answer): a tool is denied
+- **No verdict** (unreachable, timed out after `guardrails_timeout_s`, 60 s by default, non-2xx or a malformed answer): a tool is denied
   and an input is blocked. Fail-open is the gateway's decision; when it fails open it answers `allow`
   with `skipped: true`, which the SDK logs.
 - A **streamed** (async-iterable) message is read entry by entry and every entry is checked before

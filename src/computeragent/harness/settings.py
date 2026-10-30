@@ -14,12 +14,14 @@ value injected into a sandbox can be replaced without rebuilding the agent.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..policy.guardrails_client import GUARDRAILS_TIMEOUT_S
 from ..protocol_types import EngineDriver
 from .agentos_agent import AgentResolveError
 
@@ -35,6 +37,7 @@ ENV_VARS: dict[str, str] = {
     "telemetry_url": "COMPUTER_AGENT_EGRESS_TELEMETRY_URL",
     "session_store_url": "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL",
     "gap_dir": "COMPUTER_AGENT_GAP_DIR",
+    "guardrails_timeout_s": "COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S",
 }
 
 #: Egress routes: required, and each must be an http(s) URL.
@@ -83,6 +86,8 @@ class Settings:
     telemetry_url: str | None
     session_store_url: str | None
     gap_dir: str | Path | None
+    #: Seconds a guardrails check may take before it counts as no verdict.
+    guardrails_timeout_s: float
     _explicit_api_key: str | None
     _env: Mapping[str, str]
 
@@ -106,7 +111,8 @@ class Settings:
             f"guardrails_url={self.guardrails_url!r}, "
             f"telemetry_url={self.telemetry_url!r}, "
             f"session_store_url={self.session_store_url!r}, "
-            f"gap_dir={self.gap_dir!r}, api_key=<hidden>)"
+            f"gap_dir={self.gap_dir!r}, guardrails_timeout_s={self.guardrails_timeout_s!r}, "
+            "api_key=<hidden>)"
         )
 
 
@@ -122,6 +128,7 @@ def resolve_settings(
     telemetry_url: str | None,
     gap_dir: str | Path | None,
     session_store_url: str | None = None,
+    guardrails_timeout_s: float | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Settings:
     """Resolve each setting from its argument, else its environment variable.
@@ -173,6 +180,22 @@ def resolve_settings(
     ]
     if malformed:
         raise SettingsError("settings must be http(s) URLs: " + ", ".join(malformed))
+    raw_timeout: object = (
+        guardrails_timeout_s
+        if guardrails_timeout_s is not None
+        else _env(source, "guardrails_timeout_s")
+    )
+    timeout = GUARDRAILS_TIMEOUT_S
+    if raw_timeout is not None:
+        try:
+            timeout = float(raw_timeout)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            timeout = math.nan
+        if isinstance(raw_timeout, bool) or not (math.isfinite(timeout) and timeout > 0):
+            raise SettingsError(
+                f"{_spelling('guardrails_timeout_s')} must be a positive number of seconds, "
+                f"got {raw_timeout!r}"
+            )
     store_url = urls["session_store_url"]
     if store_url is not None:
         parts = urlsplit(str(store_url))
@@ -196,6 +219,7 @@ def resolve_settings(
         telemetry_url=_optional_url(urls["telemetry_url"]),
         session_store_url=_optional_url(urls["session_store_url"]),
         gap_dir=resolved_gap_dir,
+        guardrails_timeout_s=timeout,
         _explicit_api_key=explicit_key,
         _env=source,
     )

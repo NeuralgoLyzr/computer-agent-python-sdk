@@ -110,6 +110,9 @@ class HarnessCoordinator:
         agent_description: str | None = None,
         agent_id: str | None = None,
         policy_decider: PolicyDecider | None = None,
+        # The longest the policy decider's check may take (seconds); an engine
+        # that runs the decider under a deadline of its own allows more.
+        policy_timeout_s: float | None = None,
         on_permission_request: (
             Callable[[PermissionRequest], Awaitable[PermissionDecision]] | None
         ) = None,
@@ -153,6 +156,7 @@ class HarnessCoordinator:
         self._parent_session_id = parent_session_id
         self._parent_agent_id = parent_agent_id
         self._policy_decider = policy_decider
+        self._policy_timeout_s = policy_timeout_s
         self._on_permission_request_user = on_permission_request
         self._budget_max_usd = budget_max_usd
         self._pipeline = telemetry_pipeline or get_pipeline()
@@ -447,6 +451,7 @@ class HarnessCoordinator:
             cancel_event=state.cancel_event,
             session_store=self._session_store,
             policy_decider=self._policy_decider,
+            policy_timeout_s=self._policy_timeout_s,
             budget_max_usd=self._budget_max_usd,
             resume_session_id=self._engine_session_id,
         )

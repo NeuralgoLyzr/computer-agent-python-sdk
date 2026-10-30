@@ -261,6 +261,9 @@ class ComputerAgent:
         # call are checked at `{guardrails_url}/v1/check`; the agent gateway
         # applies the org's and the agent's policies.
         guardrails_url: str | None = None,
+        # Seconds a guardrails check may take; past it the check counts as no
+        # verdict, so the tool is denied or the message blocked. Default 60.
+        guardrails_timeout_s: float | None = None,
         # Optional egress route for telemetry: OTLP to `telemetry_url`. Unset
         # is off.
         telemetry_url: str | None = None,
@@ -298,6 +301,7 @@ class ComputerAgent:
             telemetry_url=telemetry_url,
             gap_dir=gap_dir,
             session_store_url=session_store_url,
+            guardrails_timeout_s=guardrails_timeout_s,
         )
         engine = self._settings.engine
         gap_dir = self._settings.gap_dir
@@ -411,6 +415,7 @@ class ComputerAgent:
             api_key=self._settings.api_key,
             engine_name=engine_name,
             mcp_server_names=list(mcp_servers),
+            timeout_s=self._settings.guardrails_timeout_s,
         )
         if policy_decider is None:
             policy_decider = PolicyToolAuthorizer(
@@ -430,6 +435,7 @@ class ComputerAgent:
             guardrails_url=self._settings.guardrails_url,
             api_key=self._settings.api_key,
             agent_name=policy_agent_name,
+            timeout_s=self._settings.guardrails_timeout_s,
         )
 
         # 7. Telemetry through its egress routes, unless the caller brought a
@@ -456,6 +462,7 @@ class ComputerAgent:
             agent_description=agent_description,
             agent_id=self.agent.agent_id,
             policy_decider=policy_decider,
+            policy_timeout_s=self._settings.guardrails_timeout_s,
             on_permission_request=on_tool_call,
             budget_max_usd=budget_max_usd,
             telemetry_pipeline=telemetry_pipeline,

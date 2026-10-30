@@ -150,6 +150,10 @@ class EngineContext:
     session_store: SessionStore | None = None
     policy_decider: PolicyDecider | None = None
     budget_max_usd: float | None = None
+    #: The longest one ``policy_decider`` call may take, in seconds, when the
+    #: harness knows it. An engine that runs the decider under a deadline of
+    #: its own must allow more, so the decider's timeout (a deny) decides.
+    policy_timeout_s: float | None = None
     #: The engine-side session id of the PREVIOUS turn, when there was one.
     #: An engine that can continue a conversation should resume from it; each
     #: turn otherwise starts a fresh engine session, and a multi-turn chat

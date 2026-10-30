@@ -60,6 +60,7 @@ def test_every_setting_has_an_env_var():
         "telemetry_url": "COMPUTER_AGENT_EGRESS_TELEMETRY_URL",
         "session_store_url": "COMPUTER_AGENT_EGRESS_SESSION_STORE_URL",
         "gap_dir": "COMPUTER_AGENT_GAP_DIR",
+        "guardrails_timeout_s": "COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S",
     }
 
 
@@ -117,6 +118,29 @@ def test_gap_dir_argument_wins(tmp_path):
     assert settings.gap_dir == tmp_path
 
 
+def test_the_guardrails_timeout_defaults_to_60_seconds():
+    assert resolve(FULL_ENV).guardrails_timeout_s == 60.0
+
+
+def test_the_guardrails_timeout_comes_from_its_env_var_and_the_argument_wins():
+    env = {**FULL_ENV, "COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S": " 12.5 "}
+
+    assert resolve(env).guardrails_timeout_s == 12.5
+    assert resolve(env, guardrails_timeout_s=3).guardrails_timeout_s == 3.0
+
+
+@pytest.mark.parametrize("value", ["abc", "0", "-1", "inf", "nan"])
+def test_a_bad_guardrails_timeout_env_var_is_refused(value):
+    with pytest.raises(SettingsError, match="COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S"):
+        resolve({**FULL_ENV, "COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S": value})
+
+
+@pytest.mark.parametrize("value", [0, -5.0, True])
+def test_a_bad_guardrails_timeout_argument_is_refused(value):
+    with pytest.raises(SettingsError, match="guardrails_timeout_s"):
+        resolve(FULL_ENV, guardrails_timeout_s=value)
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_a_blank_value_counts_as_unset(blank):
     settings = resolve({**FULL_ENV, "COMPUTER_AGENT_EGRESS_API_URL": blank}, base_url="http://arg")
@@ -132,7 +156,7 @@ def test_every_missing_setting_is_reported_at_once():
 
     message = str(exc.value)
     for name, var in ENV_VARS.items():
-        if name in ("gap_dir", "telemetry_url", "session_store_url"):
+        if name in ("gap_dir", "telemetry_url", "session_store_url", "guardrails_timeout_s"):
             assert name not in message
             continue
         assert f"{name} (or {var})" in message
