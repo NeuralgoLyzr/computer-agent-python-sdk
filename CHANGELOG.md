@@ -59,6 +59,15 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 
 ### Changed
 
+- **The guardrails timeout is a setting, and defaults to 60 s** (was a fixed
+  5 s). `ComputerAgent(guardrails_timeout_s=…)`, else
+  `COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S`, else 60; anything but a positive number
+  is a `SettingsError`. It bounds every check, the user's message and each tool
+  call. A policy with slow checks took over 5 s per message, and the check then
+  failed closed with `guardrails unreachable: ReadTimeout`. On
+  `claude-agent-sdk` the policy `PreToolUse` hook's budget is that timeout plus
+  30 s (the CLI's default is 60 s), so the check's own timeout still decides;
+  `EngineContext.policy_timeout_s` carries it to the engine.
 - **`session_id` keys the session store.** With `ComputerAgent(session_id=…,
   session_store=…)`, every `append` and `load` carries that id instead of the
   Claude CLI's per-process UUID (`project_key` and `subpath` are kept), and

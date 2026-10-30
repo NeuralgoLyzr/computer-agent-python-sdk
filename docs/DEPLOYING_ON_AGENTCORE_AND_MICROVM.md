@@ -74,6 +74,7 @@ variable. Every missing required setting is reported in one `SettingsError`.
 | `COMPUTER_AGENT_EGRESS_TELEMETRY_URL` | `telemetry_url` | no | CAS per session, or the image: `<proxy>/otlp` (needs the `otel` extra) |
 | `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` | `session_store_url` | no | CAS per session, or the image: `<proxy>/computer-agent-api` |
 | `COMPUTER_AGENT_GAP_DIR` | `gap_dir` | no | the image, when the agent is a GAP directory baked into it |
+| `COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S` | `guardrails_timeout_s` | no | the image, to change the 60 s a guardrails check may take before it counts as no verdict |
 
 `<proxy>` is the egress proxy's base URL, e.g. `https://egress.example.com`. CAS passes the six egress
 routes per session; an image that sets one in its own environment keeps it (and an agent factory's
