@@ -3,13 +3,13 @@
 # envelope v1).
 #
 # Build from the repository root (AgentCore runs linux/arm64 images), after
-# creating the app's settings file (the engine):
+# creating the app's settings file (it may stay all comments):
 #   cp examples/sdk_default_agentcore/.env.example examples/sdk_default_agentcore/.env
 #   docker buildx build --platform linux/arm64 \
 #     -f examples/sdk_default_agentcore/Dockerfile -t sdk-default-agentcore .
 #
 # Nothing per session is baked in: old CAS passes the agent id, the sandbox
-# token and the egress routes in the POST /v1/sessions envs it relays.
+# token, the engine and the egress routes in the POST /v1/sessions envs it relays.
 FROM --platform=linux/arm64 python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
