@@ -28,6 +28,11 @@ from ..protocol_types import (
 
 logger = logging.getLogger("computeragent.engines.claude_agent")
 
+#: Added to the policy check's timeout to form the CLI's budget for the policy
+#: PreToolUse hook (the CLI's own default is 60 s), so the check's timeout,
+#: which denies the tool, always fires first.
+POLICY_HOOK_MARGIN_S = 30.0
+
 #: Permission modes where the CLI never prompts, so `can_use_tool` is skipped
 #: and an `allowed_tools` allowlist is inert.
 _PROMPT_SKIPPING_MODES = frozenset({"bypassPermissions", "dontAsk", "auto", "acceptEdits"})
@@ -170,7 +175,7 @@ def _build_options(ctx: EngineContext) -> Any:
         if payload.get("permission_mode") in _PROMPT_SKIPPING_MODES:
             hooks = dict(payload.get("hooks") or {})
             pre = list(hooks.get("PreToolUse") or [])
-            pre.append(_policy_pretooluse_matcher(bound))
+            pre.append(_policy_pretooluse_matcher(bound, ctx.policy_timeout_s))
             hooks["PreToolUse"] = pre
             payload["hooks"] = hooks
 
@@ -211,7 +216,7 @@ async def _pin_engine_session(options: Any, ctx: EngineContext) -> None:
         options.session_id = cli_id
 
 
-def _policy_pretooluse_matcher(decider: Any) -> Any:
+def _policy_pretooluse_matcher(decider: Any, policy_timeout_s: float | None = None) -> Any:
     """Wrap the bound ``can_use_tool`` decider as a PreToolUse ``HookMatcher``.
 
     The hook receives the SDK's PreToolUse input (``tool_name`` /
@@ -244,7 +249,10 @@ def _policy_pretooluse_matcher(decider: Any) -> Any:
             return _hook_deny(str(message or "blocked by policy"))
         return {}
 
-    return HookMatcher(hooks=[_hook])
+    from ..policy.guardrails_client import GUARDRAILS_TIMEOUT_S
+
+    budget = (policy_timeout_s or GUARDRAILS_TIMEOUT_S) + POLICY_HOOK_MARGIN_S
+    return HookMatcher(hooks=[_hook], timeout=budget)
 
 
 def _permission_context(tool_use_id: str = "") -> Any:

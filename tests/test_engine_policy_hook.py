@@ -14,7 +14,9 @@ from computeragent.engines.claude_agent import (
 )
 
 
-def _ctx(options: dict[str, Any], policy_decider: Any = None) -> Any:
+def _ctx(
+    options: dict[str, Any], policy_decider: Any = None, policy_timeout_s: float | None = None
+) -> Any:
     return SimpleNamespace(
         manifest=SimpleNamespace(name="t-agent", options=options),
         workspace_path="/tmp/ws",
@@ -23,6 +25,7 @@ def _ctx(options: dict[str, Any], policy_decider: Any = None) -> Any:
         session_store=None,
         resume_session_id=None,
         policy_decider=policy_decider,
+        policy_timeout_s=policy_timeout_s,
     )
 
 
@@ -35,6 +38,17 @@ def test_hook_registered_under_bypass_permissions():
     hooks = options.hooks or {}
     assert len(hooks.get("PreToolUse") or []) == 1
     assert options.can_use_tool is not None
+
+
+@pytest.mark.parametrize(("policy_timeout_s", "budget"), [(None, 90.0), (120.0, 150.0)])
+def test_the_hook_budget_outlasts_the_policy_check(policy_timeout_s, budget):
+    # The CLI abandons a hook past its budget; the check's own timeout (a deny)
+    # must fire first, so the budget follows the configured check timeout.
+    options = _build_options(
+        _ctx({"permission_mode": "bypassPermissions"}, _allow_decider, policy_timeout_s)
+    )
+
+    assert options.hooks["PreToolUse"][0].timeout == budget
 
 
 def test_no_hook_in_default_mode():

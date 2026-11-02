@@ -27,8 +27,9 @@ logger = logging.getLogger("computeragent.policy.guardrails")
 #: The check route, relative to ``guardrails_url``.
 CHECK_PATH = "/v1/check"
 
-#: Per-call timeout for a guardrails check.
-GUARDRAILS_TIMEOUT_S = 5.0
+#: Per-call timeout for a guardrails check. A policy with slow checks (e.g. a
+#: banned-topics list) can take several seconds per call.
+GUARDRAILS_TIMEOUT_S = 60.0
 
 #: Namespace marker Anthropic-shaped engines use for MCP tools.
 MCP_PREFIX = "mcp__"

@@ -14,6 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ..policy.guardrails_client import GUARDRAILS_TIMEOUT_S
 from ..policy.srs_input import InputDecision, check_user_message
 
 logger = logging.getLogger("computeragent.harness.guardrails")
@@ -41,11 +42,13 @@ class SrsTurnGuard:
         guardrails_url: str,
         api_key: Callable[[], str],
         agent_name: str,
+        timeout_s: float = GUARDRAILS_TIMEOUT_S,
         client: Any | None = None,
     ) -> None:
         self._guardrails_url = guardrails_url
         self._api_key = api_key
         self._agent_name = agent_name
+        self._timeout_s = timeout_s
         self._client = client
 
     async def start_turn(self, message: Any, *, session_id: str) -> TurnStart:
@@ -54,6 +57,7 @@ class SrsTurnGuard:
             message,
             guardrails_url=self._guardrails_url,
             api_key=self._api_key(),
+            timeout_s=self._timeout_s,
             client=self._client,
         )
         telemetry: dict[str, Any] | None = None
