@@ -18,7 +18,7 @@ already run. It covers:
 10. [Troubleshooting](#10-troubleshooting).
 
 Working examples of everything below are in `examples/sdk_default_lambda_microvm/` and
-`examples/sdk_default_agentcore/`: default sandbox images that run any agent CAS hands them. The
+`examples/sdk_default_agentcore/`: default sandbox images. They bake no agent: each session runs the agent whose git source CAS sends (cloned at session start), with the agent document's model, MCP servers and guardrails. The
 settings reference is [`USING_THE_SDK.md`](USING_THE_SDK.md) §3.
 
 ## How the pieces fit
@@ -73,6 +73,7 @@ variable. Every missing required setting is reported in one `SettingsError`.
 | `COMPUTER_AGENT_EGRESS_GUARDRAILS_URL` | `guardrails_url` | yes | CAS per session, or the image: `<proxy>/guardrails` |
 | `COMPUTER_AGENT_EGRESS_TELEMETRY_URL` | `telemetry_url` | no | CAS per session, or the image: `<proxy>/otlp` (needs the `otel` extra) |
 | `COMPUTER_AGENT_EGRESS_SESSION_STORE_URL` | `session_store_url` | no | CAS per session, or the image: `<proxy>/computer-agent-api` |
+| `COMPUTER_AGENT_EGRESS_GIT_URL` | — (app server only) | no | CAS per session, or the image: `<proxy>/git/v1`. The session's git source is cloned through it with the sandbox token; unset, the source URL is cloned as received |
 | `COMPUTER_AGENT_GAP_DIR` | `gap_dir` | no | the image, when the agent is a GAP directory baked into it |
 | `COMPUTER_AGENT_GUARDRAILS_TIMEOUT_S` | `guardrails_timeout_s` | no | the image, to change the 60 s a guardrails check may take before it counts as no verdict |
 
@@ -543,7 +544,7 @@ With neither an agent image nor a server default, CAS answers `422 MICROVM_IMAGE
 | When | Request | What the app server does |
 |---|---|---|
 | Boot (MicroVM) | lifecycle hooks | answers `200` |
-| Session start | `POST /v1/sessions` with `envs.COMPUTER_AGENT_ID`, `envs.COMPUTER_AGENT_EGRESS_PROXY_SECRET`, the six `envs.COMPUTER_AGENT_EGRESS_*_URL` and optionally `envs.COMPUTER_AGENT_ENGINE` | builds the session's `ComputerAgent` for that agent, with that token, engine and routes. CAS's engine wins over the image's (default `claude-agent-sdk`); a route the image sets itself wins over CAS's. Every other `envs` key is ignored |
+| Session start | `POST /v1/sessions` with `envs.COMPUTER_AGENT_ID`, `envs.COMPUTER_AGENT_EGRESS_PROXY_SECRET`, the egress routes `envs.COMPUTER_AGENT_EGRESS_*_URL` (including the git route), optionally `envs.COMPUTER_AGENT_ENGINE`, and optionally a git `identity.source` | clones the git source (through the git route, with the token) and runs it in place of a baked-in agent; builds the session's `ComputerAgent` for that agent, with that token, engine and routes. CAS's engine wins over the image's (default `claude-agent-sdk`); a route the image sets itself wins over CAS's. Every other `envs` key is ignored |
 | Each turn | `POST /v1/sessions/{id}/messages` with `credential` | uses the fresh token for the turn |
 | Streaming | `GET /v1/sessions/{id}/events` | the turn's events; one `ca_session_ended` when the session ends |
 | AgentCore | the same requests inside `POST /invocations` (relay envelope v1) | answers HTTP 200 always; the real status is in the envelope |
@@ -674,4 +675,5 @@ failover, more than one guardrail policy, `failOpen: true`, `readOnlyTools`, and
 | `create-agent-runtime`: `ValidationException … Access denied while validating ECR URI` | The execution role cannot pull from the repository | Repository policy for the execution role (§7.1) before creating the runtime |
 | Session start: `502 AGENT_BUILD_FAILED … 401 TOKEN_INVALID` | The token is not a valid sandbox token for this proxy, or it expired | CAS mints it; for a manual test, mint one at the proxy |
 | Session start: `502 AGENT_BUILD_FAILED … SettingsError: missing required settings: …` | The image lacks an egress route or the engine | Set them in the image's `.env` (§2) |
+| Session start: `502 AGENT_SOURCE_FETCH_FAILED` | The session's git source could not be cloned: the URL, its access through the egress proxy and agent gateway, or `git` missing from the image | The detail carries git's last error line; check the repo and the gateway's `git` provider |
 | A pushed fix does not show up on MicroVM | MicroVM images are snapshots | `update-microvm-image` (§6.4) and move the agent's `version` pin |

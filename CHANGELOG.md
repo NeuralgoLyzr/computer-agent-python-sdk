@@ -12,6 +12,18 @@ Every call the SDK makes now matches a route the CAS egress proxy serves (plan
 
 ### Added
 
+- **A session's git source replaces the baked-in agent.** On `POST /v1/sessions`,
+  an `identity.source` of `{type: "git", url}` is cloned (`git clone --depth 1`)
+  into a per-session directory, removed with the session. With a git egress
+  route, `COMPUTER_AGENT_EGRESS_GIT_URL` (`<proxy>/git/v1`; from `envs` unless
+  the image sets it, like the other routes), the URL's host moves behind it,
+  `<route>/<host>/<owner>/<repo>.git`, and the sandbox token goes as HTTP Basic
+  auth (`x-access-token`); without one the URL is cloned as received. With an
+  `agent.yaml` the clone is the session's `gap_dir`, otherwise its `workspace`;
+  either way it wins over the image's `COMPUTER_AGENT_GAP_DIR`. Without a git
+  URL the baked-in agent runs. A failed clone is `502 AGENT_SOURCE_FETCH_FAILED`.
+  The example images install `git`. `ComputerAgent(workspace=…)` is new: the
+  engine's directory outside GAP mode, replacing an env-configured GAP agent.
 - **AgentCore on the app server.** The same process serves `GET /ping`
   (`Healthy` / `HealthyBusy`) and `POST /invocations` (relay envelope v1,
   dispatched in-process; streamed answers keep the `: ca-relay` head frame).

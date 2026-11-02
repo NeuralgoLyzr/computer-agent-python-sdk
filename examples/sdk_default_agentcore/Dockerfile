@@ -16,6 +16,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+# git clones a session's git source (identity.source) when CAS sends one.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # The SDK, from this checkout. With a published release, replace these three
 # lines with: RUN pip install 'computer-agent-py[agentos,server,gitagent,otel]'
 WORKDIR /opt/computer-agent-py
