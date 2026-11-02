@@ -66,7 +66,7 @@ variable. Every missing required setting is reported in one `SettingsError`.
 |---|---|---|---|
 | `COMPUTER_AGENT_ID` | `agent_id` | yes | CAS, per session (`POST /v1/sessions` `envs`) |
 | `COMPUTER_AGENT_EGRESS_PROXY_SECRET` | `api_key` | yes | CAS, per session and per message. **Never bake it into an image.** |
-| `COMPUTER_AGENT_ENGINE` | `engine` | yes | the image (`claude-agent-sdk` or `gitagent`) |
+| `COMPUTER_AGENT_ENGINE` | `engine` | yes, outside the app server | CAS per session (`claude-agent-sdk` or `gitagent`). It wins over the image's own value, which is only the fallback; with neither, the app server runs `claude-agent-sdk` |
 | `COMPUTER_AGENT_EGRESS_API_URL` | `base_url` | yes | CAS per session, or the image: `<proxy>/computer-agent-api/agentos/api` |
 | `COMPUTER_AGENT_EGRESS_LLM_URL` | `llm_url` | yes | CAS per session, or the image: `<proxy>/llm` |
 | `COMPUTER_AGENT_EGRESS_MCP_URL` | `mcp_url` | yes | CAS per session, or the image: `<proxy>/mcp/v1` |
@@ -151,7 +151,7 @@ The full route list is in `USING_THE_SDK.md` §14.
 ### 4.1 Start from an example
 
 ```bash
-cp examples/sdk_default_lambda_microvm/.env.example examples/sdk_default_lambda_microvm/.env   # the engine
+cp examples/sdk_default_lambda_microvm/.env.example examples/sdk_default_lambda_microvm/.env   # all optional
 docker buildx build --platform linux/arm64 \
   -f examples/sdk_default_lambda_microvm/Dockerfile -t my-agent-sandbox .  # from the repository root
 ```
@@ -194,8 +194,8 @@ Rules every image must follow:
 - **`linux/arm64`.** Both runtimes run on Graviton.
 - **Port 8080**, the only port the platforms talk to.
 - **A non-root user.**
-- **No secrets and no per-session values.** The image's settings are the egress routes and the
-  engine. `COMPUTER_AGENT_ID` and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` arrive per session. The app
+- **No secrets and no per-session values.** The image's settings are at most the egress routes and
+  a fallback engine. `COMPUTER_AGENT_ID` and `COMPUTER_AGENT_EGRESS_PROXY_SECRET` arrive per session. The app
   server must boot without them: a MicroVM image build runs the container to take its snapshot,
   with no session.
 - **A single-platform image with Docker v2 media types.** The MicroVM build service cannot resolve
@@ -542,7 +542,7 @@ With neither an agent image nor a server default, CAS answers `422 MICROVM_IMAGE
 | When | Request | What the app server does |
 |---|---|---|
 | Boot (MicroVM) | lifecycle hooks | answers `200` |
-| Session start | `POST /v1/sessions` with `envs.COMPUTER_AGENT_ID`, `envs.COMPUTER_AGENT_EGRESS_PROXY_SECRET` and the six `envs.COMPUTER_AGENT_EGRESS_*_URL` | builds the session's `ComputerAgent` for that agent, with that token, on those routes (an egress route the image sets itself wins); every other `envs` key is ignored |
+| Session start | `POST /v1/sessions` with `envs.COMPUTER_AGENT_ID`, `envs.COMPUTER_AGENT_EGRESS_PROXY_SECRET`, the six `envs.COMPUTER_AGENT_EGRESS_*_URL` and optionally `envs.COMPUTER_AGENT_ENGINE` | builds the session's `ComputerAgent` for that agent, with that token, engine and routes. CAS's engine wins over the image's (default `claude-agent-sdk`); a route the image sets itself wins over CAS's. Every other `envs` key is ignored |
 | Each turn | `POST /v1/sessions/{id}/messages` with `credential` | uses the fresh token for the turn |
 | Streaming | `GET /v1/sessions/{id}/events` | the turn's events; one `ca_session_ended` when the session ends |
 | AgentCore | the same requests inside `POST /invocations` (relay envelope v1) | answers HTTP 200 always; the real status is in the envelope |

@@ -7,10 +7,11 @@ On ``0.0.0.0:8080`` it serves
     GET  /v1/health
     POST /v1/sessions, POST /v1/sessions/{id}/messages, GET /v1/sessions/{id}/events, ...
 
-(the CAS harness API; ``docs/USING_THE_SDK.md`` §14). Only the engine is baked
-into ``.env``. Old CAS passes the rest per session in ``POST /v1/sessions``
-``envs``: ``COMPUTER_AGENT_ID``, ``COMPUTER_AGENT_EGRESS_PROXY_SECRET`` and the
-six ``COMPUTER_AGENT_EGRESS_*_URL`` routes.
+(the CAS harness API; ``docs/USING_THE_SDK.md`` §14). Nothing is baked into
+``.env``. Old CAS passes the settings per session in ``POST /v1/sessions``
+``envs``: ``COMPUTER_AGENT_ID``, ``COMPUTER_AGENT_EGRESS_PROXY_SECRET``,
+``COMPUTER_AGENT_ENGINE`` (default ``claude-agent-sdk``) and the six
+``COMPUTER_AGENT_EGRESS_*_URL`` routes.
 
 Run locally:
 

@@ -708,10 +708,15 @@ and the server builds one `ComputerAgent` for it, with no `api_key=`:
 - `envs` in `POST /v1/sessions` carries the sandbox token as `COMPUTER_AGENT_EGRESS_PROXY_SECRET`,
   which seeds that variable, and the session's agent as `COMPUTER_AGENT_ID` (else the image's own
   `COMPUTER_AGENT_ID`).
+- `envs` may also carry the engine, `COMPUTER_AGENT_ENGINE`. It wins over the image's own
+  `COMPUTER_AGENT_ENGINE`, which is only the fallback; with neither, the session runs
+  `claude-agent-sdk`. The request's `engine` field is only checked against the registered engines.
 - `envs` may also carry the six egress routes, `COMPUTER_AGENT_EGRESS_{API,LLM,MCP,GUARDRAILS,
   SESSION_STORE,TELEMETRY}_URL`. Each is used only when the image's own environment does not set
-  it, so an image can pin a route; an agent factory's arguments (`create_app(agent_factory=…)`) win
-  over both. Every other `envs` key is ignored.
+  it, so an image can pin a route.
+- An agent factory's arguments (`create_app(agent_factory=…)`) win over all of these. The factory
+  receives `engine` (always) and the session's routes as keyword arguments; to pin its own, merge
+  them in last (`ComputerAgent(**{**kwargs, "engine": …})`). Every other `envs` key is ignored.
 - Each `POST /v1/sessions/:id/messages` may carry the turn's `credential`; it replaces
   `COMPUTER_AGENT_EGRESS_PROXY_SECRET` before the turn. The key is process-wide, so turns run one
   at a time per process.
