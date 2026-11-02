@@ -27,7 +27,15 @@ not set it. An agent factory's own arguments win over all of these. Every
 other ``envs`` key is ignored. Each message's
 ``credential`` replaces the token before its turn. The token is process-wide,
 so turns run one at a time per process.
-``engine`` is checked against the registered engines; ``identity`` is not read.
+``engine`` is checked against the registered engines. ``identity.source``, when
+it is ``{type: "git", url}``, is cloned (``git clone --depth 1``) and replaces
+the image's baked-in agent: its ``agent.yaml`` makes it the GAP directory, else
+it is the workspace. With a git egress route (``COMPUTER_AGENT_EGRESS_GIT_URL``,
+from ``envs`` unless the image sets it, like the other routes) the URL's host
+moves behind it, ``<git route>/<host>/<owner>/<repo>.git``, and the sandbox
+token goes with the clone as HTTP Basic auth; without one the URL is cloned as
+is. Without a git source the baked-in agent runs. A failed clone fails the
+session (502 ``AGENT_SOURCE_FETCH_FAILED``). Other sources are ignored.
 ``messages`` are the session's first turns and ``streamingInput: false`` closes
 its input after them, as in the reference. Resume across sandboxes is the
 session store's (``sessionStore``, keyed by ``sessionId``).
@@ -38,10 +46,13 @@ Nothing here logs ``envs``, a ``credential``, a request header or a body.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -49,6 +60,7 @@ from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -94,8 +106,92 @@ SESSION_URL_SETTINGS = (
     "session_store_url",
 )
 
+#: The git egress route (``<proxy>/git/v1``), like the other routes: from the
+#: session's ``envs`` unless the image's environment sets it.
+GIT_URL_ENV = "COMPUTER_AGENT_EGRESS_GIT_URL"
+#: The user the egress proxy expects beside the sandbox token on its git route.
+GIT_EGRESS_USER = "x-access-token"
+#: Where a session's git source is cloned: ``<root>/<sessionId>``.
+SOURCES_ROOT = Path(tempfile.gettempdir()) / "computeragent-sources"
+#: The longest a clone may take.
+CLONE_TIMEOUT_S = 300.0
+#: ``user:password@`` in a URL, so a git error never echoes a credential.
+_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
+
 #: Builds a session's agent: (session_id, options, session_store, on_tool_call) → ComputerAgent.
 AgentFactory = Callable[..., Any]
+
+
+class SourceFetchError(Exception):
+    """The session's git source could not be cloned."""
+
+
+def git_source_url(identity: dict[str, Any]) -> str | None:
+    """The session's git URL: ``identity.source.url`` of a ``git`` source, else None."""
+    source = identity.get("source")
+    if not isinstance(source, dict) or source.get("type") != "git":
+        return None
+    url = source.get("url")
+    return url.strip() if isinstance(url, str) and url.strip() else None
+
+
+def _with_scheme(url: str) -> str:
+    """``github.com/acme/app`` as ``https://github.com/acme/app``; URLs with a
+    scheme, scp-style ``git@host:path`` and paths are kept."""
+    if "://" in url or url.startswith(("/", ".", "git@")):
+        return url
+    return f"https://{url}"
+
+
+def egress_git_url(source_url: str, git_url: str) -> str:
+    """The source behind the git egress route: ``<git_url>/<host>/<owner>/<repo>.git``."""
+    parts = urlsplit(_with_scheme(source_url))
+    path = parts.path.strip("/")
+    if not parts.hostname or "/" not in path:
+        raise SourceFetchError("the git source is not a <host>/<owner>/<repo> URL")
+    if not path.endswith(".git"):
+        path += ".git"
+    return f"{git_url.rstrip('/')}/{parts.hostname}/{path}"
+
+
+async def clone_source(url: str, dest: Path, *, token: str | None = None) -> None:
+    """``git clone --depth 1 <url> <dest>``, replacing ``dest``. Never prompts.
+
+    ``token`` goes as HTTP Basic auth (``x-access-token:<token>``) through git's
+    environment, never on the command line or in the URL."""
+    await asyncio.to_thread(shutil.rmtree, dest, True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    if token:
+        basic = base64.b64encode(f"{GIT_EGRESS_USER}:{token}".encode()).decode()
+        env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="http.extraHeader",
+            GIT_CONFIG_VALUE_0=f"Authorization: Basic {basic}",
+        )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--quiet", "--", url, str(dest),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )  # fmt: skip
+    except FileNotFoundError:
+        raise SourceFetchError("git is not installed in this image") from None
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), CLONE_TIMEOUT_S)
+    except asyncio.TimeoutError:  # the builtin TimeoutError only from Python 3.11
+        proc.kill()
+        await proc.wait()
+        await asyncio.to_thread(shutil.rmtree, dest, True)
+        raise SourceFetchError(f"git clone timed out after {CLONE_TIMEOUT_S:g} s") from None
+    if proc.returncode != 0:
+        await asyncio.to_thread(shutil.rmtree, dest, True)
+        tail = stderr.decode(errors="replace").strip().splitlines()[-1:] or [""]
+        raise SourceFetchError(
+            f"git clone failed (exit {proc.returncode}): {_URL_USERINFO.sub('***@', tail[0])}"
+        )
 
 
 def _sdk_version() -> str:
@@ -173,6 +269,8 @@ class ServerSession:
     turn_index: int = 0
     blocked: bool = False
     cancelled: bool = False
+    #: The session's clone of its git source, removed with the session.
+    source_dir: Path | None = None
 
     async def emit(self, event: dict[str, Any]) -> None:
         await self.log.emit({**event, "sessionId": self.session_id})
@@ -345,6 +443,8 @@ class ServerSession:
     async def dispose(self) -> None:
         with contextlib.suppress(Exception):
             await self.agent.dispose()
+        if self.source_dir is not None:
+            await asyncio.to_thread(shutil.rmtree, self.source_dir, True)
 
 
 class _Observer:
@@ -463,6 +563,28 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
         if old is not None:
             await old.cancel()
             await old.dispose()
+        # The session's git source replaces the baked-in agent.
+        source_dir: Path | None = None
+        source_url = git_source_url(body["identity"])
+        if source_url is not None:
+            source_dir = SOURCES_ROOT / sid
+            git_url = os.environ.get(GIT_URL_ENV, "").strip() or envs.get(GIT_URL_ENV, "").strip()
+            logger.info(
+                "session %s: cloning its git source%s", sid, " via the egress" if git_url else ""
+            )
+            try:
+                if git_url:
+                    if not git_url.startswith(("http://", "https://")):
+                        raise SourceFetchError(f"{GIT_URL_ENV} must be an http(s) URL")
+                    clone_url = egress_git_url(source_url, git_url)
+                    await clone_source(clone_url, source_dir, token=os.environ.get(TOKEN_ENV))
+                else:
+                    await clone_source(_with_scheme(source_url), source_dir)
+            except SourceFetchError as exc:
+                logger.warning("session %s: %s", sid, exc)
+                return error(502, "AGENT_SOURCE_FETCH_FAILED", str(exc))
+            key = "gap_dir" if (source_dir / "agent.yaml").is_file() else "workspace"
+            agent_kwargs[key] = source_dir
 
         holder: dict[str, ServerSession] = {}
 
@@ -482,6 +604,8 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
             from ..harness import AgentResolveError
 
             logger.warning("session %s: agent build failed (%s)", sid, type(exc).__name__)
+            if source_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, source_dir, True)
             status = 502 if isinstance(exc, AgentResolveError) else 500
             return error(status, "AGENT_BUILD_FAILED", f"{type(exc).__name__}: {exc}"[:2000])
         engine = engines[body["engine"]]
@@ -494,6 +618,7 @@ def create_app(*, agent_factory: AgentFactory | None = None) -> Starlette:
             capabilities=_capabilities(engine),
             turn_lock=turn_lock,
             busy=busy,
+            source_dir=source_dir,
         )
         holder["session"] = session
         agent.telemetry_pipeline.add_middleware(observer)

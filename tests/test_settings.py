@@ -13,7 +13,7 @@ import httpx
 import pytest
 import respx
 
-from computeragent.harness import ComputerAgent
+from computeragent.harness import AgentResolveError, ComputerAgent
 from computeragent.harness.settings import ENV_VARS, SettingsError, resolve_settings
 
 AGENT_ID = "6aa93f1b3817a13d3103d2c1"
@@ -221,6 +221,30 @@ def test_computeragent_gap_dir_from_env(agent_doc, monkeypatch, tmp_path):
     agent = ComputerAgent()
 
     assert agent._coordinator._source == Path(tmp_path)  # type: ignore[attr-defined]
+
+
+@respx.mock
+def test_computeragent_workspace_replaces_the_env_gap_dir(agent_doc, monkeypatch, tmp_path):
+    baked = tmp_path / "baked"
+    baked.mkdir()
+    (baked / "agent.yaml").write_text("name: baked\n", encoding="utf-8")
+    for name, value in FULL_ENV.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("COMPUTER_AGENT_GAP_DIR", str(baked))
+    respx.get(URL).mock(return_value=httpx.Response(200, json=agent_doc))
+
+    agent = ComputerAgent(workspace=tmp_path)
+
+    assert agent.workspace == tmp_path
+    assert agent._coordinator._source == tmp_path  # type: ignore[attr-defined]
+
+
+def test_computeragent_refuses_both_gap_dir_and_workspace(monkeypatch, tmp_path):
+    for name, value in FULL_ENV.items():
+        monkeypatch.setenv(name, value)
+
+    with pytest.raises(AgentResolveError, match="gap_dir or workspace"):
+        ComputerAgent(gap_dir=tmp_path, workspace=tmp_path)
 
 
 def test_computeragent_reports_missing_settings_before_any_request():

@@ -146,6 +146,7 @@ All parameters are **keyword-only**. The settings in §3 are not repeated here.
 | Parameter | Type | Default | Notes |
 |---|---|---|---|
 | `options` | `Mapping[str, Any] \| None` | `None` | Engine options; merged over what the agent resolves, caller wins (§5). |
+| `workspace` | `str \| Path \| None` | the working directory | The directory the engine runs in outside GAP mode. Given, `COMPUTER_AGENT_GAP_DIR` is not read, so it replaces a baked-in GAP agent; with `gap_dir=` too it is refused. |
 | `envs` | `Mapping[str, str] \| None` | `None` | Extra environment for the engine subprocess. The model-route envs are layered **over** yours. |
 | `session_store` | `str \| SessionStore \| Mapping \| None` | `None` | `"memory"`, a descriptor `{"kind": ..., "options": {...}}`, or a store instance (§7). |
 | `session_id` | `str \| None` | generated `ca_…` | Pins the **telemetry** lifecycle session id. |
@@ -292,13 +293,13 @@ You do **not** pass any of these — `GET {base_url}/v1/agents/{id}` answers the
 | `mcp.servers` | the MCP servers attached to the engine (below) |
 
 `guardrails` is **not** read: the agent gateway applies it (§9). The document's `source` is not used
-(the agent is baked into the image), and every model call goes to `llm_url`. A document without the
+(the app server clones the session's source instead, §14), and every model call goes to `llm_url`. A document without the
 `llm` and `mcp` sections resolves with no model and no MCP servers; the older fields (`model`,
 `model_gateway`, `mcp_servers`, `mcp_mode`, `rai_policy_id`) are not read.
 
 ### Where the agent comes from
 
-The agent is baked into the image; nothing is cloned or fetched. Its definition is read once, at
+The SDK itself clones nothing: the agent is in `gap_dir`, in `workspace`, or defined by your `options`. Its definition is read once, at
 construction, from `GET {base_url}/v1/agents/{agent_id}`; behind the egress proxy that is
 `GET http://egress/computer-agent-api/agentos/api/v1/agents/{agent_id}`.
 
@@ -721,8 +722,18 @@ and the server builds one `ComputerAgent` for it, with no `api_key=`:
 - Each `POST /v1/sessions/:id/messages` may carry the turn's `credential`; it replaces
   `COMPUTER_AGENT_EGRESS_PROXY_SECRET` before the turn. The key is process-wide, so turns run one
   at a time per process.
-- `identity` is not read (the agent is baked into the image). `engine` must be a registered engine;
-  the image's own engine runs.
+- `identity.source`, when it is `{"type": "git", "url": …}`, is cloned with `git clone --depth 1`
+  before the agent is built. With a git egress route, `COMPUTER_AGENT_EGRESS_GIT_URL`
+  (`<proxy>/git/v1`, from `envs` unless the image sets it, like the other routes), the URL's host
+  moves behind the route: `github.com/acme/app` is cloned from
+  `<proxy>/git/v1/github.com/acme/app.git`, with the sandbox token as HTTP Basic auth
+  (`x-access-token:<token>`, through git's environment, never in the URL or on the command line).
+  Without the route the URL is cloned as received (`https://` is added to a bare `host/owner/repo`).
+  The clone **replaces the image's baked-in agent**: with an `agent.yaml` it is the session's
+  `gap_dir`, otherwise its `workspace`. It is removed with the session. A failed clone fails the
+  session with `502 AGENT_SOURCE_FETCH_FAILED` rather than run the baked-in agent. Without a git
+  URL (no source, or a `local` / `inline` one) the baked-in agent runs. The image needs `git`.
+- `engine` must be a registered engine.
 - `messages` are the session's first turns, and `streamingInput: false` closes its input after
   them. The session's agent is built with `session_id = sessionId`, so the `http` session store
   (`sessionStore`, §7) is keyed by the CAS session: any sandbox serving that session resumes its

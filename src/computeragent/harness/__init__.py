@@ -17,10 +17,12 @@ server's own dispatch path would have sent to a ComputerAgent server — same
 model, same engine environment, same permission mode — except the engine runs in
 this process instead of in a sandbox.
 
-The agent itself is baked into the image: nothing is cloned. The engine runs in
-the process's working directory (``options={"cwd": ...}`` overrides it), and the
-agent is defined by the caller's ``options``. With ``gap_dir`` set, the SDK runs
-in GAP mode instead and loads the agent from that directory's ``agent.yaml``.
+The SDK clones nothing itself. The engine runs in the process's working
+directory, or in ``workspace`` when given (``options={"cwd": ...}`` overrides
+either), and the agent is defined by the caller's ``options``. With ``gap_dir``
+set, the SDK runs in GAP mode instead and loads the agent from that directory's
+``agent.yaml``. The app server clones a session's git source and passes it as
+``gap_dir`` or ``workspace`` (``computeragent.server``).
 
 Every model call goes to ``llm_url``, the egress route for model traffic.
 Everything beyond the required arguments is an override for something the agent
@@ -210,6 +212,14 @@ def _validate_gap_dir(gap_dir: str | Path) -> Path:
     return gap_dir
 
 
+def _validate_workspace(workspace: str | Path) -> Path:
+    """Resolve ``workspace`` to an existing directory, or refuse it naming why."""
+    path = Path(workspace)
+    if not path.is_dir():
+        raise AgentResolveError(f"workspace is not a directory: {path}")
+    return path
+
+
 def _refuse_direct_mcp_servers(gap_dir: Path) -> None:
     """Refuse agent.yaml MCP servers that name their own URL.
 
@@ -274,6 +284,10 @@ class ComputerAgent:
         # GAP mode: load the agent from this directory's agent.yaml (baked
         # into the image). Unset, the agent is the caller's `options`.
         gap_dir: str | Path | None = None,
+        # The directory the engine runs in outside GAP mode (default: the
+        # process's working directory). Given, COMPUTER_AGENT_GAP_DIR is not
+        # read: this directory replaces a baked-in GAP agent.
+        workspace: str | Path | None = None,
         # ── overrides for what the agent document already answers ────────
         # Merged over whatever the identity loader resolves — caller wins.
         options: Mapping[str, Any] | None = None,
@@ -304,7 +318,10 @@ class ComputerAgent:
             guardrails_timeout_s=guardrails_timeout_s,
         )
         engine = self._settings.engine
-        gap_dir = self._settings.gap_dir
+        if workspace is not None and gap_dir is not None:
+            raise AgentResolveError("pass gap_dir or workspace, not both")
+        # An explicit workspace replaces a baked-in GAP agent.
+        gap_dir = None if workspace is not None else self._settings.gap_dir
         # Every request to these origins is stamped with the newest sandbox
         # token, and every answer observed for a reissue.
         CREDENTIAL.configure(
@@ -356,12 +373,15 @@ class ComputerAgent:
         if budget_max_usd is not None:
             merged_options.setdefault("max_budget_usd", budget_max_usd)
 
-        # 4. What the agent runs against. The agent is baked into the image:
-        #    GAP mode reads it from `gap_dir`, otherwise the engine runs in the
-        #    process's working directory with the caller's options.
+        # 4. What the agent runs against: an explicit `workspace` (no GAP);
+        #    else GAP mode from `gap_dir` (argument or COMPUTER_AGENT_GAP_DIR);
+        #    else the process's working directory with the caller's options.
         from ..identity import resolve_identity_loader
 
-        if gap_dir is not None:
+        if workspace is not None:
+            workspace = _validate_workspace(workspace)
+            identity_loader = resolve_identity_loader("passthrough")
+        elif gap_dir is not None:
             workspace = _validate_gap_dir(gap_dir)
             _refuse_direct_mcp_servers(workspace)
             identity_loader = resolve_identity_loader("gap")
